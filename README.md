@@ -1,4 +1,4 @@
-# agent_lab_4_puzzles
+# agents_4_puzzles
 
 This repository is a template for solving **Kaggle CayleyPy**-style puzzle competitions using:
 
