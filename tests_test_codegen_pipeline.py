@@ -158,9 +158,18 @@ def test_print_generation_preview_respects_env(monkeypatch, capsys):
     monkeypatch.setenv('AGENTLAB_PRINT_GENERATION', '1')
     monkeypatch.setenv('AGENTLAB_PRINT_GENERATION_MAX_CHARS', '12')
     rpp._print_generation_preview('coder', 'g4f:gpt-4', '1234567890abcdef')
-    out = capsys.readouterr().out
-    assert '[generation:coder]' in out
-    assert '1234567890ab' in out
+    captured = capsys.readouterr()
+    merged = captured.out + captured.err
+    assert '[generation:coder]' in merged
+    assert '123456' in merged
+    assert 'abcdef' in merged
+
+
+
+def test_log_status_prefers_tqdm_stream(monkeypatch, capsys):
+    rpp.log_status('hello generation log')
+    captured = capsys.readouterr()
+    assert 'hello generation log' in captured.err
 
 
 
