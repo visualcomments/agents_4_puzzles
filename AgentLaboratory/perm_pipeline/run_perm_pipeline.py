@@ -860,8 +860,8 @@ def _print_generation_preview(stage_label: str, model: str, text: str) -> None:
         return
     max_chars = _env_int("AGENTLAB_PRINT_GENERATION_MAX_CHARS", 16000)
     body = text or ""
-    if max_chars > 0:
-        body = _clip_middle(body, max_chars)
+    if max_chars > 0 and len(body) > max_chars:
+        body = body[:max_chars] + "\n...<trimmed>..."
     log_status(f"[generation:{stage_label}] model={model}\n{body}")
 
 
@@ -1017,27 +1017,12 @@ if __name__ == \"__main__\":
 """
 
 
-def _progress_log_stream(*, error: bool = False):
-    if tqdm is not None:
-        return sys.stderr
-    return sys.stderr if error else sys.stdout
-
-
-
 def log_status(message: str, *, error: bool = False) -> None:
-    stream = _progress_log_stream(error=error)
-    if tqdm is not None and hasattr(tqdm, "external_write_mode"):
-        with tqdm.external_write_mode(file=stream):
-            print(message, file=stream, flush=True)
-        return
+    stream = sys.stderr if error else sys.stdout
     if tqdm is not None:
         tqdm.write(message, file=stream)
-        try:
-            stream.flush()
-        except Exception:
-            pass
-        return
-    print(message, file=stream, flush=True)
+    else:
+        print(message, file=stream)
 
 
 

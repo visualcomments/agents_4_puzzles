@@ -1,46 +1,40 @@
-We are solving the CayleyPy RapaportM2 Kaggle competition (1959 mystery):
-https://www.kaggle.com/competitions/cayleypy-rapapport-m2
+We are solving the CayleyPy RapaportM2 Kaggle competition.
+Reference: https://www.kaggle.com/competitions/cayleypy-rapapport-m2
 
 TASK
-Write a Python module solve_module.py that implements a *constructive* algorithm to sort a permutation using ONLY the following operations (moves):
+Write solve_module.py that sorts a permutation using ONLY the legal moves I, S, K.
 
-- I: swap the elements at positions 0 and 1.
-- S: swap (0,1), (2,3), (4,5), ... simultaneously.
-- K: swap (1,2), (3,4), (5,6), ... simultaneously.
+LEGAL MOVES
+- I: swap positions 0 and 1
+- S: swap (0,1), (2,3), (4,5), ... simultaneously
+- K: swap (1,2), (3,4), (5,6), ... simultaneously
 
 INPUT / OUTPUT CONTRACT
-- The function signature must be: solve(vec) -> (moves, sorted_array)
-- vec is a Python list of ints.
-- moves must be a list of strings, each one in {"I","S","K"}.
-- sorted_array must be the final array after applying the moves.
-- When executed as a script: python solve_module.py "[3,0,1,4,2]"
-  it must print JSON: {"moves": [...], "sorted_array": [...]}
+- Implement solve(vec) -> (moves, sorted_array)
+- moves must be list[str] with every token in {"I","S","K"}, or the string "UNSOLVED"
+- sorted_array must be the final array after applying the moves
+- Script mode must print JSON: {"moves": ..., "sorted_array": ...}
 
-GOAL
-After applying all moves to vec, the array must be sorted in nondecreasing order.
+ALGORITHM REQUIREMENTS
+- Polynomial time only.
+- No BFS / DFS / A* / exhaustive search.
+- No built-in sorting for the core algorithm.
+- Do not emit any move letters other than I, S, K.
 
-STRICT OPERATIONAL CONSTRAINTS
-- You may NOT call built-in sorting (sorted(), list.sort()) or use slicing tricks to reorder.
-- You may NOT use BFS/DFS/A*/search or shortest-path algorithms.
-- You must produce a polynomial-time constructive algorithm.
-- You may create a COPY of vec to work in-place on it.
+RECOMMENDED IMPLEMENTATION ORDER
+1. If bundled test.csv + sample_submission.csv exist, you may first build an exact lookup baseline:
+       permutation string -> valid path
+   Return that exact path for exact matches.
+2. Otherwise implement the constructive cycle-order algorithm:
+   - Let C = S then K.
+   - The index order of C is the cycle [0,2,4,...,largest even, largest odd,...,3,1].
+   - Using conjugation, swap(cycle[j-1], cycle[j]) = P + [I] + reverse(P), where P = C^{-j} and C^{-1} = K then S.
+   - Perform insertion sort along this cycle order.
+3. This gives a fully constructive polynomial-time solver.
 
-HINT / CONSTRUCTIVE IDEA (YOU MAY USE THIS)
-Let C = (apply S, then apply K), i.e. the composite permutation "SK" acting on indices.
-C is an n-cycle whose index order is:
-  cycle = [0,2,4,6,..., (largest even), (largest odd), ..., 5,3,1]
-(i.e. evens increasing, then odds decreasing).
-
-Using conjugation you can swap any adjacent pair in that cycle order:
-  swap(cycle[j-1], cycle[j]) = P * I * P^{-1}
-where P = C^{-j}.
-Because I,S,K are involutions, P^{-1} is simply reverse(P).
-Also C^{-1} can be written as the move pair "K","S".
-
-Then you can insertion-sort the array along this cycle order:
-for j=0..n-1:
-  place the correct target value into index cycle[j] using repeated adjacent swaps (cycle[k-1],cycle[k]) for k>j.
-This is O(n^3) moves and is valid.
-
-REQUIRED
-Return the full python file in one ```python ...``` block.
+IMPLEMENTATION DETAILS
+- Work on a copy of vec.
+- Implement apply_I / apply_S / apply_K in place.
+- Verify that sorted_array is exactly the result of the returned moves.
+- Return exactly one complete Python file inside one ```python``` block.
+- Do not add explanations outside the code block.
