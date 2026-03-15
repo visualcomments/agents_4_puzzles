@@ -1220,18 +1220,44 @@ def _extract_state(row: Dict[str, str], spec: PipelineSpec, vector_col_override:
     )
 
 
+def _solver_validation_timeout_s() -> float:
+    raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 20.0
+
+
 def _validate_solver(solver_path: Path, validator_path: Path, smoke_vector: Sequence[int]) -> None:
     print(f"[validate] {validator_path.name} ...")
-    subprocess.check_call(
-        [
-            PYTHON,
-            str(validator_path),
-            "--solver",
-            str(solver_path),
-            "--vector",
-            json.dumps(list(smoke_vector)),
-        ]
-    )
+    cmd = [
+        PYTHON,
+        str(validator_path),
+        "--solver",
+        str(solver_path),
+        "--vector",
+        json.dumps(list(smoke_vector)),
+    ]
+    timeout_s = _solver_validation_timeout_s()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or ""
+        err = exc.stderr or ""
+        if out:
+            print(out, end="" if out.endswith("\n") else "\n")
+        if err:
+            print(err, end="" if err.endswith("\n") else "\n", file=sys.stderr)
+        raise RuntimeError(
+            f"Validator timed out after {timeout_s:g}s for {solver_path}. "
+            "This usually means solve(vec) got stuck during smoke validation."
+        ) from exc
+    if proc.returncode != 0:
+        if proc.stdout:
+            print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+        if proc.stderr:
+            print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", file=sys.stderr)
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr)
 
 
 def _ensure_llm_puzzles_on_path() -> None:

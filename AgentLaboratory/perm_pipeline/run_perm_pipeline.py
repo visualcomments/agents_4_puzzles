@@ -888,6 +888,14 @@ def compile_python(code: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _validator_timeout_s() -> float:
+    raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 20.0
+
+
 def validate_solver_contract(code: str) -> Tuple[bool, str]:
     try:
         tree = ast.parse(code)
@@ -913,8 +921,19 @@ def validate_solver_contract(code: str) -> Tuple[bool, str]:
 
 def run_validator(validator_path: Path, solver_path: Path, vec: List[int]) -> Tuple[int, str, str]:
     cmd = [sys.executable, str(validator_path), "--solver", str(solver_path), "--vector", json.dumps(vec)]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    return p.returncode, p.stdout, p.stderr
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=_validator_timeout_s())
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or ""
+        err = exc.stderr or ""
+        if err and not err.endswith("\n"):
+            err += "\n"
+        err += (
+            f"[!] validator timed out after {_validator_timeout_s():g}s while checking {solver_path.name}. "
+            "Most often this means the generated solve(vec) entered an infinite loop or an unexpectedly expensive search.\n"
+        )
+        return 124, out, err
 
 
 def validate_solver_suite(validator_path: Path, solver_path: Path, tests: Iterable[List[int]]) -> Tuple[bool, str]:

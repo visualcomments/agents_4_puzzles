@@ -335,3 +335,31 @@ def test_run_hybrid_codegen_search_uses_archive_for_refinement(monkeypatch, tmp_
     assert calls[0] == ''
     assert 'compile check failed' in calls[1].lower()
     assert archive.best_failures(limit=1)
+
+
+def test_run_validator_times_out_on_hanging_validator(monkeypatch, tmp_path):
+    validator = tmp_path / 'validator.py'
+    solver = tmp_path / 'solver.py'
+    validator.write_text('import time\ntime.sleep(5)\n', encoding='utf-8')
+    solver.write_text('print("{}")\n', encoding='utf-8')
+
+    monkeypatch.setenv('AGENTLAB_VALIDATOR_TIMEOUT_S', '0.1')
+    rc, out, err = rpp.run_validator(validator, solver, [1, 2, 3])
+
+    assert rc == 124
+    assert out == ''
+    assert 'validator timed out' in err
+
+
+def test_validate_solver_suite_reports_timeout(monkeypatch, tmp_path):
+    validator = tmp_path / 'validator.py'
+    solver = tmp_path / 'solver.py'
+    validator.write_text('import time\ntime.sleep(5)\n', encoding='utf-8')
+    solver.write_text('print("{}")\n', encoding='utf-8')
+
+    monkeypatch.setenv('AGENTLAB_VALIDATOR_TIMEOUT_S', '0.1')
+    ok, report = rpp.validate_solver_suite(validator, solver, [[1, 2, 3]])
+
+    assert ok is False
+    assert 'TEST 0 FAILED' in report
+    assert 'validator timed out' in report
