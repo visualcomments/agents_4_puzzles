@@ -11,9 +11,7 @@ PROBLEM SUMMARY
 INPUT / OUTPUT CONTRACT
 - Implement solve(vec) -> (moves, sorted_array)
 - vec is a Python list[int]
-- moves must be either:
-  - list[str] with legal generator names, or
-  - the string "UNSOLVED"
+- moves must be a list[str] with legal generator names from puzzle_info.json.
 - sorted_array must be the final state after applying moves
 - Script mode must print JSON: {"moves": ..., "sorted_array": ...}
 
@@ -38,7 +36,7 @@ RECOMMENDED IMPLEMENTATION ORDER
    - Evaluate every legal 1-move candidate, and optionally every legal 2-move macro.
    - Repeatedly choose the move or macro that improves the score the most.
    - Stop when central_state is reached.
-   - If no progress is possible after a bounded number of polynomial steps, return "UNSOLVED".
+   - If bundled lookup files are present, prefer them over any heuristic fallback so every emitted path is competition-valid.
 
 IMPLEMENTATION DETAILS
 - Keep the code self-contained; use only the standard library.

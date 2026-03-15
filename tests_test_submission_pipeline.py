@@ -162,3 +162,30 @@ def test_cmd_run_forwards_print_generation_flags_to_agent_lab(monkeypatch, tmp_p
     assert captured["g4f_stop_at_python_fence"] is True
     assert out_csv.exists()
 
+
+
+def test_validate_submission_move_tokens_rejects_unsolved_for_megaminx(tmp_path):
+    sub = tmp_path / "submission.csv"
+    sub.write_text("initial_state_id,path\n0,UNSOLVED\n", encoding="utf-8")
+    allowed = {"U", "-U"}
+    try:
+        pipeline_cli._validate_submission_move_tokens(
+            submission_csv=sub,
+            move_column="path",
+            allowed_moves=allowed,
+            joiner=".",
+        )
+    except ValueError as exc:
+        assert "UNSOLVED" in str(exc)
+    else:
+        raise AssertionError("expected UNSOLVED to be rejected")
+
+
+def test_resolve_smoke_vectors_for_megaminx_includes_nontrivial_test_state():
+    from pipeline_registry import get_pipeline
+
+    spec = get_pipeline("cayley-py-megaminx")
+    vectors = pipeline_cli._resolve_smoke_vectors(spec)
+    assert len(vectors) >= 2
+    assert vectors[0] == list(range(120))
+    assert any(vec != list(range(120)) for vec in vectors[1:])

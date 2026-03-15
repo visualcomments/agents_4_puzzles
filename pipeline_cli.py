@@ -865,7 +865,10 @@ def _validate_submission_move_tokens(
             max_tokens = max(max_tokens, len(tokens))
             for token in tokens:
                 if token == 'UNSOLVED':
-                    continue
+                    raise ValueError(
+                        f"Row {row_idx}: UNSOLVED is not a legal Kaggle move sequence. "
+                        "Use a valid dot-separated path or fall back to a known-good baseline."
+                    )
                 if token not in allowed_moves:
                     raise ValueError(
                         f"Row {row_idx}: unknown move {token!r}. "
@@ -1228,36 +1231,92 @@ def _solver_validation_timeout_s() -> float:
         return 20.0
 
 
-def _validate_solver(solver_path: Path, validator_path: Path, smoke_vector: Sequence[int]) -> None:
-    print(f"[validate] {validator_path.name} ...")
-    cmd = [
-        PYTHON,
-        str(validator_path),
-        "--solver",
-        str(solver_path),
-        "--vector",
-        json.dumps(list(smoke_vector)),
-    ]
-    timeout_s = _solver_validation_timeout_s()
+def _resolve_smoke_vectors(spec: PipelineSpec, extra_rows: int = 2) -> list[list[int]]:
+    vectors: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+
+    def _add(vec: Sequence[int] | None) -> None:
+        if vec is None:
+            return
+        norm = [int(x) for x in vec]
+        sig = tuple(norm)
+        if sig in seen:
+            return
+        seen.add(sig)
+        vectors.append(norm)
+
+    _add(spec.smoke_vector)
+
+    if extra_rows <= 0:
+        return vectors
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout or ""
-        err = exc.stderr or ""
-        if out:
-            print(out, end="" if out.endswith("\n") else "\n")
-        if err:
-            print(err, end="" if err.endswith("\n") else "\n", file=sys.stderr)
-        raise RuntimeError(
-            f"Validator timed out after {timeout_s:g}s for {solver_path}. "
-            "This usually means solve(vec) got stuck during smoke validation."
-        ) from exc
-    if proc.returncode != 0:
-        if proc.stdout:
-            print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
-        if proc.stderr:
-            print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", file=sys.stderr)
-        raise subprocess.CalledProcessError(proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr)
+        puzzles_csv = _resolve_default_puzzles(spec)
+        _ensure_csv_field_size_limit()
+        with puzzles_csv.open(newline='', encoding='utf-8', errors='ignore') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    vec = _extract_state(row, spec)
+                except Exception:
+                    continue
+                if not vec:
+                    continue
+                _add(vec)
+                if len(vectors) >= 1 + extra_rows:
+                    break
+    except Exception:
+        pass
+
+    return vectors
+
+
+def _normalize_smoke_vectors(smoke_vector: Sequence[int] | Sequence[Sequence[int]]) -> list[list[int]]:
+    if not smoke_vector:
+        return []
+    first = smoke_vector[0]  # type: ignore[index]
+    if isinstance(first, (list, tuple)):
+        return [[int(x) for x in vec] for vec in smoke_vector]  # type: ignore[arg-type]
+    return [[int(x) for x in smoke_vector]]  # type: ignore[arg-type]
+
+
+def _validate_solver(solver_path: Path, validator_path: Path, smoke_vector: Sequence[int] | Sequence[Sequence[int]]) -> None:
+    smoke_vectors = _normalize_smoke_vectors(smoke_vector)
+    total = len(smoke_vectors)
+    if total == 0:
+        raise ValueError("at least one smoke vector is required")
+
+    timeout_s = _solver_validation_timeout_s()
+    for idx, one_vec in enumerate(smoke_vectors, start=1):
+        label = validator_path.name if total == 1 else f"{validator_path.name} [{idx}/{total}]"
+        print(f"[validate] {label} ...")
+        cmd = [
+            PYTHON,
+            str(validator_path),
+            "--solver",
+            str(solver_path),
+            "--vector",
+            json.dumps(list(one_vec)),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout or ""
+            err = exc.stderr or ""
+            if out:
+                print(out, end="" if out.endswith("\n") else "\n")
+            if err:
+                print(err, end="" if err.endswith("\n") else "\n", file=sys.stderr)
+            raise RuntimeError(
+                f"Validator timed out after {timeout_s:g}s for {solver_path}. "
+                "This usually means solve(vec) got stuck during smoke validation."
+            ) from exc
+        if proc.returncode != 0:
+            if proc.stdout:
+                print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+            if proc.stderr:
+                print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", file=sys.stderr)
+            raise subprocess.CalledProcessError(proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr)
 
 
 def _ensure_llm_puzzles_on_path() -> None:
@@ -1750,7 +1809,7 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         # Copy baseline
         shutil.copyfile(spec.baseline_solver, out_path)
         print(f"[generate-solver] --no-llm: copied baseline -> {out_path}")
-        _validate_solver(out_path, spec.validator, spec.smoke_vector or [0, 1])
+        _validate_solver(out_path, spec.validator, _resolve_smoke_vectors(spec))
         return
 
     _gpu_diag_hint(args.models)
@@ -1786,7 +1845,7 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
     )
 
-    _validate_solver(out_path, spec.validator, spec.smoke_vector or [0, 1])
+    _validate_solver(out_path, spec.validator, _resolve_smoke_vectors(spec))
 
 
 def cmd_build_submission(args: argparse.Namespace) -> None:
@@ -2098,7 +2157,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         # Smoke validate
         t1 = _stage("validate solver")
         report["stages"]["validate_solver"] = {"start": time.time()}
-        _validate_solver(solver_path, spec.validator, spec.smoke_vector or [0, 1])
+        _validate_solver(solver_path, spec.validator, _resolve_smoke_vectors(spec))
         report["stages"]["validate_solver"]["end"] = time.time()
         report["stages"]["validate_solver"]["seconds"] = report["stages"]["validate_solver"]["end"] - report["stages"]["validate_solver"]["start"]
         _stage_done("validate solver", t1)
@@ -2243,7 +2302,7 @@ def cmd_selftest(_: argparse.Namespace) -> None:
         shutil.copyfile(spec.baseline_solver, solver_path)
 
         # Validate on smoke vector
-        _validate_solver(solver_path, spec.validator, spec.smoke_vector or [0, 1])
+        _validate_solver(solver_path, spec.validator, _resolve_smoke_vectors(spec))
 
         # Build a tiny puzzles.csv depending on pipeline
         puzzles_csv = tmp / f"{spec.key}_puzzles.csv"
