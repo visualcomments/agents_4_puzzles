@@ -57,6 +57,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+import re
 
 from pipeline_registry import PipelineSpec, get_pipeline, list_pipelines
 
@@ -316,6 +317,158 @@ def _probe_g4f_model_pipeline(
             else:
                 os.environ["G4F_PROVIDER"] = old_provider
 
+
+
+
+
+def _split_accidental_joined_kaggle_token(argv: Sequence[str]) -> List[str]:
+    """Split tokens like ``4000kaggle competitions submit ...``.
+
+    This catches the common shell line-continuation mistake where a trailing
+    backslash joins the next line directly onto the previous token.
+    """
+    out: List[str] = []
+    for idx, token in enumerate(argv):
+        if (
+            token != "kaggle"
+            and token.endswith("kaggle")
+            and idx + 2 < len(argv)
+            and argv[idx + 1] == "competitions"
+            and argv[idx + 2] == "submit"
+        ):
+            prefix = token[: -len("kaggle")]
+            if prefix:
+                out.append(prefix)
+            out.append("kaggle")
+            continue
+        out.append(token)
+    return out
+
+
+def _find_option_value(argv: Sequence[str], *names: str) -> Optional[str]:
+    for idx, token in enumerate(argv[:-1]):
+        if token in names:
+            return argv[idx + 1]
+    return None
+
+
+def _replace_option_value(argv: List[str], names: Sequence[str], value: str) -> List[str]:
+    out = list(argv)
+    for idx, token in enumerate(out[:-1]):
+        if token in names:
+            out[idx + 1] = value
+            return out
+    if names:
+        out.extend([names[0], value])
+    return out
+
+
+def _parse_embedded_kaggle_submit_tail(tail: Sequence[str]) -> Dict[str, str]:
+    if len(tail) < 3 or list(tail[:3]) != ["kaggle", "competitions", "submit"]:
+        raise ValueError("not a kaggle competitions submit tail")
+
+    competition: Optional[str] = None
+    file_path: Optional[str] = None
+    message: Optional[str] = None
+    idx = 3
+    while idx < len(tail):
+        tok = tail[idx]
+        if tok in {"-c", "--competition"}:
+            if idx + 1 >= len(tail):
+                raise ValueError("missing value after -c/--competition")
+            competition = tail[idx + 1]
+            idx += 2
+            continue
+        if tok in {"-f", "--file"}:
+            if idx + 1 >= len(tail):
+                raise ValueError("missing value after -f/--file")
+            file_path = tail[idx + 1]
+            idx += 2
+            continue
+        if tok in {"-m", "--message"}:
+            if idx + 1 >= len(tail):
+                raise ValueError("missing value after -m/--message")
+            message = tail[idx + 1]
+            idx += 2
+            continue
+        if tok.startswith("-"):
+            raise ValueError(f"unsupported kaggle submit option: {tok}")
+        if competition is None:
+            competition = tok
+            idx += 1
+            continue
+        raise ValueError(f"unexpected extra kaggle submit token: {tok}")
+
+    if not competition:
+        raise ValueError("missing Kaggle competition slug")
+    if not file_path:
+        raise ValueError("missing Kaggle submission file (-f)")
+    if not message:
+        raise ValueError("missing Kaggle submission message (-m)")
+    return {"competition": competition, "file": file_path, "message": message}
+
+
+def _rewrite_embedded_kaggle_submit(argv: Sequence[str]) -> Tuple[List[str], Optional[str]]:
+    """Rewrite accidental ``... run ... kaggle competitions submit ...`` tails.
+
+    Returns ``(argv, note)`` where ``note`` is a human-readable explanation if
+    a rewrite took place.
+    """
+    normalized = _split_accidental_joined_kaggle_token(list(argv))
+    if not normalized or normalized[0] != "run":
+        return normalized, None
+
+    start = -1
+    for idx in range(1, len(normalized) - 2):
+        if normalized[idx:idx + 3] == ["kaggle", "competitions", "submit"]:
+            start = idx
+            break
+    if start < 0:
+        return normalized, None
+
+    base = normalized[:start]
+    tail = normalized[start:]
+    parsed = _parse_embedded_kaggle_submit_tail(tail)
+
+    requested_output = _find_option_value(base, "--output")
+    if requested_output and requested_output != parsed["file"]:
+        base = _replace_option_value(base, ["--output"], parsed["file"])
+    elif not requested_output:
+        base.extend(["--output", parsed["file"]])
+
+    if "--submit" not in base:
+        base.append("--submit")
+    if "--message" in base:
+        base = _replace_option_value(base, ["--message"], parsed["message"])
+    else:
+        base.extend(["--message", parsed["message"]])
+
+    if "--submit-competition" in base:
+        base = _replace_option_value(base, ["--submit-competition"], parsed["competition"])
+    else:
+        base.extend(["--submit-competition", parsed["competition"]])
+
+    if "--submit-via" not in base:
+        base.extend(["--submit-via", "cli"])
+
+    note = (
+        "[cli] detected an embedded 'kaggle competitions submit ...' tail after "
+        "'pipeline_cli.py run'. Bash line continuation joined both commands, so "
+        "the CLI rewrote it to the built-in form: --submit --submit-via cli "
+        f"--submit-competition {parsed['competition']} --message {parsed['message']!r}."
+    )
+    return base, note
+
+
+def _format_unknown_args_error(unknown: Sequence[str]) -> str:
+    msg = "unrecognized arguments: " + " ".join(unknown)
+    if len(unknown) >= 3 and list(unknown[:3]) == ["kaggle", "competitions", "submit"]:
+        msg += (
+            "\nHint: you appended a raw 'kaggle competitions submit ...' command to "
+            "'pipeline_cli.py run'. Use either two separate shell commands joined by '&&', "
+            "or use the built-in submit flags: --submit --message '...'."
+        )
+    return msg
 
 def _probe_g4f_models_sync(
     candidates: Sequence[str],
@@ -2514,7 +2667,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    rewritten_argv, rewrite_note = _rewrite_embedded_kaggle_submit(raw_argv)
+    args, unknown = parser.parse_known_args(rewritten_argv)
+    if unknown:
+        parser.error(_format_unknown_args_error(unknown))
+    if rewrite_note:
+        print(rewrite_note, flush=True)
     args.func(args)
 
 

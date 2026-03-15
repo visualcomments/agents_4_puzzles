@@ -772,17 +772,23 @@ async def _g4f_async_create_text(
     if max_tokens > 0:
         request_kwargs["max_tokens"] = max_tokens
 
-    response = await asyncio.wait_for(
-        client.chat.completions.create(**request_kwargs),
-        timeout=max(1.0, float(timeout_s)),
-    )
-    text = await _g4f_async_to_text(
-        response,
-        max_chars=max_resp_chars,
-        stop_at_python_fence=stop_at_python_fence,
-        stream_timeout_s=stream_timeout_s if request_kwargs["stream"] else None,
-        stream_idle_timeout_s=stream_idle_timeout_s if request_kwargs["stream"] else None,
-    )
+    try:
+        response = await asyncio.wait_for(
+            client.chat.completions.create(**request_kwargs),
+            timeout=max(1.0, float(timeout_s)),
+        )
+        text = await _g4f_async_to_text(
+            response,
+            max_chars=max_resp_chars,
+            stop_at_python_fence=stop_at_python_fence,
+            stream_timeout_s=stream_timeout_s if request_kwargs["stream"] else None,
+            stream_idle_timeout_s=stream_idle_timeout_s if request_kwargs["stream"] else None,
+        )
+    except asyncio.CancelledError as exc:
+        provider_label = provider_name or "auto"
+        raise RuntimeError(
+            f"g4f async request was cancelled by provider={provider_label} for model={model_str}"
+        ) from exc
     return text.strip() if isinstance(text, str) else ""
 
 
@@ -1454,8 +1460,10 @@ def query_model(
                                 _remember_g4f_provider_success(model_str, provider_name)
                                 _best_effort_release_memory(clear_local_cache=False)
                                 return answer
-                        except Exception as exc:
-                            last_g4f_error = exc
+                        except BaseException as exc:
+                            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                                raise
+                            last_g4f_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc) or type(exc).__name__)
                             if not allow_sync_fallback:
                                 continue
 

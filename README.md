@@ -205,6 +205,9 @@ Notes:
 - The preflight also probes competition submission access, so "rules not accepted / account not joined" is reported before upload.
 - The preferred CLI form stays aligned with the official docs: `kaggle competitions submit <competition> -f ... -m ...`.
 
+If you accidentally paste a raw `kaggle competitions submit ...` command directly after `python pipeline_cli.py run \
+...`, the CLI now detects that embedded tail and rewrites it to the built-in `--submit` form automatically. Still, the clearest usage is either a single `run --submit --message ...` invocation or two separate shell commands joined with `&&`.
+
 If you have the Kaggle API installed and configured (either via `~/.kaggle/kaggle.json` or by passing `--kaggle-json`), you can submit directly from `run`:
 
 ```bash
