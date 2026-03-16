@@ -1459,60 +1459,61 @@ def run_hybrid_codegen_search(
         )
 
     plan_rounds: List[List[PlanCandidate]] = [initial_plans]
-    for round_idx in range(0, refine_rounds + 1):
+    round_idx = 0
+    while round_idx < len(plan_rounds) and round_idx <= refine_rounds:
         current_plans = plan_rounds[round_idx]
         frontier = build_plan_model_frontier(current_plans, coder_models, frontier_width=frontier_width)
-        if not frontier:
-            continue
+        if frontier:
+            for pair_idx, (plan_candidate, coder_model) in enumerate(frontier, start=1):
+                raw_plan_text = plan_candidate.plan_text
+                plan_text = _augment_plan_with_archive_context(raw_plan_text, archive)
+                attempt_key = _attempt_identity(plan_text, coder_model)
+                if attempt_key in attempts_seen:
+                    continue
+                attempts_seen.add(attempt_key)
 
-        for pair_idx, (plan_candidate, coder_model) in enumerate(frontier, start=1):
-            raw_plan_text = plan_candidate.plan_text
-            plan_text = _augment_plan_with_archive_context(raw_plan_text, archive)
-            attempt_key = _attempt_identity(plan_text, coder_model)
-            if attempt_key in attempts_seen:
-                continue
-            attempts_seen.add(attempt_key)
+                last_plan = raw_plan_text
+                last_planner_model = plan_candidate.planner_model
+                label_suffix = f"variant {plan_candidate.variant_index} planner={plan_candidate.planner_model} coder={coder_model}"
+                if round_idx > 0:
+                    label_suffix += f" refine_round={round_idx}"
+                log_status(f"[hybrid] attempt {len(attempts_seen)}: {label_suffix}")
 
-            last_plan = raw_plan_text
-            last_planner_model = plan_candidate.planner_model
-            label_suffix = f"variant {plan_candidate.variant_index} planner={plan_candidate.planner_model} coder={coder_model}"
-            if round_idx > 0:
-                label_suffix += f" refine_round={round_idx}"
-            log_status(f"[hybrid] attempt {len(attempts_seen)}: {label_suffix}")
-
-            ok, report = try_generate_with_model(
-                model=coder_model,
-                fixer_models=fixer_models,
-                user_prompt=user_prompt,
-                plan=plan_text,
-                prompts=prompts,
-                out_path=out_path,
-                validator_path=validator_path,
-                tests=tests,
-                max_iters=max_iters,
-                stage_label=f"coder variant {plan_candidate.variant_index}" if round_idx == 0 else f"coder refine {round_idx} variant {plan_candidate.variant_index}",
-            )
-            generation_reports.append(report)
-            archive.add(
-                ArchiveEntry(
-                    plan_text=raw_plan_text,
-                    planner_model=plan_candidate.planner_model,
-                    coder_model=coder_model,
-                    ok=ok,
-                    report=report,
-                    stage_label="coder",
-                    score=_attempt_score(ok, report),
+                ok, report = try_generate_with_model(
+                    model=coder_model,
+                    fixer_models=fixer_models,
+                    user_prompt=user_prompt,
+                    plan=plan_text,
+                    prompts=prompts,
+                    out_path=out_path,
+                    validator_path=validator_path,
+                    tests=tests,
+                    max_iters=max_iters,
+                    stage_label=f"coder variant {plan_candidate.variant_index}" if round_idx == 0 else f"coder refine {round_idx} variant {plan_candidate.variant_index}",
                 )
-            )
-            if ok:
-                return True, generation_reports, archive, last_plan, last_planner_model, coder_model
-            log_status(f"[hybrid] {report}")
+                generation_reports.append(report)
+                archive.add(
+                    ArchiveEntry(
+                        plan_text=raw_plan_text,
+                        planner_model=plan_candidate.planner_model,
+                        coder_model=coder_model,
+                        ok=ok,
+                        report=report,
+                        stage_label="coder",
+                        score=_attempt_score(ok, report),
+                    )
+                )
+                if ok:
+                    return True, generation_reports, archive, last_plan, last_planner_model, coder_model
+                log_status(f"[hybrid] {report}")
 
         if round_idx >= refine_rounds:
+            round_idx += 1
             continue
 
         archive_summary = archive.summary_text(limit=3)
         if not archive_summary:
+            round_idx += 1
             continue
         refined = generate_plan_candidates(
             planner_models,
@@ -1528,6 +1529,12 @@ def run_hybrid_codegen_search(
                 f"produced {len(refined)} additional plan candidates."
             )
             plan_rounds.append(refined)
+        else:
+            log_status(
+                f"[planner] experiment-manager refinement {round_idx + 1}/{refine_rounds} produced no additional plan candidates; "
+                "stopping further refinement rounds."
+            )
+        round_idx += 1
 
     primary_plan = last_plan or initial_plans[0].plan_text
     primary_planner_model = last_planner_model or initial_plans[0].planner_model

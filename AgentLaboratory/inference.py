@@ -581,19 +581,29 @@ def _g4f_provider_candidates(model_str: str | None) -> list[str | None]:
     seen = set()
     ordered: list[str | None] = []
 
-    cached = _G4F_PROVIDER_SUCCESS_CACHE.get(key)
-    if cached:
-        ordered.append(cached)
-
     explicit = (os.getenv("G4F_PROVIDER") or "").strip()
-    if explicit:
-        ordered.append(explicit)
-
     raw_list = _env_first_nonempty("AGENTLAB_G4F_PROVIDER_LIST", "G4F_PROVIDER_LIST") or ""
+
+    configured_names: list[str] = []
+    if explicit:
+        configured_names.append(explicit)
     for chunk in raw_list.replace(";", ",").split(","):
         item = chunk.strip()
         if item:
-            ordered.append(item)
+            configured_names.append(item)
+
+    strict_provider_selection = bool(configured_names) and not _env_truthy(
+        "AGENTLAB_G4F_PROVIDER_ALLOW_AUTO_FALLBACK",
+        default=False,
+    )
+    configured_set = {item.strip().lower() for item in configured_names if item and item.strip()}
+
+    cached = _G4F_PROVIDER_SUCCESS_CACHE.get(key)
+    if cached and (not strict_provider_selection or cached.strip().lower() in configured_set):
+        ordered.append(cached)
+
+    for item in configured_names:
+        ordered.append(item)
 
     deduped: list[str | None] = []
     for item in ordered:
@@ -603,7 +613,8 @@ def _g4f_provider_candidates(model_str: str | None) -> list[str | None]:
         seen.add(key_item)
         deduped.append(item)
 
-    deduped.append(None)
+    if not strict_provider_selection:
+        deduped.append(None)
     final: list[str | None] = []
     seen_final = set()
     for item in deduped:
