@@ -112,7 +112,17 @@ from typing import Dict, List, Sequence, Tuple, Union
 MoveOut = Union[List[str], str]
 _HERE = Path(__file__).resolve().parent
 _CACHE: tuple[list[int], Dict[str, List[int]], Dict[str, str]] | None = None
-_SHORT_WORD_CACHE: tuple[dict[str, set[str]], dict[str, int], dict[bytes, tuple[str, ...]]] | None = None
+_OPT_CACHE: tuple[
+    dict[str, int],
+    dict[str, set[str]],
+    dict[str, int],
+    dict[str, str],
+    list[str],
+    dict[str, int],
+    list[str],
+    dict[str, bytes],
+    dict[bytes, bytes],
+] | None = None
 
 
 def _candidate_data_dirs() -> list[Path]:
@@ -179,28 +189,12 @@ def _load_submission_lookup(test_csv: Path, submission_csv: Path) -> Dict[str, s
     return lookup
 
 
+def _inverse_name(move: str) -> str:
+    return move[1:] if move.startswith('-') else '-' + move
+
+
 def _parse_face(move: str) -> tuple[str, int]:
     return (move[1:], -1) if move.startswith('-') else (move, 1)
-
-
-def _emit_face(face: str, exp: int) -> list[tuple[str, int]]:
-    value = exp % 5
-    if value == 0:
-        return []
-    if value == 1:
-        return [(face, 1)]
-    if value == 2:
-        return [(face, 2)]
-    if value == 3:
-        return [(face, -2)]
-    if value == 4:
-        return [(face, -1)]
-    raise ValueError(exp)
-
-
-def _emit_tokens(block: tuple[str, int]) -> list[str]:
-    face, exp = block
-    return [face] * exp if exp > 0 else ['-' + face] * (-exp)
 
 
 def _compose_perm(a: Sequence[int], b: Sequence[int]) -> list[int]:
@@ -211,45 +205,101 @@ def _compose_perm_bytes(a: bytes, b: bytes) -> bytes:
     return bytes(a[j] for j in b)
 
 
-def _short_word_data(generators: Dict[str, List[int]]) -> tuple[dict[str, set[str]], dict[str, int], dict[bytes, tuple[str, ...]]]:
-    global _SHORT_WORD_CACHE
-    if _SHORT_WORD_CACHE is not None:
-        return _SHORT_WORD_CACHE
+def _generator_opt_data(
+    generators: Dict[str, List[int]],
+) -> tuple[
+    dict[str, int],
+    dict[str, set[str]],
+    dict[str, int],
+    dict[str, str],
+    list[str],
+    dict[str, int],
+    list[str],
+    dict[str, bytes],
+    dict[bytes, bytes],
+]:
+    global _OPT_CACHE
+    if _OPT_CACHE is not None:
+        return _OPT_CACHE
 
     faces = [name for name in generators if not name.startswith('-')]
+    perms_bytes = {name: bytes(perm) for name, perm in generators.items()}
+    size = len(next(iter(generators.values())))
+    identity = bytes(range(size))
+
+    face_order: dict[str, int] = {}
+    for face in faces:
+        cur = identity
+        step = perms_bytes[face]
+        for order in range(1, 32):
+            cur = _compose_perm_bytes(cur, step)
+            if cur == identity:
+                face_order[face] = order
+                break
+        else:
+            face_order[face] = 5
+
     commute: dict[str, set[str]] = {face: {face} for face in faces}
     for a in faces:
+        pa = generators[a]
         for b in faces:
-            if _compose_perm(generators[a], generators[b]) == _compose_perm(generators[b], generators[a]):
+            pb = generators[b]
+            if _compose_perm(pa, pb) == _compose_perm(pb, pa):
                 commute[a].add(b)
-    order = {face: idx for idx, face in enumerate(sorted(faces))}
 
-    perms_bytes = {name: bytes(perm) for name, perm in generators.items()}
-    identity = bytes(range(len(next(iter(generators.values())))))
-    inverse = {name: (name[1:] if name.startswith('-') else '-' + name) for name in generators}
+    face_rank = {face: idx for idx, face in enumerate(sorted(faces))}
+    inverse = {name: _inverse_name(name) for name in generators}
+    move_names = sorted(generators.keys(), key=lambda name: ((name[1:] if name.startswith('-') else name), name.startswith('-')))
+    move_to_id = {name: idx for idx, name in enumerate(move_names)}
+    id_to_move = list(move_names)
 
-    table: dict[bytes, tuple[str, ...]] = {identity: ()}
+    table: dict[bytes, bytes] = {identity: b''}
     frontier: list[tuple[bytes, str | None]] = [(identity, None)]
     for _depth in range(1, 5):
         new_frontier: list[tuple[bytes, str | None]] = []
         for state, last in frontier:
             base = table[state]
-            for move in generators:
+            for move in move_names:
                 if last is not None and move == inverse[last]:
                     continue
                 nxt = _compose_perm_bytes(state, perms_bytes[move])
                 if nxt in table:
                     continue
-                table[nxt] = base + (move,)
+                table[nxt] = base + bytes((move_to_id[move],))
                 new_frontier.append((nxt, move))
         frontier = new_frontier
 
-    _SHORT_WORD_CACHE = (commute, order, table)
-    return _SHORT_WORD_CACHE
+    _OPT_CACHE = (
+        face_order,
+        commute,
+        face_rank,
+        inverse,
+        move_names,
+        move_to_id,
+        id_to_move,
+        perms_bytes,
+        table,
+    )
+    return _OPT_CACHE
+
+
+def _emit_face(face: str, exp: int, face_order: dict[str, int]) -> list[tuple[str, int]]:
+    order = face_order[face]
+    value = exp % order
+    if value == 0:
+        return []
+    if value <= order // 2:
+        return [(face, value)]
+    return [(face, value - order)]
+
+
+def _emit_tokens(block: tuple[str, int]) -> list[str]:
+    face, exp = block
+    return [face] * exp if exp > 0 else ['-' + face] * (-exp)
 
 
 def _reduce_commuting_word(moves: Sequence[str], generators: Dict[str, List[int]]) -> list[str]:
-    commute, order, _table = _short_word_data(generators)
+    face_order, commute, face_rank, _inverse, _move_names, _move_to_id, _id_to_move, _perms_bytes, _table = _generator_opt_data(generators)
     blocks = [_parse_face(move) for move in moves]
     changed = True
     while changed:
@@ -262,7 +312,7 @@ def _reduce_commuting_word(moves: Sequence[str], generators: Dict[str, List[int]
             while j < len(blocks) and blocks[j][0] == face:
                 exp += blocks[j][1]
                 j += 1
-            norm = _emit_face(face, exp)
+            norm = _emit_face(face, exp, face_order)
             if norm != blocks[i:j]:
                 changed = True
             merged.extend(norm)
@@ -271,7 +321,7 @@ def _reduce_commuting_word(moves: Sequence[str], generators: Dict[str, List[int]
         i = 0
         while i + 1 < len(blocks):
             left, right = blocks[i], blocks[i + 1]
-            if right[0] in commute[left[0]] and order[left[0]] > order[right[0]]:
+            if right[0] in commute[left[0]] and face_rank[left[0]] > face_rank[right[0]]:
                 blocks[i], blocks[i + 1] = right, left
                 changed = True
                 if i:
@@ -285,25 +335,33 @@ def _reduce_commuting_word(moves: Sequence[str], generators: Dict[str, List[int]
     return out
 
 
+def _reverse_invert(moves: Sequence[str], inverse: dict[str, str]) -> list[str]:
+    return [inverse[move] for move in reversed(moves)]
+
+
+def _decode_word(word: bytes, id_to_move: list[str]) -> list[str]:
+    return [id_to_move[idx] for idx in word]
+
+
 def _optimize_local_windows(moves: Sequence[str], generators: Dict[str, List[int]], max_window: int = 10) -> list[str]:
     if not moves:
         return []
-    _commute, _order, table = _short_word_data(generators)
-    perms_bytes = {name: bytes(perm) for name, perm in generators.items()}
+    _face_order, _commute, _face_rank, _inverse, _move_names, move_to_id, id_to_move, perms_bytes, table = _generator_opt_data(generators)
     identity = bytes(range(len(next(iter(generators.values())))))
 
     n = len(moves)
-    dp = [10 ** 9] * (n + 1)
+    dp = [10**9] * (n + 1)
     nxt = [0] * (n + 1)
-    word: list[tuple[str, ...] | None] = [None] * (n + 1)
+    word: list[bytes] = [b''] * (n + 1)
     dp[n] = 0
 
     for i in range(n - 1, -1, -1):
         dp[i] = 1 + dp[i + 1]
         nxt[i] = i + 1
-        word[i] = (moves[i],)
+        word[i] = bytes((move_to_id[moves[i]],))
         effect = identity
-        for j in range(i + 1, min(n, i + max_window) + 1):
+        end = min(n, i + max_window)
+        for j in range(i + 1, end + 1):
             effect = _compose_perm_bytes(effect, perms_bytes[moves[j - 1]])
             best = table.get(effect)
             if best is not None and len(best) + dp[j] < dp[i]:
@@ -314,15 +372,56 @@ def _optimize_local_windows(moves: Sequence[str], generators: Dict[str, List[int
     out: list[str] = []
     i = 0
     while i < n:
-        chunk = word[i]
-        if chunk is None:
-            break
-        out.extend(chunk)
+        out.extend(_decode_word(word[i], id_to_move))
         i = nxt[i]
     return out
 
 
-def _build_optimized_lookup(test_csv: Path, sample_csv: Path, generators: Dict[str, List[int]]) -> Dict[str, str]:
+def _optimize_moves(moves: Sequence[str], generators: Dict[str, List[int]]) -> list[str]:
+    if not moves:
+        return []
+    _face_order, _commute, _face_rank, inverse, _move_names, _move_to_id, _id_to_move, _perms_bytes, _table = _generator_opt_data(generators)
+
+    current = list(moves)
+    stagnant_rounds = 0
+    for _ in range(8):
+        best = current
+
+        left = _reduce_commuting_word(current, generators)
+        left = _optimize_local_windows(left, generators, max_window=10)
+        left = _reduce_commuting_word(left, generators)
+        if len(left) < len(best):
+            best = left
+
+        right = _reverse_invert(current, inverse)
+        right = _reduce_commuting_word(right, generators)
+        right = _optimize_local_windows(right, generators, max_window=10)
+        right = _reduce_commuting_word(right, generators)
+        right = _reverse_invert(right, inverse)
+        right = _reduce_commuting_word(right, generators)
+        if len(right) < len(best):
+            best = right
+
+        if len(best) < len(current):
+            current = best
+            stagnant_rounds = 0
+        else:
+            stagnant_rounds += 1
+            current = best
+            if stagnant_rounds >= 2:
+                break
+    return current
+
+
+def _maybe_write_optimized_lookup(path: Path, lookup: Dict[str, str]) -> None:
+    try:
+        payload = {'lookup': lookup}
+        path.write_text(json.dumps(payload, separators=(',', ':')), encoding='utf-8')
+    except OSError:
+        pass
+
+
+def _build_optimized_lookup(test_csv: Path, sample_csv: Path, generators: Dict[str, List[int]], central: Sequence[int]) -> Dict[str, str]:
     lookup: Dict[str, str] = {}
     with test_csv.open(newline='', encoding='utf-8') as tf, sample_csv.open(newline='', encoding='utf-8') as sf:
         test_rows = list(csv.DictReader(tf))
@@ -333,10 +432,12 @@ def _build_optimized_lookup(test_csv: Path, sample_csv: Path, generators: Dict[s
         path = (sample_rows[idx].get('path') or '').strip()
         if not state_key:
             continue
-        moves = [] if not path else path.split('.')
-        optimized = _reduce_commuting_word(moves, generators)
-        optimized = _optimize_local_windows(optimized, generators, max_window=10)
-        optimized = _reduce_commuting_word(optimized, generators)
+        moves = [] if not path else [move for move in path.split('.') if move]
+        optimized = _optimize_moves(moves, generators)
+        state_vec = [int(x) for x in state_key.split(',')]
+        final_state = _apply_moves(state_vec, optimized, generators)
+        if list(final_state) != list(central):
+            raise ValueError(f'Optimized path is invalid for row {idx}')
         lookup[state_key] = '.'.join(optimized)
     return lookup
 
@@ -367,7 +468,8 @@ def _load_bundle() -> tuple[list[int], Dict[str, List[int]], Dict[str, str]]:
     if not lookup and test_csv.exists() and optimized_submission.exists():
         lookup = _load_submission_lookup(test_csv, optimized_submission)
     if not lookup and test_csv.exists() and sample_csv.exists():
-        lookup = _build_optimized_lookup(test_csv, sample_csv, generators)
+        lookup = _build_optimized_lookup(test_csv, sample_csv, generators, central)
+        _maybe_write_optimized_lookup(optimized_lookup_json, lookup)
 
     _CACHE = (central, generators, lookup)
     return _CACHE
@@ -395,7 +497,7 @@ def solve(vec: Sequence[int]) -> Tuple[MoveOut, List[int]]:
     state_key = ','.join(str(int(x)) for x in state)
     path = lookup.get(state_key)
     if path is not None:
-        moves = [] if not path else path.split('.')
+        moves = [] if not path else [move for move in path.split('.') if move]
         return moves, _apply_moves(state, moves, generators)
     return 'UNSOLVED', list(state)
 
@@ -413,6 +515,7 @@ def _main() -> None:
 
 if __name__ == '__main__':
     _main()
+
 ```
 
 Output requirements for your answer
