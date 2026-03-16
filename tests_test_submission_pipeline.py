@@ -46,7 +46,7 @@ def test_infer_format_slug_from_sample_header(tmp_path):
 
 
 
-def test_megaminx_baseline_returns_known_path_for_bundled_state():
+def test_megaminx_baseline_returns_valid_optimized_path_for_bundled_state():
     import importlib.util
     import json as _json
 
@@ -65,7 +65,7 @@ def test_megaminx_baseline_returns_known_path_for_bundled_state():
     vec = [int(x) for x in test_row["initial_state"].split(",")]
     moves, out_vec = module.solve(vec)
     assert isinstance(moves, list)
-    assert ".".join(moves) == sample_row["path"]
+    assert len(moves) <= len(sample_row["path"].split("."))
 
     puzzle_info = _json.loads((ROOT / "competitions" / "cayley-py-megaminx" / "data" / "puzzle_info.json").read_text(encoding="utf-8"))
     assert out_vec == puzzle_info["central_state"]
@@ -189,3 +189,32 @@ def test_resolve_smoke_vectors_for_megaminx_includes_nontrivial_test_state():
     assert len(vectors) >= 2
     assert vectors[0] == list(range(120))
     assert any(vec != list(range(120)) for vec in vectors[1:])
+
+def test_megaminx_optimized_lookup_beats_sample_for_known_row():
+    import importlib.util
+
+    solver_path = ROOT / "competitions" / "cayley-py-megaminx" / "solve_module.py"
+    spec = importlib.util.spec_from_file_location("megaminx_solve_module_opt", solver_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+
+    test_csv = ROOT / "competitions" / "cayley-py-megaminx" / "data" / "test.csv"
+    sample_csv = ROOT / "competitions" / "cayley-py-megaminx" / "data" / "sample_submission.csv"
+    optimized_csv = ROOT / "competitions" / "cayley-py-megaminx" / "submissions" / "optimized_submission.csv"
+
+    with test_csv.open(newline="", encoding="utf-8") as tf, sample_csv.open(newline="", encoding="utf-8") as sf, optimized_csv.open(newline="", encoding="utf-8") as of:
+        test_rows = list(csv.DictReader(tf))
+        sample_rows = list(csv.DictReader(sf))
+        optimized_rows = list(csv.DictReader(of))
+
+    idx = 100
+    vec = [int(x) for x in test_rows[idx]["initial_state"].split(",")]
+    sample_len = len(sample_rows[idx]["path"].split("."))
+    optimized_len = len(optimized_rows[idx]["path"].split("."))
+
+    moves, out_vec = module.solve(vec)
+    assert isinstance(moves, list)
+    assert len(moves) == optimized_len
+    assert optimized_len < sample_len
+    assert out_vec == list(range(120))

@@ -1,0 +1,29 @@
+Megaminx optimized validation summary
+====================================
+
+Artifacts added:
+- competitions/cayley-py-megaminx/data/optimized_lookup.json
+- competitions/cayley-py-megaminx/data/optimized_stats.json
+- competitions/cayley-py-megaminx/submissions/optimized_submission.csv
+- competitions/cayley-py-megaminx/build_optimized_assets.py
+- competitions/cayley-py-megaminx/OPTIMIZATION_NOTES.md
+
+Measured scores:
+- sample_submission.csv : 500572
+- optimized_submission.csv : 416067
+- delta : 84505
+
+Validation performed:
+1. python competitions/cayley-py-megaminx/build_optimized_assets.py
+   -> score_original=500572 score_optimized=416067 score_delta=84505
+2. python -m pytest tests_test_submission_pipeline.py -q
+   -> 10 passed
+3. python -m pytest tests_test_competition_assets.py -q
+   -> 4 passed
+4. python pipeline_cli.py run --competition cayley-py-megaminx --output /mnt/data/work/megaminx_submission_from_pipeline.csv --no-llm --no-progress --no-run-log
+   -> completed successfully
+5. Full row-by-row validation of optimized_submission.csv against test.csv and puzzle_info.json
+   -> validated_rows=1001, score=416067
+
+Pipeline output equality check:
+- /mnt/data/work/megaminx_submission_from_pipeline.csv == competitions/cayley-py-megaminx/submissions/optimized_submission.csv
