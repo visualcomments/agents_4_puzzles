@@ -18,3 +18,9 @@ Build via the repo pipeline (offline):
 Submit to Kaggle (optional):
 
     python ../../pipeline_cli.py run --competition cayley-py-megaminx --output submissions/submission.csv --no-llm --submit --message optimized --kaggle-json /path/to/kaggle.json --submit-via api
+
+
+Generate solver with prompt variants:
+
+    python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_regular.py --prompt-variant regular
+    python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_improved.py --prompt-variant improved

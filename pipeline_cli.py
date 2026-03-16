@@ -844,6 +844,42 @@ def _resolve_default_puzzles(spec: PipelineSpec) -> Path:
     )
 
 
+def _variant_prompt_path(base: Optional[Path], variant: Optional[str], *, role: str) -> Optional[Path]:
+    if base is None or not variant:
+        return base
+    parent = base.parent
+    suffix = base.suffix
+    stem = base.stem
+
+    if role == "prompt":
+        candidates = [
+            parent / f"{stem}_{variant}{suffix}",
+            parent / f"user_prompt_{variant}{suffix}",
+        ]
+    else:
+        candidates = [
+            parent / f"custom_prompts_{variant}{suffix}",
+            parent / f"{stem}_{variant}{suffix}",
+        ]
+
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    raise SystemExit(
+        f"Requested --prompt-variant={variant!r}, but no matching {role} file was found near {base}. "
+        f"Tried: {', '.join(str(c) for c in candidates)}"
+    )
+
+
+def _resolve_prompt_bundle(spec: PipelineSpec, args: argparse.Namespace) -> tuple[Path, Optional[Path]]:
+    variant = getattr(args, "prompt_variant", None)
+    prompt_file = Path(args.prompt_file) if getattr(args, "prompt_file", None) else _variant_prompt_path(spec.prompt_file, variant, role="prompt")
+    if prompt_file is None:
+        raise SystemExit(f"No prompt_file configured for {spec.key}; pass --prompt-file.")
+    custom_prompts = Path(args.custom_prompts) if getattr(args, "custom_prompts", None) else _variant_prompt_path(spec.custom_prompts_file, variant, role="custom prompts")
+    return prompt_file, custom_prompts
+
+
 def _resolve_sample_submission(spec: PipelineSpec) -> Optional[Path]:
     """Locate sample_submission.csv, preferring the competition ZIP when present."""
     from_zip = _prefer_sample_submission_from_zip(spec)
@@ -1951,12 +1987,8 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Select prompt bundle (can be overridden)
-    prompt_file = Path(args.prompt_file) if args.prompt_file else spec.prompt_file
-    if prompt_file is None:
-        raise SystemExit(f"No prompt_file configured for {spec.key}; pass --prompt-file.")
-
-    custom_prompts = Path(args.custom_prompts) if args.custom_prompts else spec.custom_prompts_file
+    # Select prompt bundle (can be overridden, or switched via --prompt-variant)
+    prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
 
     if args.no_llm:
         # Copy baseline
@@ -2266,11 +2298,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             shutil.copyfile(spec.baseline_solver, solver_path)
             print(f"[run] --no-llm: copied baseline solver -> {solver_path}")
         else:
-            prompt_file = Path(args.prompt_file) if args.prompt_file else spec.prompt_file
-            if prompt_file is None:
-                raise SystemExit(f"No prompt_file configured for {spec.key}; pass --prompt-file.")
-
-            custom_prompts = Path(args.custom_prompts) if args.custom_prompts else spec.custom_prompts_file
+            prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
 
             _run_agent_laboratory(
                 prompt_file=prompt_file,
@@ -2512,6 +2540,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--competition", required=True, help="Competition slug / pipeline key")
     sp.add_argument("--out", required=True, help="Output path for generated solver")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override AgentLaboratory custom prompts JSON")
     sp.add_argument(
         "--models",
@@ -2589,6 +2618,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--puzzles", required=False, default=None, help="Input puzzles/test CSV (optional; uses bundled competitions/<slug>/data/test.csv if omitted)")
     sp.add_argument("--output", required=True, help="Submission CSV output")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override custom prompts JSON")
     sp.add_argument(
         "--models",

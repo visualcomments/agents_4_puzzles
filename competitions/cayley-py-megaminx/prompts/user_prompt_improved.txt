@@ -1,51 +1,103 @@
 We are solving the Kaggle competition "CayleyPy Megaminx Solve Optimally":
 https://www.kaggle.com/competitions/cayley-py-megaminx
 
-I need a Python module `solve_module.py` that improves an already working Megaminx solver while preserving full compatibility with the official competition bundle.
+I need a Python module `solve_module.py` that takes an already working Megaminx baseline and improves it aggressively for lower Kaggle score while keeping full correctness on the official bundled dataset.
 
 ABSOLUTE REQUIREMENTS
-- Start from the baseline code below. It already produces a valid bundled-data submission.
-- Use ONLY the official competition move names from `puzzle_info.json`.
-- Do NOT rename generators internally.
-- Do NOT invent moves.
-- Moves are applied left-to-right exactly as in the competition.
-- Preserve the API `solve(vec) -> (moves, sorted_array)`.
-- `sorted_array` must be the actual final state obtained after applying the returned moves.
-- When run as a script:
-  `python solve_module.py "[1,2,3]"`
-  it must print JSON: `{"moves": [...], "sorted_array": [...]}`
+- Start from the exact baseline code below.
+- Preserve the public API `solve(vec) -> (moves, sorted_array)`.
+- `vec` is a Python list[int].
+- `moves` must be a list[str] of legal move names from `puzzle_info.json`.
+- `sorted_array` must be the actual final array obtained by applying `moves` to `vec`.
+- Script mode must print JSON: `{"moves": [...], "sorted_array": [...]}`.
+- Use ONLY official competition move names from `puzzle_info.json`.
+- Do NOT rename move tokens internally.
+- Do NOT invent extra generators, macros, placeholder tokens, or hidden aliases.
+- Move application semantics are the official competition semantics: left-to-right permutation reindexing.
 
-COMPETITION CONTEXT YOU MUST USE
-- The Megaminx competition state is a permutation vector of length 120.
-- The solved state is the central state from `puzzle_info.json`.
-- Legal generators are the Megaminx face turns and their inverses from `puzzle_info.json`.
-- Submission paths are dot-separated generator names.
-- The Kaggle score is the sum of move counts over all 1001 test states.
-- `sample_submission.csv` is valid but highly non-optimal, so improving existing valid paths is a correct and important direction.
+COMPETITION FACTS YOU MUST USE
+- The state is a permutation vector of length 120.
+- The solved state is `central_state` from `puzzle_info.json`.
+- The allowed face turns are exactly the Megaminx generators from `puzzle_info.json` and their inverses.
+- Submission rows are dot-separated move names.
+- The test bundle has 1001 valid initial states.
+- The metric is the SUM of solution lengths over all rows, so shorter valid paths are strictly better.
+- `sample_submission.csv` contains valid but highly non-optimal solution paths, which means path compression / exact path rewriting is a legitimate baseline-improvement strategy.
 
-IMPORTANT SOLVER DESIGN RULES
-- Preserve the current exact-match bundled lookup behavior. If the input vector matches a bundled test state, return a valid path for that exact state.
-- The baseline already has an optimized bundled lookup pipeline. Do not throw that away.
-- Improve the baseline in ways that reduce move count and/or runtime overhead while keeping correctness.
-- Prefer deterministic polynomial-time optimizations over generic exponential search.
-- Small fixed-radius exact optimization is allowed, because the radius is constant and does not grow with input size.
-- Whole-state-space search, IDA*, A*, BFS, DFS, beam search over growing depth, or brute force over full states are forbidden.
+KEY STRATEGIC DIRECTION
+The current baseline is already doing the right high-level thing:
+1. load the official bundle;
+2. prefer exact bundled state -> path lookup;
+3. optimize those known valid paths instead of trying to solve Megaminx from scratch for every row;
+4. replay the optimized path to produce the final state.
 
-WHAT TO IMPROVE
-You should look for safe, high-leverage improvements such as:
-- stronger cancellation of inverse pairs and repeated face powers using the correct face order;
-- better canonicalization of commuting moves using the actual generator commutation structure derived from `puzzle_info.json`;
-- stronger short-word exact replacement tables for local path fragments;
-- better local dynamic programming / window optimization for dot-separated move sequences;
-- multi-pass normalization until convergence when it is still polynomial and practical;
-- caching of permutations and short words to keep runtime low;
-- preserving exact bundled-data validity while improving path compression quality.
+You must KEEP that structure.
+Do NOT regress to a weaker generic heuristic.
+Do NOT replace exact lookup with a search that can fail.
+Do NOT remove the bundled optimized lookup support.
 
-VERY IMPORTANT
-- Do NOT replace the current approach with a generic heuristic that can return invalid or unsolved outputs for bundled states.
-- Do NOT return `UNSOLVED` for bundled competition rows if the baseline can solve them.
-- Prefer exact bundled lookup first, then safe deterministic fallback only if necessary.
-- Keep the implementation self-contained and standard-library only.
+WHAT THE IMPROVED SOLVER SHOULD DO
+Treat the baseline as a path-rewriting engine over valid Megaminx words and make it stronger.
+The main opportunity is not generic puzzle search; it is exploiting algebraic structure of the official generators to compress known valid words better.
+
+Concretely, improve along lines like these:
+- derive and cache the commutation graph from the official generator permutations;
+- reduce repeated powers of the same face using the true order of a Megaminx face turn;
+- normalize commuting blocks into a canonical order so more cancellations become adjacent;
+- remove immediate inverse pairs online and across normalization passes;
+- build stronger constant-radius exact replacement tables for short move words using permutation composition;
+- use dynamic programming over windows to replace long local fragments with shorter equivalent words;
+- run several cheap normalization / DP passes until no further improvement occurs;
+- avoid recomputing expensive composed permutations repeatedly;
+- keep runtime comfortably polynomial and practical for the full 1001-row bundle.
+
+ALLOWED / FORBIDDEN SEARCH
+Allowed:
+- exact precomputation on a fixed small radius over move words;
+- constant-depth local replacement tables;
+- dynamic programming on bounded windows;
+- algebraic normalization based on the official permutations.
+
+Forbidden:
+- BFS / DFS / A* / IDA* / beam search whose depth grows with the instance;
+- whole-state-space enumeration;
+- brute-force solving from scratch per puzzle state;
+- anything that risks invalid bundled outputs just to be more generic.
+
+CRITICAL IMPLEMENTATION REQUIREMENTS
+- Keep the solver self-contained and standard-library only.
+- Preserve exact bundled lookup compatibility with:
+  - `optimized_lookup.json` if present,
+  - bundled optimized submission if present,
+  - otherwise deterministic rebuilding from `sample_submission.csv`.
+- If you introduce stronger optimization passes, they must preserve semantic equivalence of the path.
+- Every returned path for bundled rows must still solve to the central state.
+- Prefer readable, well-factored helpers over clever but opaque code.
+- Improve both move count and runtime overhead where reasonable.
+
+BASELINE BOTTLENECKS / LIMITS TO IMPROVE
+The current baseline is good, but still leaves score on the table because it mainly does:
+- commuting normalization,
+- short exact-table replacement up to a small fixed depth,
+- bounded local DP on windows.
+
+You should try to make these components stronger without breaking the polynomial-time design.
+For example, consider whether one or more of the following is safe and worthwhile:
+- a larger but still practical short-word exact table;
+- better pruning while building the short-word table;
+- smarter canonical-state / best-word selection criteria;
+- multi-pass left-to-right / right-to-left local optimization;
+- better handling of inverse notation during normalization;
+- exact equivalence replacement for common Megaminx face patterns;
+- compact memoization of composed permutations;
+- preserving the shortest representative found for each local permutation effect.
+
+DO NOT DEGRADE THESE PROPERTIES
+- exact bundled-state solving;
+- legal move names only;
+- actual final state returned;
+- one-file output contract;
+- deterministic behavior.
 
 BASELINE CODE TO IMPROVE
 ```python
