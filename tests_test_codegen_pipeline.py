@@ -2,7 +2,6 @@ from pathlib import Path
 import json
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -270,45 +269,97 @@ def solve(vec):
     assert '# inline comment' not in code
 
 
-def test_run_validator_times_out_hanging_solver(monkeypatch, tmp_path):
-    solver_path = tmp_path / 'hang_solver.py'
-    solver_path.write_text(
-        'import time\nimport sys\n'
-        'time.sleep(30)\n',
-        encoding='utf-8',
-    )
-    validator_path = ROOT / 'competitions' / 'cayley-py-megaminx' / 'validate_solve_output.py'
+def test_generate_plan_candidates_deduplicates_and_ranks(monkeypatch):
+    outputs = iter([
+        'Algorithm family: constructive\nInvariants: maintain parity\nComplexity: O(n)',
+        'Algorithm family: constructive\nInvariants: maintain parity\nComplexity: O(n)',
+        'Algorithm family: BFS\nComplexity: exponential brute force',
+    ])
 
-    monkeypatch.setenv('AGENTLAB_VALIDATOR_TIMEOUT_S', '0.2')
-    monkeypatch.setenv('AGENTLAB_VALIDATOR_OUTER_TIMEOUT_S', '1.0')
+    monkeypatch.setattr(rpp, '_query_model_stable', lambda *args, **kwargs: next(outputs))
 
-    start = time.monotonic()
-    rc, out, err = rpp.run_validator(validator_path, solver_path, [0, 1, 2, 3])
-    elapsed = time.monotonic() - start
-
-    assert rc != 0
-    assert elapsed < 3.0
-    assert out.strip() == ''
-    assert 'timed out' in err.lower() or 'timeout' in err.lower()
-
-
-def test_run_validator_outer_timeout_kills_stuck_validator(monkeypatch, tmp_path):
-    solver_path = tmp_path / 'dummy_solver.py'
-    solver_path.write_text('print("{}")\n', encoding='utf-8')
-    validator_path = tmp_path / 'hang_validator.py'
-    validator_path.write_text(
-        'import time\n'
-        'time.sleep(30)\n',
-        encoding='utf-8',
+    plans = rpp.generate_plan_candidates(
+        ['local:planner-a', 'g4f:planner-b'],
+        'solve it',
+        'planner system',
+        beam_width=2,
     )
 
-    monkeypatch.setenv('AGENTLAB_VALIDATOR_TIMEOUT_S', '0.2')
-    monkeypatch.setenv('AGENTLAB_VALIDATOR_OUTER_TIMEOUT_S', '0.5')
+    assert len(plans) == 2
+    assert 'constructive' in plans[0].plan_text.lower()
+    assert plans[0].score > plans[1].score
+    assert plans[1].score < 0
 
-    start = time.monotonic()
-    rc, out, err = rpp.run_validator(validator_path, solver_path, [0, 1, 2, 3])
-    elapsed = time.monotonic() - start
+
+
+def test_run_hybrid_codegen_search_uses_archive_for_refinement(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_generate(planner_models, user_prompt, planner_system_prompt, *, beam_width, archive_summary='', baseline_code=None):
+        calls.append(archive_summary)
+        if not archive_summary:
+            return [rpp.PlanCandidate(plan_text='bad plan', planner_model='g4f:planner', score=1.0, variant_index=1)]
+        assert 'compile check failed' in archive_summary.lower()
+        return [rpp.PlanCandidate(plan_text='good plan with invariants', planner_model='g4f:planner', score=2.0, variant_index=2)]
+
+    def fake_try_generate_with_model(**kwargs):
+        if 'good plan' in kwargs['plan']:
+            return True, 'g4f:coder: coder refine 1 variant 2 output validated immediately'
+        return False, 'Initial compile check failed. missing colon'
+
+    monkeypatch.setattr(rpp, 'generate_plan_candidates', fake_generate)
+    monkeypatch.setattr(rpp, 'try_generate_with_model', fake_try_generate_with_model)
+
+    ok, reports, archive, plan, planner_model, winner_model = rpp.run_hybrid_codegen_search(
+        planner_models=['g4f:planner'],
+        coder_models=['local:coder'],
+        fixer_models=['local:fixer'],
+        user_prompt='solve it',
+        prompts={'planner': 'planner', 'coder': 'coder', 'fixer': 'fixer'},
+        out_path=tmp_path / 'solve.py',
+        validator_path=tmp_path / 'validator.py',
+        tests=[[1, 2, 3]],
+        max_iters=2,
+        baseline_code='def solve(vec):\n    return [], list(vec)\n',
+        plan_beam_width=1,
+        frontier_width=1,
+        archive_size=4,
+        refine_rounds=1,
+    )
+
+    assert ok is True
+    assert winner_model == 'local:coder'
+    assert planner_model == 'g4f:planner'
+    assert 'good plan' in plan
+    assert len(reports) == 2
+    assert calls[0] == ''
+    assert 'compile check failed' in calls[1].lower()
+    assert archive.best_failures(limit=1)
+
+
+def test_run_validator_times_out_on_hanging_validator(monkeypatch, tmp_path):
+    validator = tmp_path / 'validator.py'
+    solver = tmp_path / 'solver.py'
+    validator.write_text('import time\ntime.sleep(5)\n', encoding='utf-8')
+    solver.write_text('print("{}")\n', encoding='utf-8')
+
+    monkeypatch.setenv('AGENTLAB_VALIDATOR_TIMEOUT_S', '0.1')
+    rc, out, err = rpp.run_validator(validator, solver, [1, 2, 3])
 
     assert rc == 124
-    assert elapsed < 3.0
-    assert '[timeout] validator exceeded' in err
+    assert out == ''
+    assert 'validator timed out' in err
+
+
+def test_validate_solver_suite_reports_timeout(monkeypatch, tmp_path):
+    validator = tmp_path / 'validator.py'
+    solver = tmp_path / 'solver.py'
+    validator.write_text('import time\ntime.sleep(5)\n', encoding='utf-8')
+    solver.write_text('print("{}")\n', encoding='utf-8')
+
+    monkeypatch.setenv('AGENTLAB_VALIDATOR_TIMEOUT_S', '0.1')
+    ok, report = rpp.validate_solver_suite(validator, solver, [[1, 2, 3]])
+
+    assert ok is False
+    assert 'TEST 0 FAILED' in report
+    assert 'validator timed out' in report

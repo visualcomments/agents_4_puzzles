@@ -57,6 +57,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+import re
 
 from pipeline_registry import PipelineSpec, get_pipeline, list_pipelines
 
@@ -84,7 +85,9 @@ def _gpu_diag_hint(selected_models: str) -> None:
     Why this exists:
     - Many users expect that selecting a remote model name (e.g. GPT-4 via g4f) uses the local GPU.
       It does not: those requests go to provider endpoints.
-    - GPU is only used when running *local* compute (e.g., Transformers local inference) inside this runtime.
+    - GPU is only used inside this runtime for `local:*` Transformers inference.
+    - Backends like `ollama:*`, `vllm:*`, `lmstudio:*`, `openai-compatible:*`, and `g4fapi:*`
+      may still use GPU, but on the external/local server process rather than in this Python process.
     """
     dev = (os.getenv("AGENTLAB_DEVICE") or "").strip()
     use_gpu = (os.getenv("AGENTLAB_USE_GPU") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -93,6 +96,11 @@ def _gpu_diag_hint(selected_models: str) -> None:
 
     models = [m.strip() for m in (selected_models or "").split(",") if m.strip()]
     has_local = any(m.startswith("local:") for m in models)
+    has_external_local_server = any(
+        m.startswith(prefix)
+        for m in models
+        for prefix in ("ollama:", "vllm:", "lmstudio:", "openai-compatible:", "openai_compatible:", "compat:", "g4fapi:")
+    )
 
     # Torch/CUDA availability (best effort)
     try:
@@ -110,11 +118,16 @@ def _gpu_diag_hint(selected_models: str) -> None:
     except Exception:
         print("[gpu] requested via env, but torch is not available in this environment.")
 
-    if not has_local:
+    if not has_local and not has_external_local_server:
         print(
             "[gpu] NOTE: your --models list contains no 'local:*' models. "
             "g4f/OpenAI/Claude/Gemini backends run remotely, so local GPU memory will stay near 0. "
-            "If you want to actually use GPU, pass e.g. --models 'local:Qwen/Qwen2.5-0.5B-Instruct' (and ensure torch+transformers are installed)."
+            "If you want in-process GPU inference, pass e.g. --models 'local:Qwen/Qwen2.5-0.5B-Instruct' (and ensure torch+transformers are installed)."
+        )
+    elif has_external_local_server and not has_local:
+        print(
+            "[gpu] NOTE: your selected models use an external/local server backend (ollama/vllm/LM Studio/OpenAI-compatible/g4fapi). "
+            "GPU may be used by that server, but this Python process will still appear mostly CPU-only."
         )
 
 def _normalize_g4f_model_name(model: str) -> str:
@@ -304,6 +317,158 @@ def _probe_g4f_model_pipeline(
             else:
                 os.environ["G4F_PROVIDER"] = old_provider
 
+
+
+
+
+def _split_accidental_joined_kaggle_token(argv: Sequence[str]) -> List[str]:
+    """Split tokens like ``4000kaggle competitions submit ...``.
+
+    This catches the common shell line-continuation mistake where a trailing
+    backslash joins the next line directly onto the previous token.
+    """
+    out: List[str] = []
+    for idx, token in enumerate(argv):
+        if (
+            token != "kaggle"
+            and token.endswith("kaggle")
+            and idx + 2 < len(argv)
+            and argv[idx + 1] == "competitions"
+            and argv[idx + 2] == "submit"
+        ):
+            prefix = token[: -len("kaggle")]
+            if prefix:
+                out.append(prefix)
+            out.append("kaggle")
+            continue
+        out.append(token)
+    return out
+
+
+def _find_option_value(argv: Sequence[str], *names: str) -> Optional[str]:
+    for idx, token in enumerate(argv[:-1]):
+        if token in names:
+            return argv[idx + 1]
+    return None
+
+
+def _replace_option_value(argv: List[str], names: Sequence[str], value: str) -> List[str]:
+    out = list(argv)
+    for idx, token in enumerate(out[:-1]):
+        if token in names:
+            out[idx + 1] = value
+            return out
+    if names:
+        out.extend([names[0], value])
+    return out
+
+
+def _parse_embedded_kaggle_submit_tail(tail: Sequence[str]) -> Dict[str, str]:
+    if len(tail) < 3 or list(tail[:3]) != ["kaggle", "competitions", "submit"]:
+        raise ValueError("not a kaggle competitions submit tail")
+
+    competition: Optional[str] = None
+    file_path: Optional[str] = None
+    message: Optional[str] = None
+    idx = 3
+    while idx < len(tail):
+        tok = tail[idx]
+        if tok in {"-c", "--competition"}:
+            if idx + 1 >= len(tail):
+                raise ValueError("missing value after -c/--competition")
+            competition = tail[idx + 1]
+            idx += 2
+            continue
+        if tok in {"-f", "--file"}:
+            if idx + 1 >= len(tail):
+                raise ValueError("missing value after -f/--file")
+            file_path = tail[idx + 1]
+            idx += 2
+            continue
+        if tok in {"-m", "--message"}:
+            if idx + 1 >= len(tail):
+                raise ValueError("missing value after -m/--message")
+            message = tail[idx + 1]
+            idx += 2
+            continue
+        if tok.startswith("-"):
+            raise ValueError(f"unsupported kaggle submit option: {tok}")
+        if competition is None:
+            competition = tok
+            idx += 1
+            continue
+        raise ValueError(f"unexpected extra kaggle submit token: {tok}")
+
+    if not competition:
+        raise ValueError("missing Kaggle competition slug")
+    if not file_path:
+        raise ValueError("missing Kaggle submission file (-f)")
+    if not message:
+        raise ValueError("missing Kaggle submission message (-m)")
+    return {"competition": competition, "file": file_path, "message": message}
+
+
+def _rewrite_embedded_kaggle_submit(argv: Sequence[str]) -> Tuple[List[str], Optional[str]]:
+    """Rewrite accidental ``... run ... kaggle competitions submit ...`` tails.
+
+    Returns ``(argv, note)`` where ``note`` is a human-readable explanation if
+    a rewrite took place.
+    """
+    normalized = _split_accidental_joined_kaggle_token(list(argv))
+    if not normalized or normalized[0] != "run":
+        return normalized, None
+
+    start = -1
+    for idx in range(1, len(normalized) - 2):
+        if normalized[idx:idx + 3] == ["kaggle", "competitions", "submit"]:
+            start = idx
+            break
+    if start < 0:
+        return normalized, None
+
+    base = normalized[:start]
+    tail = normalized[start:]
+    parsed = _parse_embedded_kaggle_submit_tail(tail)
+
+    requested_output = _find_option_value(base, "--output")
+    if requested_output and requested_output != parsed["file"]:
+        base = _replace_option_value(base, ["--output"], parsed["file"])
+    elif not requested_output:
+        base.extend(["--output", parsed["file"]])
+
+    if "--submit" not in base:
+        base.append("--submit")
+    if "--message" in base:
+        base = _replace_option_value(base, ["--message"], parsed["message"])
+    else:
+        base.extend(["--message", parsed["message"]])
+
+    if "--submit-competition" in base:
+        base = _replace_option_value(base, ["--submit-competition"], parsed["competition"])
+    else:
+        base.extend(["--submit-competition", parsed["competition"]])
+
+    if "--submit-via" not in base:
+        base.extend(["--submit-via", "cli"])
+
+    note = (
+        "[cli] detected an embedded 'kaggle competitions submit ...' tail after "
+        "'pipeline_cli.py run'. Bash line continuation joined both commands, so "
+        "the CLI rewrote it to the built-in form: --submit --submit-via cli "
+        f"--submit-competition {parsed['competition']} --message {parsed['message']!r}."
+    )
+    return base, note
+
+
+def _format_unknown_args_error(unknown: Sequence[str]) -> str:
+    msg = "unrecognized arguments: " + " ".join(unknown)
+    if len(unknown) >= 3 and list(unknown[:3]) == ["kaggle", "competitions", "submit"]:
+        msg += (
+            "\nHint: you appended a raw 'kaggle competitions submit ...' command to "
+            "'pipeline_cli.py run'. Use either two separate shell commands joined by '&&', "
+            "or use the built-in submit flags: --submit --message '...'."
+        )
+    return msg
 
 def _probe_g4f_models_sync(
     candidates: Sequence[str],
@@ -588,13 +753,15 @@ def _extract_named_member_from_zip(zip_path: Path, member_name: str, out_path: P
 def _prefer_sample_submission_from_zip(spec: PipelineSpec) -> Optional[Path]:
     """Materialize sample_submission.csv from the competition ZIP when available.
 
-    This keeps the local schema in sync with the actual competition bundle and
-    avoids stale checked-in samples.
+    Important: extract into a cache path rather than overwriting the checked-in
+    repository fixture. This keeps schema checks aligned with the actual
+    competition bundle without mutating tracked files during selftests or CLI
+    runs.
     """
     zip_path = _resolve_competition_zip(spec)
     if zip_path is None:
         return None
-    target = ROOT / "competitions" / spec.key / "data" / "sample_submission.csv"
+    target = ROOT / "_cache" / "competition_bundle_schema" / spec.key / "sample_submission.csv"
     try:
         return _extract_named_member_from_zip(zip_path, "sample_submission.csv", target)
     except Exception:
@@ -851,7 +1018,10 @@ def _validate_submission_move_tokens(
             max_tokens = max(max_tokens, len(tokens))
             for token in tokens:
                 if token == 'UNSOLVED':
-                    continue
+                    raise ValueError(
+                        f"Row {row_idx}: UNSOLVED is not a legal Kaggle move sequence. "
+                        "Use a valid dot-separated path or fall back to a known-good baseline."
+                    )
                 if token not in allowed_moves:
                     raise ValueError(
                         f"Row {row_idx}: unknown move {token!r}. "
@@ -1206,46 +1376,106 @@ def _extract_state(row: Dict[str, str], spec: PipelineSpec, vector_col_override:
     )
 
 
-def _validate_solver(solver_path: Path, validator_path: Path, smoke_vector: Sequence[int]) -> None:
-    print(f"[validate] {validator_path.name} ...")
-    subprocess.check_call(
-        [
+def _solver_validation_timeout_s() -> float:
+    raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 20.0
+
+
+def _resolve_smoke_vectors(spec: PipelineSpec, extra_rows: int = 2) -> list[list[int]]:
+    vectors: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+
+    def _add(vec: Sequence[int] | None) -> None:
+        if vec is None:
+            return
+        norm = [int(x) for x in vec]
+        sig = tuple(norm)
+        if sig in seen:
+            return
+        seen.add(sig)
+        vectors.append(norm)
+
+    _add(spec.smoke_vector)
+
+    if extra_rows <= 0:
+        return vectors
+
+    try:
+        puzzles_csv = _resolve_default_puzzles(spec)
+        _ensure_csv_field_size_limit()
+        with puzzles_csv.open(newline='', encoding='utf-8', errors='ignore') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    vec = _extract_state(row, spec)
+                except Exception:
+                    continue
+                if not vec:
+                    continue
+                _add(vec)
+                if len(vectors) >= 1 + extra_rows:
+                    break
+    except Exception:
+        pass
+
+    return vectors
+
+
+def _normalize_smoke_vectors(smoke_vector: Sequence[int] | Sequence[Sequence[int]]) -> list[list[int]]:
+    if not smoke_vector:
+        return []
+    first = smoke_vector[0]  # type: ignore[index]
+    if isinstance(first, (list, tuple)):
+        return [[int(x) for x in vec] for vec in smoke_vector]  # type: ignore[arg-type]
+    return [[int(x) for x in smoke_vector]]  # type: ignore[arg-type]
+
+
+def _validate_solver(solver_path: Path, validator_path: Path, smoke_vector: Sequence[int] | Sequence[Sequence[int]]) -> None:
+    smoke_vectors = _normalize_smoke_vectors(smoke_vector)
+    total = len(smoke_vectors)
+    if total == 0:
+        raise ValueError("at least one smoke vector is required")
+
+    timeout_s = _solver_validation_timeout_s()
+    for idx, one_vec in enumerate(smoke_vectors, start=1):
+        label = validator_path.name if total == 1 else f"{validator_path.name} [{idx}/{total}]"
+        print(f"[validate] {label} ...")
+        cmd = [
             PYTHON,
             str(validator_path),
             "--solver",
             str(solver_path),
             "--vector",
-            json.dumps(list(smoke_vector)),
+            json.dumps(list(one_vec)),
         ]
-    )
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout or ""
+            err = exc.stderr or ""
+            if out:
+                print(out, end="" if out.endswith("\n") else "\n")
+            if err:
+                print(err, end="" if err.endswith("\n") else "\n", file=sys.stderr)
+            raise RuntimeError(
+                f"Validator timed out after {timeout_s:g}s for {solver_path}. "
+                "This usually means solve(vec) got stuck during smoke validation."
+            ) from exc
+        if proc.returncode != 0:
+            if proc.stdout:
+                print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+            if proc.stderr:
+                print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", file=sys.stderr)
+            raise subprocess.CalledProcessError(proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr)
 
 
 def _ensure_llm_puzzles_on_path() -> None:
     lp_dir = ROOT / "llm-puzzles"
-    lp_dir_str = str(lp_dir)
-    if lp_dir_str not in sys.path:
-        sys.path.insert(0, lp_dir_str)
-
-    # Guard against accidentally importing an unrelated third-party/site-package
-    # named ``src``. The llm-puzzles adapters are expected to resolve from
-    # <repo>/llm-puzzles/src, but without an __init__.py that package can be
-    # shadowed by another regular package on sys.path. If a foreign ``src`` has
-    # already been imported, clear it so the next import resolves to the local
-    # llm-puzzles package we just prepended.
-    src_mod = sys.modules.get("src")
-    if src_mod is None:
-        return
-
-    src_file = getattr(src_mod, "__file__", None)
-    src_paths = [str(p) for p in getattr(src_mod, "__path__", [])]
-    if src_file and src_file.startswith(lp_dir_str):
-        return
-    if any(path.startswith(lp_dir_str) for path in src_paths):
-        return
-
-    for name in list(sys.modules):
-        if name == "src" or name.startswith("src."):
-            sys.modules.pop(name, None)
+    if str(lp_dir) not in sys.path:
+        sys.path.insert(0, str(lp_dir))
 
 
 def _legacy_kaggle_cli_submit_cmd(competition: str, submission_csv: Path, message: str) -> list[str]:
@@ -1382,7 +1612,18 @@ def _memory_env_for_codegen(models: str) -> dict[str, str]:
     return env
 
 
-def _agent_model_cli_args(*, agent_models: str | None = None, planner_models: str | None = None, coder_models: str | None = None, fixer_models: str | None = None) -> list[str]:
+def _agent_model_cli_args(
+    *,
+    agent_models: str | None = None,
+    planner_models: str | None = None,
+    coder_models: str | None = None,
+    fixer_models: str | None = None,
+    search_mode: str | None = None,
+    plan_beam_width: int | None = None,
+    frontier_width: int | None = None,
+    archive_size: int | None = None,
+    refine_rounds: int | None = None,
+) -> list[str]:
     args: list[str] = []
     if agent_models:
         args.extend(["--agent-models", agent_models])
@@ -1392,6 +1633,16 @@ def _agent_model_cli_args(*, agent_models: str | None = None, planner_models: st
         args.extend(["--coder-models", coder_models])
     if fixer_models:
         args.extend(["--fixer-models", fixer_models])
+    if search_mode:
+        args.extend(["--search-mode", search_mode])
+    if plan_beam_width is not None:
+        args.extend(["--plan-beam-width", str(max(1, int(plan_beam_width)))])
+    if frontier_width is not None:
+        args.extend(["--frontier-width", str(max(1, int(frontier_width)))])
+    if archive_size is not None:
+        args.extend(["--archive-size", str(max(1, int(archive_size)))])
+    if refine_rounds is not None:
+        args.extend(["--refine-rounds", str(max(0, int(refine_rounds)))])
     return args
 
 
@@ -1407,6 +1658,11 @@ def _run_agent_laboratory(
     planner_models: str | None = None,
     coder_models: str | None = None,
     fixer_models: str | None = None,
+    search_mode: str | None = None,
+    plan_beam_width: int | None = None,
+    frontier_width: int | None = None,
+    archive_size: int | None = None,
+    refine_rounds: int | None = None,
     max_iters: int = 8,
     no_llm: bool = False,
     allow_baseline: bool = True,
@@ -1420,7 +1676,6 @@ def _run_agent_laboratory(
     max_response_chars: int | None = None,
     g4f_request_timeout: float | None = None,
     g4f_stop_at_python_fence: Optional[bool] = None,
-    from_scratch: bool = False,
 ) -> None:
     """Run AgentLaboratory perm_pipeline to generate/repair a solver."""
 
@@ -1450,6 +1705,11 @@ def _run_agent_laboratory(
             planner_models=planner_models,
             coder_models=coder_models,
             fixer_models=fixer_models,
+            search_mode=search_mode,
+            plan_beam_width=plan_beam_width,
+            frontier_width=frontier_width,
+            archive_size=archive_size,
+            refine_rounds=refine_rounds,
         )
     )
 
@@ -1458,8 +1718,6 @@ def _run_agent_laboratory(
         cmd.append("--no-llm")
     if custom_prompts:
         cmd.extend(["--custom-prompts", str(custom_prompts)])
-    if from_scratch:
-        cmd.append("--from-scratch")
 
     env = os.environ.copy()
     effective_codegen_env = _memory_env_for_codegen(llm)
@@ -1704,7 +1962,7 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         # Copy baseline
         shutil.copyfile(spec.baseline_solver, out_path)
         print(f"[generate-solver] --no-llm: copied baseline -> {out_path}")
-        _validate_solver(out_path, spec.validator, spec.smoke_vector or [0, 1])
+        _validate_solver(out_path, spec.validator, _resolve_smoke_vectors(spec))
         return
 
     _gpu_diag_hint(args.models)
@@ -1720,6 +1978,11 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         planner_models=args.planner_models,
         coder_models=args.coder_models,
         fixer_models=args.fixer_models,
+        search_mode=args.search_mode,
+        plan_beam_width=args.plan_beam_width,
+        frontier_width=args.frontier_width,
+        archive_size=args.archive_size,
+        refine_rounds=args.refine_rounds,
         max_iters=args.max_iters,
         no_llm=False,
         allow_baseline=args.allow_baseline,
@@ -1733,10 +1996,9 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         max_response_chars=args.max_response_chars,
         g4f_request_timeout=args.g4f_request_timeout,
         g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
-        from_scratch=args.from_scratch,
     )
 
-    _validate_solver(out_path, spec.validator, spec.smoke_vector or [0, 1])
+    _validate_solver(out_path, spec.validator, _resolve_smoke_vectors(spec))
 
 
 def cmd_build_submission(args: argparse.Namespace) -> None:
@@ -1970,10 +2232,20 @@ def cmd_run(args: argparse.Namespace) -> None:
             "planner_models": args.planner_models,
             "coder_models": args.coder_models,
             "fixer_models": args.fixer_models,
+            "search_mode": args.search_mode,
+            "plan_beam_width": args.plan_beam_width,
+            "frontier_width": args.frontier_width,
+            "archive_size": args.archive_size,
+            "refine_rounds": args.refine_rounds,
             "max_iters": args.max_iters,
+            "print_generation": bool(args.print_generation),
+            "print_generation_max_chars": args.print_generation_max_chars,
+            "g4f_async": args.g4f_async,
+            "max_response_chars": args.max_response_chars,
+            "g4f_request_timeout": args.g4f_request_timeout,
+            "g4f_stop_at_python_fence": args.g4f_stop_at_python_fence,
             "vector_col": args.vector_col,
             "max_rows": args.max_rows,
-            "from_scratch": bool(args.from_scratch),
             "submit": bool(args.submit),
             "submit_via": args.submit_via,
             "submit_competition": args.submit_competition,
@@ -2011,6 +2283,11 @@ def cmd_run(args: argparse.Namespace) -> None:
                 planner_models=args.planner_models,
                 coder_models=args.coder_models,
                 fixer_models=args.fixer_models,
+                search_mode=args.search_mode,
+                plan_beam_width=args.plan_beam_width,
+                frontier_width=args.frontier_width,
+                archive_size=args.archive_size,
+                refine_rounds=args.refine_rounds,
                 max_iters=args.max_iters,
                 no_llm=False,
                 allow_baseline=args.allow_baseline,
@@ -2024,7 +2301,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 max_response_chars=args.max_response_chars,
                 g4f_request_timeout=args.g4f_request_timeout,
                 g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
-                from_scratch=args.from_scratch,
             )
 
         report["stages"]["generate_solver"]["end"] = time.time()
@@ -2034,7 +2310,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         # Smoke validate
         t1 = _stage("validate solver")
         report["stages"]["validate_solver"] = {"start": time.time()}
-        _validate_solver(solver_path, spec.validator, spec.smoke_vector or [0, 1])
+        _validate_solver(solver_path, spec.validator, _resolve_smoke_vectors(spec))
         report["stages"]["validate_solver"]["end"] = time.time()
         report["stages"]["validate_solver"]["seconds"] = report["stages"]["validate_solver"]["end"] - report["stages"]["validate_solver"]["start"]
         _stage_done("validate solver", t1)
@@ -2179,7 +2455,7 @@ def cmd_selftest(_: argparse.Namespace) -> None:
         shutil.copyfile(spec.baseline_solver, solver_path)
 
         # Validate on smoke vector
-        _validate_solver(solver_path, spec.validator, spec.smoke_vector or [0, 1])
+        _validate_solver(solver_path, spec.validator, _resolve_smoke_vectors(spec))
 
         # Build a tiny puzzles.csv depending on pipeline
         puzzles_csv = tmp / f"{spec.key}_puzzles.csv"
@@ -2192,11 +2468,11 @@ def cmd_selftest(_: argparse.Namespace) -> None:
                 w.writeheader()
                 w.writerow({"id": "0", "n": "5", "permutation": "3,0,1,4,2"})
         elif spec.key == "cayleypy-pancake":
-            # initial_state_id,initial_state,state_size
+            # id,n,permutation
             with puzzles_csv.open("w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=["initial_state_id", "initial_state", "state_size"])
+                w = csv.DictWriter(f, fieldnames=["id", "n", "permutation"])
                 w.writeheader()
-                w.writerow({"initial_state_id": "0", "initial_state": "3,1,2,0", "state_size": "4"})
+                w.writerow({"id": "0", "n": "4", "permutation": "3,1,2,0"})
         else:
             # generic vector column
             with puzzles_csv.open("w", newline="") as f:
@@ -2244,7 +2520,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated model list (passed to AgentLaboratory --models). "
             "Bare names use g4f backend (remote providers). "
-            "To use local GPU inference, pass items like 'local:<hf_model_id>'."
+            "You can also pass explicit backends like 'local:<hf_model_id>', 'ollama:<model>', 'vllm:<model>', "
+            "'lmstudio:<model>', 'openai-compatible:<model>', or 'g4fapi:<model>'."
         ),
     )
     sp.add_argument("--llm", dest="models", default=None, help=argparse.SUPPRESS)
@@ -2252,6 +2529,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--planner-models", default=None, help="Optional model list override for the planner agent.")
     sp.add_argument("--coder-models", default=None, help="Optional model list override for the coder agent.")
     sp.add_argument("--fixer-models", default=None, help="Optional model list override for the fixer agent.")
+    sp.add_argument("--search-mode", default="hybrid", choices=["classic", "hybrid"], help="classic = single-plan linear search; hybrid = multi-plan frontier search with experiment-memory refinement.")
+    sp.add_argument("--plan-beam-width", type=int, default=3, help="Planner beam width in hybrid mode.")
+    sp.add_argument("--frontier-width", type=int, default=6, help="Planner/coder frontier width per hybrid round.")
+    sp.add_argument("--archive-size", type=int, default=6, help="How many failed attempts to retain as hybrid experiment memory.")
+    sp.add_argument("--refine-rounds", type=int, default=1, help="How many planner refinement rounds to run in hybrid mode.")
     sp.add_argument("--max-iters", type=int, default=8)
     sp.add_argument("--g4f-recovery-rounds", type=int, default=None, help="Extra recovery rounds before offline fallback (forwarded to AgentLaboratory).")
     sp.add_argument("--g4f-recovery-max-iters", type=int, default=None, help="Fixer iterations per recovery round (forwarded to AgentLaboratory).")
@@ -2267,7 +2549,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-g4f-stop-at-python-fence", dest="g4f_stop_at_python_fence", action="store_false", help="Do not trim g4f output at the first python fence.")
     sp.set_defaults(g4f_async=None, g4f_stop_at_python_fence=None)
     sp.add_argument("--allow-baseline", action="store_true")
-    sp.add_argument("--from-scratch", action="store_true", help="Do not inject the checked-in baseline into AgentLaboratory prompts; pair with --strict to avoid offline fallback.")
     sp.add_argument("--no-llm", action="store_true", help="Skip LLM: just copy baseline")
     sp.set_defaults(func=cmd_generate_solver)
 
@@ -2316,7 +2597,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated model list (passed to AgentLaboratory --models). "
             "Bare names use g4f backend (remote providers). "
-            "To use local GPU inference, pass items like 'local:<hf_model_id>'."
+            "You can also pass explicit backends like 'local:<hf_model_id>', 'ollama:<model>', 'vllm:<model>', "
+            "'lmstudio:<model>', 'openai-compatible:<model>', or 'g4fapi:<model>'."
         ),
     )
     sp.add_argument("--llm", dest="models", default=None, help=argparse.SUPPRESS)
@@ -2324,6 +2606,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--planner-models", default=None, help="Optional model list override for the planner agent.")
     sp.add_argument("--coder-models", default=None, help="Optional model list override for the coder agent.")
     sp.add_argument("--fixer-models", default=None, help="Optional model list override for the fixer agent.")
+    sp.add_argument("--search-mode", default="hybrid", choices=["classic", "hybrid"], help="classic = single-plan linear search; hybrid = multi-plan frontier search with experiment-memory refinement.")
+    sp.add_argument("--plan-beam-width", type=int, default=3, help="Planner beam width in hybrid mode.")
+    sp.add_argument("--frontier-width", type=int, default=6, help="Planner/coder frontier width per hybrid round.")
+    sp.add_argument("--archive-size", type=int, default=6, help="How many failed attempts to retain as hybrid experiment memory.")
+    sp.add_argument("--refine-rounds", type=int, default=1, help="How many planner refinement rounds to run in hybrid mode.")
     sp.add_argument("--max-iters", type=int, default=8)
     sp.add_argument("--g4f-recovery-rounds", type=int, default=None, help="Extra recovery rounds before offline fallback (forwarded to AgentLaboratory).")
     sp.add_argument("--g4f-recovery-max-iters", type=int, default=None, help="Fixer iterations per recovery round (forwarded to AgentLaboratory).")
@@ -2339,7 +2626,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-g4f-stop-at-python-fence", dest="g4f_stop_at_python_fence", action="store_false", help="Do not trim g4f output at the first python fence.")
     sp.set_defaults(g4f_async=None, g4f_stop_at_python_fence=None)
     sp.add_argument("--allow-baseline", action="store_true")
-    sp.add_argument("--from-scratch", action="store_true", help="Do not inject the checked-in baseline into AgentLaboratory prompts; pair with --strict to avoid offline fallback.")
     sp.add_argument("--no-llm", action="store_true")
     sp.add_argument("--format", default=None, help="Override llm-puzzles format slug")
     sp.add_argument("--vector-col", default=None, help="Override state column")
@@ -2381,7 +2667,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    rewritten_argv, rewrite_note = _rewrite_embedded_kaggle_submit(raw_argv)
+    args, unknown = parser.parse_known_args(rewritten_argv)
+    if unknown:
+        parser.error(_format_unknown_args_error(unknown))
+    if rewrite_note:
+        print(rewrite_note, flush=True)
     args.func(args)
 
 

@@ -1,30 +1,39 @@
-You are writing a solver for the Kaggle competition "CayleyPy Transposons".
-Competition page (for reference): https://www.kaggle.com/competitions/cayleypy-transposons
+We are solving the Kaggle competition "CayleyPy Transposons Math (DNA jumping elements)".
+Reference: https://www.kaggle.com/competitions/cayleypy-transposons
 
-Task summary (local/offline version used by this repo):
-- Input to your solver is a permutation/state vector: a Python list of ints.
-- You must output a JSON object with keys:
-  - "moves": a list of move tokens (strings)
-  - "sorted_array": the resulting state after applying those moves
+PROBLEM SUMMARY
+- State: a permutation vector.
+- Goal: transform the input state into the central solved state from competitions/cayleypy-transposons/data/graphs_info.json for n = len(vec).
+- Legal moves are the generator names from graphs_info.json and look like T[i,j,k].
+- Kaggle submissions use dot-separated move names.
 
-Moves / generators:
-- A move token looks like:  T[i,j,k]
-- In this repository you can inspect available generators in:
-  competitions/cayleypy-transposons/data/graphs_info.json
-  (for each state size it contains "central_state" and a dict of "generators").
+INPUT / OUTPUT CONTRACT
+- Implement solve(vec) -> (moves, sorted_array)
+- moves must be either list[str] of legal generator names or the string "UNSOLVED"
+- sorted_array must be the final state after applying the moves
+- Script mode must print JSON: {"moves": ..., "sorted_array": ...}
 
-Goal:
-- Transform the given state into the corresponding "central_state" (the solved state).
-- Produce any valid sequence of moves; shorter is better on Kaggle, but correctness is the priority here.
+ALGORITHM REQUIREMENTS
+- Polynomial time only.
+- No BFS / DFS / A* / exhaustive graph search.
+- Constant-depth lookahead over the fixed generator list is allowed.
+- Never invent moves; use only generator names from graphs_info.json for the current n.
 
-Constraints for this repo's agent pipeline:
-- Do NOT use brute-force search over the whole state space.
-- Prefer constructive / greedy / polynomial-time methods.
-- Avoid Python built-in sorting (sorted / .sort) for the core logic.
+RECOMMENDED IMPLEMENTATION ORDER
+1. If bundled test.csv + sample_submission.csv exist, build an exact lookup baseline:
+       initial_state string -> valid path
+   Return that path for exact matches.
+2. For unseen states, load graphs_info.json for n = len(vec), then implement a bounded-lookahead greedy fallback:
+   - read central_state and generators
+   - implement apply_perm(state, perm) and apply_moves(state, moves)
+   - score states using polynomial-time metrics such as matched positions / total mismatches / simple displacement measures
+   - evaluate all legal 1-move candidates and optionally 2-move macros
+   - repeatedly choose the best improving candidate
+3. If no progress occurs after a bounded number of polynomial steps, return "UNSOLVED".
 
-Implementation contract:
-- Implement solve(vec) -> (moves, out_vec)
-  where moves is List[str] and out_vec is List[int].
-- Provide a CLI entrypoint so the validator can run:
-    python solve_module.py "[ ... ]"
-  and print the JSON result to stdout.
+IMPLEMENTATION DETAILS
+- Standard library only.
+- Work on a copy of vec.
+- Verify that sorted_array equals the state produced by the returned moves.
+- Return exactly one complete Python file inside one ```python``` block.
+- Do not add explanations outside the code block.

@@ -79,6 +79,11 @@ def test_run_agent_laboratory_passes_agent_model_flags(monkeypatch, tmp_path):
         planner_models='gpt-4',
         coder_models='local:Qwen/demo',
         fixer_models='gpt-4o-mini',
+        search_mode='hybrid',
+        plan_beam_width=4,
+        frontier_width=7,
+        archive_size=5,
+        refine_rounds=2,
         max_iters=3,
     )
 
@@ -87,6 +92,11 @@ def test_run_agent_laboratory_passes_agent_model_flags(monkeypatch, tmp_path):
     assert '--planner-models' in cmd
     assert '--coder-models' in cmd
     assert '--fixer-models' in cmd
+    assert '--search-mode' in cmd
+    assert '--plan-beam-width' in cmd
+    assert '--frontier-width' in cmd
+    assert '--archive-size' in cmd
+    assert '--refine-rounds' in cmd
 
 
 
@@ -100,71 +110,28 @@ def test_build_parser_supports_agent_model_flags_for_generate_and_run():
         '--planner-models', 'gpt-4',
         '--coder-models', 'local:Qwen/demo',
         '--fixer-models', 'gpt-4o-mini',
+        '--search-mode', 'hybrid',
+        '--plan-beam-width', '4',
+        '--frontier-width', '7',
+        '--archive-size', '5',
+        '--refine-rounds', '2',
     ])
     assert gen_args.agent_models.startswith('planner=')
     assert gen_args.planner_models == 'gpt-4'
     assert gen_args.coder_models == 'local:Qwen/demo'
     assert gen_args.fixer_models == 'gpt-4o-mini'
+    assert gen_args.search_mode == 'hybrid'
+    assert gen_args.plan_beam_width == 4
+    assert gen_args.frontier_width == 7
+    assert gen_args.archive_size == 5
+    assert gen_args.refine_rounds == 2
 
     run_args = parser.parse_args([
         'run',
         '--competition', 'cayleypy-rapapport-m2',
         '--output', 'submissions/out.csv',
         '--agent-models', 'planner=gpt-4;coder=local:Qwen/demo',
+        '--search-mode', 'classic',
     ])
     assert run_args.agent_models.startswith('planner=')
-
-
-
-def test_cmd_run_forwards_codegen_runtime_flags(monkeypatch, tmp_path):
-    parser = pipeline_cli.build_parser()
-    args = parser.parse_args([
-        'run',
-        '--competition', 'cayleypy-rapapport-m2',
-        '--output', str(tmp_path / 'submission.csv'),
-        '--models', 'gpt-4o-mini',
-        '--planner-models', 'gpt-4',
-        '--coder-models', 'gpt-4',
-        '--fixer-models', 'gpt-4',
-        '--max-iters', '7',
-        '--g4f-recovery-rounds', '20',
-        '--g4f-recovery-max-iters', '10',
-        '--g4f-recovery-sleep', '1.0',
-        '--print-generation',
-        '--print-generation-max-chars', '4000',
-        '--g4f-async',
-        '--max-response-chars', '30000',
-        '--g4f-request-timeout', '20',
-        '--g4f-stop-at-python-fence',
-    ])
-
-    captured = {}
-
-    def fake_run_agent_laboratory(**kwargs):
-        captured.update(kwargs)
-        Path(kwargs['out_path']).write_text('''def solve(vec):
-    return [], list(vec)
-''', encoding='utf-8')
-
-    monkeypatch.setattr(pipeline_cli, '_run_agent_laboratory', fake_run_agent_laboratory)
-    monkeypatch.setattr(pipeline_cli, '_validate_solver', lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        pipeline_cli,
-        '_build_submission',
-        lambda **kwargs: Path(kwargs['out_csv']).write_text('''id,permutation,solution
-0,1,
-''', encoding='utf-8'),
-    )
-    monkeypatch.setattr(pipeline_cli, '_append_run_log', lambda *args, **kwargs: None)
-
-    pipeline_cli.cmd_run(args)
-
-    assert captured['print_generation'] is True
-    assert captured['print_generation_max_chars'] == 4000
-    assert captured['g4f_async'] is True
-    assert captured['max_response_chars'] == 30000
-    assert captured['g4f_request_timeout'] == 20.0
-    assert captured['g4f_stop_at_python_fence'] is True
-    assert captured['g4f_recovery_rounds'] == 20
-    assert captured['g4f_recovery_max_iters'] == 10
-    assert captured['g4f_recovery_sleep'] == 1.0
+    assert run_args.search_mode == 'classic'

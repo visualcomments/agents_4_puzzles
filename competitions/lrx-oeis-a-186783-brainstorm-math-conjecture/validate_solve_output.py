@@ -22,6 +22,7 @@ Usage:
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
@@ -29,6 +30,15 @@ from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime, timezone
 import platform
 
+
+
+
+def _solver_timeout_s() -> float:
+    raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 20.0
 
 MOVESETS: Dict[str, set[str]] = {
     "LRX": {"L", "R", "X"},
@@ -38,7 +48,16 @@ MOVESETS: Dict[str, set[str]] = {
 
 def run_solver(solver_path: str, input_vector: List[Any]) -> Tuple[int, str, str]:
     cmd = [sys.executable, solver_path, json.dumps(input_vector, separators=(',', ':'))]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    timeout_s = _solver_timeout_s()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if stderr and not stderr.endswith("\n"):
+            stderr += "\n"
+        stderr += f"[!] solver timed out after {timeout_s:g}s\n"
+        return 124, stdout, stderr
     return proc.returncode, proc.stdout, proc.stderr
 
 

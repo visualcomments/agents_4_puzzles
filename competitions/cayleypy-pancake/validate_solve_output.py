@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -23,6 +24,36 @@ from pathlib import Path
 from typing import List
 
 RE_MOVE = re.compile(r"^R(\d+)$")
+
+
+def _solver_timeout_s() -> float:
+    raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 20.0
+
+
+def _run_solver(solver: Path, vec) -> str:
+    timeout_s = _solver_timeout_s()
+    cmd = [sys.executable, str(solver), json.dumps(vec)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        if exc.stdout:
+            print(exc.stdout, file=sys.stderr)
+        if exc.stderr:
+            print(exc.stderr, file=sys.stderr)
+        print(f"[!] solver timed out after {timeout_s:g}s", file=sys.stderr)
+        raise SystemExit(1)
+    if proc.returncode != 0:
+        print("[!] solver crashed", file=sys.stderr)
+        if proc.stdout:
+            print(proc.stdout, file=sys.stderr)
+        if proc.stderr:
+            print(proc.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    return proc.stdout
 
 
 def _flip_prefix(a: List[int], k: int) -> None:
@@ -50,12 +81,7 @@ def main() -> None:
         print("[!] --vector must be a JSON list", file=sys.stderr)
         raise SystemExit(2)
 
-    try:
-        out = subprocess.check_output([sys.executable, str(solver), json.dumps(vec)], text=True)
-    except subprocess.CalledProcessError as e:
-        print("[!] solver crashed", file=sys.stderr)
-        print(e.output, file=sys.stderr)
-        raise SystemExit(1)
+    out = _run_solver(solver, vec)
 
     try:
         data = json.loads(out)

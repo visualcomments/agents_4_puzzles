@@ -52,7 +52,7 @@ def main() -> int:
     except MissingLLMCredentials as e:
         payload["error"] = str(e)
         payload["error_type"] = "MissingLLMCredentials"
-    except Exception as e:
+    except BaseException as e:  # worker must serialize asyncio.CancelledError and similar failures
         payload["error"] = str(e)
         payload["error_type"] = type(e).__name__
 

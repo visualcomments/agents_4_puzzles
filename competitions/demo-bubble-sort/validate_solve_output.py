@@ -16,12 +16,35 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
 from typing import Any, List, Sequence
 
 PYTHON = sys.executable
+
+
+def _solver_timeout_s() -> float:
+    raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 20.0
+
+
+def _run_solver(solver: str, vec) -> subprocess.CompletedProcess[str]:
+    timeout_s = _solver_timeout_s()
+    cmd = [PYTHON, solver, json.dumps(vec)]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        if exc.stdout:
+            print(exc.stdout, file=sys.stderr)
+        if exc.stderr:
+            print(exc.stderr, file=sys.stderr)
+        print(f"Solver timed out after {timeout_s:g}s", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def apply_moves(vec: Sequence[int], moves: Sequence[str]) -> List[int]:
@@ -51,7 +74,7 @@ def main() -> int:
     args = p.parse_args()
 
     vec = json.loads(args.vector)
-    proc = subprocess.run([PYTHON, args.solver, json.dumps(vec)], capture_output=True, text=True)
+    proc = _run_solver(args.solver, vec)
     if proc.returncode != 0:
         print("Solver failed:", file=sys.stderr)
         print(proc.stderr, file=sys.stderr)

@@ -1,27 +1,37 @@
-We are solving the CayleyPy V.M. Glushkov permutations problem Kaggle competition:
-https://www.kaggle.com/competitions/cayleypy-glushkov
+We are solving the CayleyPy V.M. Glushkov permutations problem Kaggle competition.
+Reference: https://www.kaggle.com/competitions/cayleypy-glushkov
 
 TASK
-Write solve_module.py to sort a permutation using ONLY these moves:
+Write solve_module.py that sorts a permutation using ONLY the legal moves L and X.
 
-- L : cyclic left shift by 1 ( [a0,a1,...,a_{n-1}] -> [a1,...,a_{n-1},a0] )
-- X : swap positions 0 and 1
+LEGAL MOVES
+- L: left cyclic shift by 1
+- X: swap positions 0 and 1
 
 INPUT / OUTPUT CONTRACT
-- solve(vec) -> (moves, sorted_array)
-- moves is a list[str] with tokens only in {"L","X"}
-- sorted_array is the final array after applying moves
-- Script mode prints JSON {"moves":..., "sorted_array":...}
+- Implement solve(vec) -> (moves, sorted_array)
+- moves must be list[str] containing only "L" and "X", or the string "UNSOLVED"
+- sorted_array must be the final array after applying the moves
+- Script mode must print JSON: {"moves": ..., "sorted_array": ...}
 
-CONSTRAINTS
-- No BFS/DFS/A*/graph search.
-- No slicing tricks for L; implement shift with a loop.
-- No built-in sorting.
-- Constructive polynomial time.
+ALGORITHM REQUIREMENTS
+- Polynomial time only.
+- No BFS / DFS / A* / exhaustive search.
+- No built-in sorting for the core algorithm.
+- Implement the cyclic shift with a loop, not with slicing tricks.
 
-HINT
-You can implement an adjacent swap at any index i via conjugation:
-  swap(i,i+1) = L^i  X  L^{n-i}
-Then use selection sort / insertion sort via repeated adjacent swaps.
+RECOMMENDED IMPLEMENTATION ORDER
+1. If bundled test.csv + sample_submission.csv exist, you may first build an exact lookup baseline:
+       permutation string -> valid path
+   Return that exact path for exact matches.
+2. Otherwise implement the constructive adjacent-swap method:
+   - adjacent swap at index i is achieved by L^i, then X, then L^{n-i}
+   - use this to implement insertion sort or selection sort
+3. This gives a constructive polynomial-time solver.
 
-Return full python file in one ```python``` block.
+IMPLEMENTATION DETAILS
+- Work on a copy of vec.
+- Append moves immediately after performing them.
+- Verify that sorted_array equals the state produced by the returned moves.
+- Return exactly one complete Python file inside one ```python``` block.
+- Do not add explanations outside the code block.

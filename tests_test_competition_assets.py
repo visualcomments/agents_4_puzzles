@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import pipeline_cli  # type: ignore
-from pipeline_registry import list_pipelines  # type: ignore
+from pipeline_registry import PipelineSpec, list_pipelines  # type: ignore
 sys.path.insert(0, str(ROOT / 'llm-puzzles'))
 from src.comp_registry import get_config  # type: ignore
 
@@ -77,3 +77,30 @@ def test_available_pipeline_test_csvs_expose_a_declared_state_column():
             continue
         header = _read_csv_rows(test_csv)[0]
         assert any(col in header for col in spec.state_columns), (spec.key, header, spec.state_columns)
+
+
+def test_prefer_sample_submission_from_zip_uses_cache_without_mutating_repo_fixture(monkeypatch, tmp_path):
+    root = tmp_path
+    (root / 'competition_files').mkdir()
+    with zipfile.ZipFile(root / 'competition_files' / 'demo.zip', 'w') as zf:
+        zf.writestr('sample_submission.csv', 'id,permutation,solution\r\n0,"1,0",X\r\n')
+
+    repo_data_dir = root / 'competitions' / 'demo' / 'data'
+    repo_data_dir.mkdir(parents=True)
+    repo_fixture = repo_data_dir / 'sample_submission.csv'
+    repo_fixture.write_text('tracked-fixture\n', encoding='utf-8')
+
+    monkeypatch.setattr(pipeline_cli, 'ROOT', root)
+    spec = PipelineSpec(
+        key='demo',
+        competition='demo',
+        format_slug='format/id+permutation+solution',
+        baseline_solver=root / 'baseline.py',
+        validator=root / 'validator.py',
+    )
+
+    resolved = pipeline_cli._prefer_sample_submission_from_zip(spec)
+    assert resolved is not None
+    assert '_cache' in str(resolved)
+    assert repo_fixture.read_text(encoding='utf-8') == 'tracked-fixture\n'
+    assert _read_csv_rows(resolved)[0] == ['id', 'permutation', 'solution']

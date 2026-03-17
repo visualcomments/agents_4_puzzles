@@ -24,12 +24,12 @@ import json
 import math
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
 import time
 import tokenize
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -90,6 +90,288 @@ MODEL_HINT_SCORES: Tuple[Tuple[str, int], ...] = (
     ("llama", 100),
     ("aria", 70),
 )
+
+
+def _model_backend_family(model: str) -> str:
+    raw = (model or "").strip().lower()
+    if raw.startswith("local:"):
+        return "local-transformers"
+    if raw.startswith("ollama:"):
+        return "ollama"
+    if raw.startswith("vllm:"):
+        return "vllm"
+    if raw.startswith("lmstudio:"):
+        return "lmstudio"
+    if raw.startswith("openai-compatible:") or raw.startswith("openai_compatible:") or raw.startswith("compat:"):
+        return "openai-compatible"
+    if raw.startswith("g4fapi:"):
+        return "g4fapi"
+    if raw.startswith("g4f:"):
+        return "g4f"
+    return "api"
+
+
+def _interleave_by_backend_diversity(models: Sequence[str]) -> List[str]:
+    buckets: Dict[str, List[str]] = {}
+    for model in models:
+        buckets.setdefault(_model_backend_family(model), []).append(model)
+    ordered_families = sorted(buckets.keys(), key=lambda name: (name not in {"local-transformers", "ollama", "vllm", "lmstudio", "openai-compatible", "g4fapi"}, name))
+    merged: List[str] = []
+    while True:
+        progressed = False
+        for family in ordered_families:
+            items = buckets.get(family) or []
+            if not items:
+                continue
+            merged.append(items.pop(0))
+            progressed = True
+        if not progressed:
+            break
+    return merged
+
+
+@dataclass
+class PlanCandidate:
+    plan_text: str
+    planner_model: str
+    score: float
+    variant_index: int
+    depth: int = 0
+    source: str = "planner"
+
+
+@dataclass
+class ArchiveEntry:
+    plan_text: str
+    planner_model: str
+    coder_model: str
+    ok: bool
+    report: str
+    code: str = ""
+    stage_label: str = "coder"
+    score: float = 0.0
+
+
+@dataclass
+class CandidateArchive:
+    max_items: int = 6
+    entries: List[ArchiveEntry] = field(default_factory=list)
+
+    def add(self, entry: ArchiveEntry) -> None:
+        self.entries.append(entry)
+        self.entries.sort(key=lambda e: (-e.score, e.ok, len(e.report or "")))
+        if self.max_items > 0:
+            self.entries = self.entries[: self.max_items]
+
+    def best_failures(self, limit: int = 3) -> List[ArchiveEntry]:
+        return [e for e in self.entries if not e.ok][: max(0, limit)]
+
+    def summary_text(self, limit: int = 3) -> str:
+        failures = self.best_failures(limit=limit)
+        if not failures:
+            return ""
+        blocks = []
+        for idx, entry in enumerate(failures, start=1):
+            blocks.append(
+                f"ATTEMPT {idx}: planner={entry.planner_model} coder={entry.coder_model}\n"
+                f"PLAN:\n{_clip_middle(entry.plan_text or '', 1200)}\n\n"
+                f"FAILURE:\n{_clip_middle(entry.report or '', 1600)}"
+            )
+        return "\n\n".join(blocks)
+
+
+def _plan_signature(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    return normalized[:320]
+
+
+def _plan_quality_score(text: str) -> float:
+    body = str(text or "").strip()
+    low = body.lower()
+    score = 0.0
+    length = len(body)
+    if 120 <= length <= 1800:
+        score += 18.0
+    elif length >= 40:
+        score += 8.0
+    hints = {
+        "invariant": 18.0,
+        "correct": 12.0,
+        "complexity": 14.0,
+        "o(": 10.0,
+        "primitive": 10.0,
+        "allowed move": 10.0,
+        "construct": 8.0,
+        "iterative": 6.0,
+        "adjacent swap": 8.0,
+        "patch": 4.0,
+    }
+    for needle, value in hints.items():
+        if needle in low:
+            score += value
+    penalties = {
+        "bfs": -25.0,
+        "dfs": -25.0,
+        "a*": -25.0,
+        "beam search": -18.0,
+        "brute force": -25.0,
+        "exponential": -25.0,
+    }
+    for needle, value in penalties.items():
+        if needle in low:
+            score += value
+    return score
+
+
+def _build_plan_variant_prompt(
+    user_prompt: str,
+    *,
+    variant_index: int,
+    beam_width: int,
+    archive_summary: str = "",
+    baseline_code: str | None = None,
+) -> str:
+    parts = [
+        f"USER TASK:\n{user_prompt}",
+        (
+            f"Generate algorithm-hypothesis variant {variant_index} of {beam_width}. "
+            "Make it materially distinct from previous variants in algorithm family, primitive-move synthesis, or repair strategy."
+        ),
+        (
+            "Return a compact plan with these headings: `Algorithm family`, `Primitive moves`, `Invariants`, `Complexity`, `Repair strategy`."
+        ),
+    ]
+    if baseline_code:
+        parts.extend(
+            [
+                "KNOWN-GOOD BASELINE SOLVER:",
+                f"```python\n{_clip_middle(baseline_code, 12000)}\n```",
+                "Prefer a minimal patch of the baseline if it can be upgraded into a stronger constructive solver.",
+            ]
+        )
+    if archive_summary:
+        parts.extend(
+            [
+                "RECENT EXPERIMENT MANAGER MEMORY (avoid repeating these failures):",
+                archive_summary,
+            ]
+        )
+    parts.append(
+        "Do not write code yet. Focus on a verifiable algorithmic hypothesis that can be implemented as dependency-free Python."
+    )
+    return "\n\n".join(parts)
+
+
+def generate_plan_candidates(
+    planner_models: Sequence[str],
+    user_prompt: str,
+    planner_system_prompt: str,
+    *,
+    beam_width: int,
+    archive_summary: str = "",
+    baseline_code: str | None = None,
+) -> List[PlanCandidate]:
+    if beam_width <= 0:
+        return []
+    dedup: Dict[str, PlanCandidate] = {}
+    ordered_models = _interleave_by_backend_diversity(list(planner_models)) or list(planner_models)
+    if not ordered_models:
+        return []
+
+    attempts = max(beam_width, min(len(ordered_models) * max(1, beam_width), beam_width * 3))
+    for idx in range(attempts):
+        model = ordered_models[idx % len(ordered_models)]
+        plan_prompt = _build_plan_variant_prompt(
+            user_prompt,
+            variant_index=idx + 1,
+            beam_width=beam_width,
+            archive_summary=archive_summary,
+            baseline_code=baseline_code,
+        )
+        try:
+            plan_text = _query_model_stable(model, plan_prompt, planner_system_prompt, tries=1, timeout=18.0)
+        except MissingLLMCredentials:
+            continue
+        except Exception:
+            continue
+        plan_text = str(plan_text or "").strip()
+        if not plan_text:
+            continue
+        signature = _plan_signature(plan_text)
+        score = _plan_quality_score(plan_text)
+        candidate = PlanCandidate(
+            plan_text=plan_text,
+            planner_model=model,
+            score=score,
+            variant_index=idx + 1,
+            depth=0 if not archive_summary else 1,
+            source="planner" if not archive_summary else "refiner",
+        )
+        prev = dedup.get(signature)
+        if prev is None or candidate.score > prev.score:
+            dedup[signature] = candidate
+        if len(dedup) >= beam_width and idx + 1 >= beam_width:
+            # Keep some headroom for diversity, but do not over-query unnecessarily.
+            break
+
+    ranked = sorted(dedup.values(), key=lambda c: (-c.score, c.variant_index, c.planner_model))
+    return ranked[:beam_width]
+
+
+def build_plan_model_frontier(
+    plans: Sequence[PlanCandidate],
+    coder_models: Sequence[str],
+    *,
+    frontier_width: int,
+) -> List[tuple[PlanCandidate, str]]:
+    if not plans or not coder_models or frontier_width <= 0:
+        return []
+    diverse_models = _interleave_by_backend_diversity(list(coder_models)) or list(coder_models)
+    max_pairs = max(frontier_width, min(len(plans) * len(diverse_models), len(plans) * max(1, frontier_width)))
+    used = set()
+    frontier: List[tuple[PlanCandidate, str]] = []
+    for round_idx in range(len(diverse_models)):
+        for plan_idx, plan in enumerate(plans[:frontier_width]):
+            model = diverse_models[(plan_idx + round_idx) % len(diverse_models)]
+            key = (plan.variant_index, model)
+            if key in used:
+                continue
+            used.add(key)
+            frontier.append((plan, model))
+            if len(frontier) >= max_pairs:
+                return frontier
+    return frontier
+
+
+def _attempt_score(ok: bool, report: str) -> float:
+    if ok:
+        return 1000.0
+    lowered = (report or "").lower()
+    if "validated after fixer" in lowered:
+        return 850.0
+    if "solver contract" in lowered:
+        return 320.0
+    if "compile check failed" in lowered:
+        return 260.0
+    if "failed validation" in lowered or "test" in lowered:
+        return 420.0
+    if "credentials required" in lowered:
+        return 80.0
+    if "timeout" in lowered or "remote worker" in lowered:
+        return 120.0
+    return 180.0
+
+
+def _augment_plan_with_archive_context(plan_text: str, archive: CandidateArchive) -> str:
+    summary = archive.summary_text(limit=2)
+    if not summary:
+        return plan_text
+    return (
+        f"{plan_text}\n\n"
+        "EXPERIMENT MANAGER MEMORY:\n"
+        "Use the following failed attempts as negative examples. Preserve the good parts, but explicitly avoid repeating the same mistakes.\n\n"
+        f"{summary}"
+    )
 
 
 def load_prompts(custom_path: Optional[str]) -> Dict[str, str]:
@@ -606,6 +888,14 @@ def compile_python(code: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _validator_timeout_s() -> float:
+    raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 20.0
+
+
 def validate_solver_contract(code: str) -> Tuple[bool, str]:
     try:
         tree = ast.parse(code)
@@ -629,111 +919,29 @@ def validate_solver_contract(code: str) -> Tuple[bool, str]:
     return True, ''
 
 
-def _validator_timeout_s() -> float:
-    return max(0.1, _env_float("AGENTLAB_VALIDATOR_TIMEOUT_S", 20.0))
-
-
-def _validator_outer_timeout_s(inner_timeout_s: float) -> float:
-    explicit = _env_float("AGENTLAB_VALIDATOR_OUTER_TIMEOUT_S", 0.0)
-    if explicit > 0:
-        return max(inner_timeout_s, explicit)
-    return max(inner_timeout_s + 5.0, inner_timeout_s * 1.25)
-
-
-def _read_text_tail(path: Path, *, max_chars: int = 4000) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return ""
-    if max_chars > 0 and len(text) > max_chars:
-        return text[-max_chars:]
-    return text
-
-
-def _terminate_process_tree(proc: subprocess.Popen) -> None:
-    if os.name != "nt":
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=2)
-            return
-        except Exception:
-            pass
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-    else:
-        try:
-            proc.terminate()
-            proc.wait(timeout=2)
-            return
-        except Exception:
-            pass
-        try:
-            proc.kill()
-        except Exception:
-            pass
-    try:
-        proc.wait(timeout=5)
-    except Exception:
-        pass
-
-
 def run_validator(validator_path: Path, solver_path: Path, vec: List[int]) -> Tuple[int, str, str]:
-    inner_timeout_s = _validator_timeout_s()
-    outer_timeout_s = _validator_outer_timeout_s(inner_timeout_s)
     cmd = [sys.executable, str(validator_path), "--solver", str(solver_path), "--vector", json.dumps(vec)]
-
-    with tempfile.TemporaryDirectory(prefix="agentlab_validator_") as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        stdout_path = tmpdir_path / "validator_stdout.log"
-        stderr_path = tmpdir_path / "validator_stderr.log"
-        env = dict(os.environ)
-        env["AGENTLAB_SOLVER_TIMEOUT_S"] = str(inner_timeout_s)
-
-        with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_f, stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_f:
-            popen_kwargs = {
-                "stdout": stdout_f,
-                "stderr": stderr_f,
-                "text": True,
-                "env": env,
-            }
-            if os.name != "nt":
-                popen_kwargs["start_new_session"] = True
-            proc = subprocess.Popen(cmd, **popen_kwargs)
-            try:
-                proc.wait(timeout=outer_timeout_s)
-            except subprocess.TimeoutExpired:
-                _terminate_process_tree(proc)
-                out = _read_text_tail(stdout_path)
-                err_tail = _read_text_tail(stderr_path)
-                err_msg = (
-                    f"[timeout] validator exceeded {outer_timeout_s:.1f}s while checking solver "
-                    f"(inner solver timeout {inner_timeout_s:.1f}s).\n{err_tail}"
-                ).strip()
-                return 124, out, err_msg
-
-        out = _read_text_tail(stdout_path)
-        err = _read_text_tail(stderr_path)
-        return proc.returncode, out, err
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=_validator_timeout_s())
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or ""
+        err = exc.stderr or ""
+        if err and not err.endswith("\n"):
+            err += "\n"
+        err += (
+            f"[!] validator timed out after {_validator_timeout_s():g}s while checking {solver_path.name}. "
+            "Most often this means the generated solve(vec) entered an infinite loop or an unexpectedly expensive search.\n"
+        )
+        return 124, out, err
 
 
 def validate_solver_suite(validator_path: Path, solver_path: Path, tests: Iterable[List[int]]) -> Tuple[bool, str]:
-    tests_list = list(tests)
-    total = len(tests_list)
-    for idx, vec in enumerate(tests_list):
-        log_status(
-            f"[validator] smoke test {idx + 1}/{total} using {solver_path.name} "
-            f"(timeout={_validator_timeout_s():.1f}s)"
-        )
+    for idx, vec in enumerate(tests):
         rc, out, err = run_validator(validator_path, solver_path, vec)
         if rc != 0:
             report = (
                 f"=== TEST {idx} FAILED ===\n"
-                f"RETURN CODE: {rc}\n"
                 f"VECTOR: {vec}\n"
                 f"STDOUT:\n{out}\n"
                 f"STDERR:\n{err}\n"
@@ -770,7 +978,7 @@ def probe_model_for_codegen(model: str) -> Tuple[bool, str]:
 def order_models_for_codegen(models: Sequence[str]) -> List[str]:
     ranked = rank_models_for_codegen(models)
     if os.getenv("AGENTLAB_MODEL_PROBE", "1").strip().lower() not in {"1", "true", "yes", "on"}:
-        return ranked
+        return _interleave_by_backend_diversity(ranked)
 
     try:
         probe_limit = int(os.getenv("AGENTLAB_MODEL_PROBE_TOP", "4") or "4")
@@ -789,7 +997,7 @@ def order_models_for_codegen(models: Sequence[str]) -> List[str]:
         status = "OK" if ok else f"skip ({reason})"
         print(f"[model-probe] {model}: {status}")
         (good if ok else bad).append(model)
-    return good + tail + bad
+    return _interleave_by_backend_diversity(good + tail) + bad
 
 
 def ask_first_nonempty(models: Sequence[str], prompt: str, system_prompt: str) -> Tuple[str, Optional[str]]:
@@ -879,35 +1087,25 @@ def _strict_output_requirements(*, prefer_minimal_patch: bool) -> str:
     return '\n'.join(lines)
 
 
-def build_initial_codegen_prompt(
-    user_prompt: str,
-    plan: str,
-    *,
-    baseline_code: Optional[str] = None,
-    from_scratch: bool = False,
-) -> str:
+def build_initial_codegen_prompt(user_prompt: str, plan: str, *, baseline_code: Optional[str] = None) -> str:
     parts = [
         f"USER TASK:\n{user_prompt}",
         f"PLANNER NOTES:\n{plan}",
     ]
-    effective_baseline = None if from_scratch else baseline_code
-    if effective_baseline is None:
-        if from_scratch:
-            parts.append('Now write the solver file from scratch. Do not assume any baseline implementation is attached.')
-        else:
-            parts.append('Now write the solver file.')
+    if baseline_code is None:
+        parts.append('Now write the solver file.')
     else:
         parts.extend(
             [
                 'KNOWN-GOOD BASELINE SOLVER:',
-                f"```python\n{effective_baseline}\n```",
+                f"```python\n{baseline_code}\n```",
                 (
                     'Modify the baseline minimally to better solve the task while preserving the public entrypoints, '
                     'stdout contract, and dependency-free behavior. Return the complete updated solver file.'
                 ),
             ]
         )
-    parts.append(_strict_output_requirements(prefer_minimal_patch=effective_baseline is not None))
+    parts.append(_strict_output_requirements(prefer_minimal_patch=baseline_code is not None))
     return '\n\n'.join(parts)
 
 
@@ -1066,14 +1264,8 @@ def try_generate_with_model(
     max_iters: int,
     baseline_code: Optional[str] = None,
     stage_label: str = "coder",
-    from_scratch: bool = False,
 ) -> Tuple[bool, str]:
-    coder_prompt = build_initial_codegen_prompt(
-        user_prompt,
-        plan,
-        baseline_code=baseline_code,
-        from_scratch=from_scratch,
-    )
+    coder_prompt = build_initial_codegen_prompt(user_prompt, plan, baseline_code=baseline_code)
     code, err = _query_code_block_with_rescue(
         model=model,
         prompt=coder_prompt,
@@ -1208,6 +1400,147 @@ def attempt_recovery_rounds(
     return False, None
 
 
+def _attempt_identity(plan_text: str, coder_model: str) -> tuple[str, str]:
+    return _plan_signature(plan_text), str(coder_model or "").strip()
+
+
+def _resolve_search_mode(raw: str | None) -> str:
+    mode = str(raw or os.getenv("AGENTLAB_SEARCH_MODE", "hybrid")).strip().lower()
+    return mode if mode in {"classic", "hybrid"} else "hybrid"
+
+
+def _search_settings_from_args(args: argparse.Namespace) -> tuple[str, int, int, int, int]:
+    mode = _resolve_search_mode(getattr(args, "search_mode", None))
+    plan_beam_width = max(1, int(getattr(args, "plan_beam_width", 3) or 3))
+    frontier_width = max(1, int(getattr(args, "frontier_width", 6) or 6))
+    archive_size = max(1, int(getattr(args, "archive_size", 6) or 6))
+    refine_rounds = max(0, int(getattr(args, "refine_rounds", 1) or 0))
+    return mode, plan_beam_width, frontier_width, archive_size, refine_rounds
+
+
+def run_hybrid_codegen_search(
+    *,
+    planner_models: Sequence[str],
+    coder_models: Sequence[str],
+    fixer_models: Sequence[str],
+    user_prompt: str,
+    prompts: Dict[str, str],
+    out_path: Path,
+    validator_path: Path,
+    tests: Sequence[List[int]],
+    max_iters: int,
+    baseline_code: str,
+    plan_beam_width: int,
+    frontier_width: int,
+    archive_size: int,
+    refine_rounds: int,
+) -> tuple[bool, List[str], CandidateArchive, str, Optional[str], Optional[str]]:
+    archive = CandidateArchive(max_items=archive_size)
+    generation_reports: List[str] = []
+    attempts_seen: set[tuple[str, str]] = set()
+    last_plan = ""
+    last_planner_model: Optional[str] = None
+
+    initial_plans = generate_plan_candidates(
+        planner_models,
+        user_prompt,
+        prompts["planner"],
+        beam_width=plan_beam_width,
+        archive_summary="",
+        baseline_code=baseline_code,
+    )
+    if not initial_plans:
+        return False, generation_reports, archive, "", None, None
+
+    if len(initial_plans) > 1:
+        log_status(
+            f"[planner] hybrid search prepared {len(initial_plans)} distinct plan candidates; "
+            f"frontier_width={frontier_width}, refine_rounds={refine_rounds}."
+        )
+
+    plan_rounds: List[List[PlanCandidate]] = [initial_plans]
+    round_idx = 0
+    while round_idx < len(plan_rounds) and round_idx <= refine_rounds:
+        current_plans = plan_rounds[round_idx]
+        frontier = build_plan_model_frontier(current_plans, coder_models, frontier_width=frontier_width)
+        if frontier:
+            for pair_idx, (plan_candidate, coder_model) in enumerate(frontier, start=1):
+                raw_plan_text = plan_candidate.plan_text
+                plan_text = _augment_plan_with_archive_context(raw_plan_text, archive)
+                attempt_key = _attempt_identity(plan_text, coder_model)
+                if attempt_key in attempts_seen:
+                    continue
+                attempts_seen.add(attempt_key)
+
+                last_plan = raw_plan_text
+                last_planner_model = plan_candidate.planner_model
+                label_suffix = f"variant {plan_candidate.variant_index} planner={plan_candidate.planner_model} coder={coder_model}"
+                if round_idx > 0:
+                    label_suffix += f" refine_round={round_idx}"
+                log_status(f"[hybrid] attempt {len(attempts_seen)}: {label_suffix}")
+
+                ok, report = try_generate_with_model(
+                    model=coder_model,
+                    fixer_models=fixer_models,
+                    user_prompt=user_prompt,
+                    plan=plan_text,
+                    prompts=prompts,
+                    out_path=out_path,
+                    validator_path=validator_path,
+                    tests=tests,
+                    max_iters=max_iters,
+                    stage_label=f"coder variant {plan_candidate.variant_index}" if round_idx == 0 else f"coder refine {round_idx} variant {plan_candidate.variant_index}",
+                )
+                generation_reports.append(report)
+                archive.add(
+                    ArchiveEntry(
+                        plan_text=raw_plan_text,
+                        planner_model=plan_candidate.planner_model,
+                        coder_model=coder_model,
+                        ok=ok,
+                        report=report,
+                        stage_label="coder",
+                        score=_attempt_score(ok, report),
+                    )
+                )
+                if ok:
+                    return True, generation_reports, archive, last_plan, last_planner_model, coder_model
+                log_status(f"[hybrid] {report}")
+
+        if round_idx >= refine_rounds:
+            round_idx += 1
+            continue
+
+        archive_summary = archive.summary_text(limit=3)
+        if not archive_summary:
+            round_idx += 1
+            continue
+        refined = generate_plan_candidates(
+            planner_models,
+            user_prompt,
+            prompts["planner"],
+            beam_width=plan_beam_width,
+            archive_summary=archive_summary,
+            baseline_code=baseline_code,
+        )
+        if refined:
+            log_status(
+                f"[planner] experiment-manager refinement {round_idx + 1}/{refine_rounds} "
+                f"produced {len(refined)} additional plan candidates."
+            )
+            plan_rounds.append(refined)
+        else:
+            log_status(
+                f"[planner] experiment-manager refinement {round_idx + 1}/{refine_rounds} produced no additional plan candidates; "
+                "stopping further refinement rounds."
+            )
+        round_idx += 1
+
+    primary_plan = last_plan or initial_plans[0].plan_text
+    primary_planner_model = last_planner_model or initial_plans[0].planner_model
+    return False, generation_reports, archive, primary_plan, primary_planner_model, None
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--user-prompt", default="", help="User prompt (inline string).")
@@ -1217,7 +1550,8 @@ def main() -> None:
         default=DEFAULT_MODELS,
         help=(
             "Comma-separated default model list. Bare names use g4f backend (remote providers). "
-            "You can also pass explicit backends like local:<hf_model_id> to run Transformers locally (CUDA-supported)."
+            "You can also pass explicit backends like local:<hf_model_id>, ollama:<model>, vllm:<model>, "
+            "lmstudio:<model>, openai-compatible:<model>, or g4fapi:<model>."
         ),
     )
     p.add_argument(
@@ -1234,6 +1568,11 @@ def main() -> None:
     p.add_argument("--custom-prompts", default=None, help="Path to JSON overriding default system prompts.")
     p.add_argument("--out", default=str(Path.cwd() / "generated" / "solve_module.py"), help="Where to write the final solver.")
     p.add_argument("--max-iters", type=int, default=4, help="Max repair iterations per model candidate.")
+    p.add_argument("--search-mode", default=os.getenv("AGENTLAB_SEARCH_MODE", "hybrid"), choices=["classic", "hybrid"], help="classic = single-plan linear search; hybrid = multi-plan frontier search with experiment-memory refinement.")
+    p.add_argument("--plan-beam-width", type=int, default=_env_int("AGENTLAB_PLAN_BEAM_WIDTH", 3), help="How many planner hypotheses to keep per planning round in hybrid mode.")
+    p.add_argument("--frontier-width", type=int, default=_env_int("AGENTLAB_FRONTIER_WIDTH", 6), help="How many planner/coder frontier attempts to schedule per round in hybrid mode.")
+    p.add_argument("--archive-size", type=int, default=_env_int("AGENTLAB_ARCHIVE_SIZE", 6), help="How many failed attempts to retain as experiment-manager memory in hybrid mode.")
+    p.add_argument("--refine-rounds", type=int, default=_env_int("AGENTLAB_REFINE_ROUNDS", 1), help="How many planner refinement rounds to run using failure memory in hybrid mode.")
     p.add_argument("--no-llm", action="store_true", help="Skip LLM, write baseline solver directly.")
     p.add_argument(
         "--strict",
@@ -1245,14 +1584,6 @@ def main() -> None:
                    help="Path to validate_solve_output.py (supports LRX/ISK simulation).")
     p.add_argument("--baseline", default=None,
                    help="Path to baseline solve_module.py used for --no-llm and fallback. Default: ./solve_module.py in current working directory.")
-    p.add_argument(
-        "--from-scratch",
-        action="store_true",
-        help=(
-            "Do not inject the checked-in baseline solver into coder prompts and skip the baseline-patcher branch. "
-            "Use with --strict if you also want to avoid writing the offline baseline as the final fallback."
-        ),
-    )
     p.add_argument("--g4f-recovery-rounds", type=int, default=None, help="Optional extra recovery rounds before falling back to baseline (default from AGENTLAB_G4F_RECOVERY_ROUNDS or 1).")
     p.add_argument("--g4f-recovery-max-iters", type=int, default=None, help="Optional fixer iterations per recovery round (default from AGENTLAB_G4F_RECOVERY_MAX_ITERS or 2).")
     p.add_argument("--g4f-recovery-sleep", type=float, default=None, help="Optional cooldown in seconds before each recovery round (default from AGENTLAB_G4F_RECOVERY_SLEEP_S or 1.5).")
@@ -1325,9 +1656,6 @@ def main() -> None:
         if os.getenv('AGENTLAB_WORKER_KILL_PROCESS_GROUP', '1').strip().lower() in {'0', 'false', 'no', 'off'}:
             log_status('[memory] Worker timeout cleanup will not kill the entire process group (AGENTLAB_WORKER_KILL_PROCESS_GROUP=0).')
 
-    if args.from_scratch:
-        log_status('[prompt-mode] from-scratch enabled: baseline code will not be injected into LLM prompts.')
-
     if _recovery_enabled():
         log_status(
             f"[recovery] enabled: rounds={max(0, _env_int('AGENTLAB_G4F_RECOVERY_ROUNDS', 1))}, "
@@ -1354,6 +1682,13 @@ def main() -> None:
             "Set AGENTLAB_MAX_RSS_MB=0 to disable or choose a larger value."
         )
 
+    search_mode, plan_beam_width, frontier_width, archive_size, refine_rounds = _search_settings_from_args(args)
+    if search_mode == "hybrid":
+        log_status(
+            f"[search] hybrid mode enabled: plan_beam_width={plan_beam_width}, frontier_width={frontier_width}, "
+            f"archive_size={archive_size}, refine_rounds={refine_rounds}."
+        )
+
     if args.no_llm:
         out_path.write_text(baseline_code, encoding="utf-8")
         log_status(f"[+] Wrote baseline solver to {out_path}")
@@ -1368,20 +1703,6 @@ def main() -> None:
         log_status(f"[+] Wrote baseline solver to {out_path}")
         sys.exit(0)
 
-    try:
-        plan, planner_model = ask_first_nonempty(planner_models, user_prompt, prompts["planner"])
-        if not plan:
-            plan = "(planner failed; proceeding without planner notes)"
-        log_status(f"[planner] selected model: {planner_model or 'none'}")
-    except MissingLLMCredentials as e:
-        _fallback_to_baseline(
-            "g4f provider requires credentials (api_key or .har). "
-            "Set OPENROUTER_API_KEY / OPENAI_API_KEY (or other provider key), or place a .har/.json in ./har_and_cookies, "
-            f"or run with --no-llm. Original error: {e}"
-        )
-    except Exception as e:
-        _fallback_to_baseline(f"Planner failed (LLM error): {e}")
-
     tests: List[List[int]] = [
         [3, 1, 2, 5, 4],
         [1, 2, 3, 4],
@@ -1390,12 +1711,58 @@ def main() -> None:
         [10, -1, 7, 3, 5],
     ]
 
+    generation_reports: List[str] = []
+    archive = CandidateArchive(max_items=archive_size)
+    plan = ""
+    planner_model: Optional[str] = None
+
+    if search_mode == "hybrid":
+        hybrid_ok, hybrid_reports, archive, plan, planner_model, winner_model = run_hybrid_codegen_search(
+            planner_models=planner_models,
+            coder_models=coder_models,
+            fixer_models=fixer_models,
+            user_prompt=user_prompt,
+            prompts=prompts,
+            out_path=out_path,
+            validator_path=validator_path,
+            tests=tests,
+            max_iters=args.max_iters,
+            baseline_code=baseline_code,
+            plan_beam_width=plan_beam_width,
+            frontier_width=frontier_width,
+            archive_size=archive_size,
+            refine_rounds=refine_rounds,
+        )
+        generation_reports.extend(hybrid_reports)
+        if planner_model:
+            log_status(f"[planner] selected anchor plan from model: {planner_model}")
+        if hybrid_ok:
+            log_status(f"[+] {winner_model}: hybrid frontier validated. Saved to {out_path}")
+            sys.exit(0)
+        if plan:
+            log_status("[search] hybrid frontier exhausted; continuing with a classic sweep anchored on the best surviving plan.")
+
+    if not plan:
+        try:
+            plan, planner_model = ask_first_nonempty(planner_models, user_prompt, prompts["planner"])
+            if not plan:
+                plan = "(planner failed; proceeding without planner notes)"
+            log_status(f"[planner] selected model: {planner_model or 'none'}")
+        except MissingLLMCredentials as e:
+            _fallback_to_baseline(
+                "g4f provider requires credentials (api_key or .har). "
+                "Set OPENROUTER_API_KEY / OPENAI_API_KEY (or other provider key), or place a .har/.json in ./har_and_cookies, "
+                f"or run with --no-llm. Original error: {e}"
+            )
+        except Exception as e:
+            _fallback_to_baseline(f"Planner failed (LLM error): {e}")
+
+    plan_for_codegen = _augment_plan_with_archive_context(plan, archive)
 
     model_progress = _make_model_progress(len(coder_models))
     if model_progress is not None:
         model_progress.set_postfix_str(f"model 0/{len(coder_models)}")
 
-    generation_reports: List[str] = []
     try:
         for idx, model in enumerate(coder_models, start=1):
             if model_progress is not None:
@@ -1405,15 +1772,25 @@ def main() -> None:
                 model=model,
                 fixer_models=fixer_models,
                 user_prompt=user_prompt,
-                plan=plan,
+                plan=plan_for_codegen,
                 prompts=prompts,
                 out_path=out_path,
                 validator_path=validator_path,
                 tests=tests,
                 max_iters=args.max_iters,
-                from_scratch=args.from_scratch,
             )
             generation_reports.append(report)
+            archive.add(
+                ArchiveEntry(
+                    plan_text=plan,
+                    planner_model=planner_model or "planner",
+                    coder_model=model,
+                    ok=ok,
+                    report=report,
+                    stage_label="coder",
+                    score=_attempt_score(ok, report),
+                )
+            )
             if model_progress is not None:
                 model_progress.update(1)
             if ok:
@@ -1424,10 +1801,11 @@ def main() -> None:
         if model_progress is not None:
             model_progress.close()
 
+    if archive.best_failures(limit=1):
+        plan_for_codegen = _augment_plan_with_archive_context(plan, archive)
+
     baseline_patch_models = resolve_agent_models("baseline-patcher", fixer_models or coder_models, agent_model_overrides)
-    if args.from_scratch:
-        log_status("[baseline-patcher] skipped because --from-scratch is enabled.")
-    elif baseline_code.strip() and baseline_patch_models:
+    if baseline_code.strip() and baseline_patch_models:
         patch_iters = max(1, min(args.max_iters, _env_int("AGENTLAB_BASELINE_PATCH_MAX_ITERS", 2)))
         log_status(
             "[baseline-patcher] attempting a minimal validated patch of the known-good baseline before offline fallback."
@@ -1438,7 +1816,7 @@ def main() -> None:
                 model=model,
                 fixer_models=fixer_models,
                 user_prompt=user_prompt,
-                plan=plan,
+                plan=plan_for_codegen,
                 prompts=prompts,
                 out_path=out_path,
                 validator_path=validator_path,
@@ -1446,26 +1824,35 @@ def main() -> None:
                 max_iters=patch_iters,
                 baseline_code=baseline_code,
                 stage_label="baseline-patcher",
-                from_scratch=False,
             )
             generation_reports.append(report)
+            archive.add(
+                ArchiveEntry(
+                    plan_text=plan,
+                    planner_model=planner_model or "planner",
+                    coder_model=model,
+                    ok=ok,
+                    report=report,
+                    stage_label="baseline-patcher",
+                    score=_attempt_score(ok, report),
+                )
+            )
             if ok:
                 log_status(f"[+] {report}. Saved to {out_path}")
                 sys.exit(0)
             log_status(f"[baseline-patcher] {report}")
 
-    recovery_baseline_code = "" if args.from_scratch else baseline_code
     recovered, recovery_report = attempt_recovery_rounds(
         recovery_models=baseline_patch_models or fixer_models or coder_models,
         fixer_models=fixer_models,
         user_prompt=user_prompt,
-        plan=plan,
+        plan=plan_for_codegen,
         prompts=prompts,
         out_path=out_path,
         validator_path=validator_path,
         tests=tests,
         max_iters=args.max_iters,
-        baseline_code=recovery_baseline_code,
+        baseline_code=baseline_code,
         generation_reports=generation_reports,
     )
     if recovered:

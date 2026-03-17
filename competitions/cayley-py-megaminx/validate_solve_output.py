@@ -10,7 +10,6 @@ Validation performed:
 - moves is either:
     * list[str] of generator names
     * a '.'-separated string of generator names
-    * the string 'UNSOLVED' (accepted for template/baseline fallback)
 - applying the generators to the input must reach the puzzle's central_state
   (loaded from data/puzzle_info.json)
 - sorted_array must equal the final state after applying the moves
@@ -30,11 +29,42 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
-def _env_float(name: str, default: float) -> float:
+def _allowed_moves() -> set[str]:
     try:
-        return float((os.environ.get(name, str(default)) or str(default)).strip())
+        puzzle = _load_puzzle_info()
+        return {str(k) for k in dict(puzzle["generators"]).keys()}
     except Exception:
-        return default
+        return set()
+
+
+def _solver_timeout_s() -> float:
+    raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 20.0
+
+
+def _run_solver(solver: Path, vec: List[int]) -> str:
+    timeout_s = _solver_timeout_s()
+    cmd = [sys.executable, str(solver), json.dumps(vec)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        if exc.stdout:
+            print(exc.stdout, file=sys.stderr)
+        if exc.stderr:
+            print(exc.stderr, file=sys.stderr)
+        print(f"[!] solver timed out after {timeout_s:g}s", file=sys.stderr)
+        raise SystemExit(1)
+    if proc.returncode != 0:
+        print("[!] solver crashed", file=sys.stderr)
+        if proc.stdout:
+            print(proc.stdout, file=sys.stderr)
+        if proc.stderr:
+            print(proc.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    return proc.stdout
 
 
 def _load_puzzle_info() -> Dict[str, Any]:
@@ -45,21 +75,24 @@ def _load_puzzle_info() -> Dict[str, Any]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+ALLOWED = _allowed_moves()
+
+
 def _apply_perm(state: List[int], perm: List[int]) -> List[int]:
     return [state[j] for j in perm]
 
 
-def _parse_moves(moves: Any) -> List[str] | None:
+def _parse_moves(moves: Any) -> List[str]:
     if isinstance(moves, str):
         s = moves.strip()
         if s.upper() == "UNSOLVED":
-            return None
+            raise ValueError("moves='UNSOLVED' is not valid for CayleyPy Megaminx submissions")
         if not s:
             return []
         return s.split(".")
     if isinstance(moves, list) and all(isinstance(m, str) for m in moves):
         return moves
-    raise TypeError("moves must be list[str], a dot-separated string, or 'UNSOLVED'")
+    raise TypeError("moves must be list[str] or a dot-separated string of legal move names")
 
 
 def main() -> None:
@@ -70,28 +103,7 @@ def main() -> None:
 
     solver = Path(args.solver)
     vec = json.loads(args.vector)
-
-    solver_timeout_s = _env_float("AGENTLAB_SOLVER_TIMEOUT_S", 15.0)
-    try:
-        completed = subprocess.run(
-            [sys.executable, str(solver), json.dumps(vec)],
-            capture_output=True,
-            text=True,
-            timeout=solver_timeout_s if solver_timeout_s > 0 else None,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"[!] solver timed out after {solver_timeout_s:.1f}s", file=sys.stderr)
-        raise SystemExit(124)
-
-    if completed.returncode != 0:
-        print(f"[!] solver process failed with exit code {completed.returncode}", file=sys.stderr)
-        if completed.stdout:
-            print(completed.stdout, file=sys.stderr)
-        if completed.stderr:
-            print(completed.stderr, file=sys.stderr)
-        raise SystemExit(completed.returncode or 1)
-
-    out = completed.stdout
+    out = _run_solver(solver, vec)
     try:
         data = json.loads(out)
     except Exception:
@@ -116,10 +128,11 @@ def main() -> None:
     central_state = list(puzzle["central_state"])
     generators: Dict[str, List[int]] = {str(k): list(v) for k, v in dict(puzzle["generators"]).items()}
 
-    moves_list = _parse_moves(data["moves"])
-    if moves_list is None:
-        print("[validate] moves = UNSOLVED (accepted template baseline).")
-        raise SystemExit(0)
+    try:
+        moves_list = _parse_moves(data["moves"])
+    except Exception as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        raise SystemExit(1)
 
     state = list(vec)
     for m in moves_list:

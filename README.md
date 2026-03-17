@@ -1,4 +1,4 @@
-# agent_lab_4_puzzles
+# agents_4_puzzles
 
 This repository is a template for solving **Kaggle CayleyPy**-style puzzle competitions using:
 
@@ -144,18 +144,6 @@ python pipeline_cli.py generate-solver \
   --max-iters 8
 ```
 
-#### Megaminx regular prompt (from-scratch generation, no baseline-code injection)
-
-```bash
-python pipeline_cli.py generate-solver \
-  --competition cayley-py-megaminx \
-  --out generated/solve_megaminx_regular.py \
-  --models gpt-4o-mini \
-  --max-iters 8 \
-  --from-scratch \
-  --strict
-```
-
 ### 3) Build submission from an existing solver
 
 ```bash
@@ -216,6 +204,9 @@ Notes:
 - The repository now rejects submit attempts when the installed Kaggle client is older than `1.5.0`.
 - The preflight also probes competition submission access, so "rules not accepted / account not joined" is reported before upload.
 - The preferred CLI form stays aligned with the official docs: `kaggle competitions submit <competition> -f ... -m ...`.
+
+If you accidentally paste a raw `kaggle competitions submit ...` command directly after `python pipeline_cli.py run \
+...`, the CLI now detects that embedded tail and rewrites it to the built-in `--submit` form automatically. Still, the clearest usage is either a single `run --submit --message ...` invocation or two separate shell commands joined with `&&`.
 
 If you have the Kaggle API installed and configured (either via `~/.kaggle/kaggle.json` or by passing `--kaggle-json`), you can submit directly from `run`:
 

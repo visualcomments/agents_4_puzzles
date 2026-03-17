@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'AgentLaboratory'))
@@ -151,3 +152,70 @@ def test_local_transformers_chat_uses_input_truncation(monkeypatch):
     assert out == 'decoded'
     assert calls['tok_kwargs']['truncation'] is True
     assert calls['tok_kwargs']['max_length'] == 128
+
+
+def test_openai_compatible_ollama_backend_uses_expected_defaults(monkeypatch):
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, *, base_url, api_key):
+            captured['base_url'] = base_url
+            captured['api_key'] = api_key
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            captured['kwargs'] = kwargs
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='pong'))])
+
+    monkeypatch.setattr(inference, 'OpenAI', FakeOpenAI)
+
+    out = inference.query_model('ollama:qwen2.5-coder:7b', 'user prompt', 'system prompt', tries=1, timeout=9.0)
+    assert out == 'pong'
+    assert captured['base_url'] == 'http://localhost:11434/v1/'
+    assert captured['api_key'] == 'ollama'
+    assert captured['kwargs']['model'] == 'qwen2.5-coder:7b'
+    assert captured['kwargs']['messages'][0]['role'] == 'system'
+    assert captured['kwargs']['timeout'] == 9.0
+
+
+def test_openai_compatible_generic_backend_requires_base_url(monkeypatch):
+    monkeypatch.delenv('AGENTLAB_OPENAI_COMPAT_BASE_URL', raising=False)
+    monkeypatch.delenv('OPENAI_COMPAT_BASE_URL', raising=False)
+
+    try:
+        inference.query_model('openai-compatible:demo-model', 'user prompt', 'system prompt', tries=1)
+        assert False, 'expected RuntimeError'
+    except RuntimeError as exc:
+        assert 'AGENTLAB_OPENAI_COMPAT_BASE_URL' in str(exc)
+
+
+def test_g4f_provider_failover_caches_last_good_provider(monkeypatch):
+    calls = []
+    inference._G4F_PROVIDER_SUCCESS_CACHE.clear()
+
+    class FakeChatCompletion:
+        @staticmethod
+        def create(*, model, messages, timeout, provider=None, stream=False, **kwargs):
+            calls.append(getattr(provider, 'name', provider))
+            provider_name = getattr(provider, 'name', provider)
+            if provider_name == 'Alpha':
+                raise RuntimeError('alpha failed')
+            return 'provider-ok'
+
+    fake_g4f = SimpleNamespace(
+        ChatCompletion=FakeChatCompletion,
+        Provider=SimpleNamespace(Alpha=SimpleNamespace(name='Alpha'), Beta=SimpleNamespace(name='Beta')),
+    )
+
+    monkeypatch.setattr(inference, '_load_g4f_module', lambda: fake_g4f)
+    monkeypatch.setattr(inference, '_g4f_async_enabled', lambda: False)
+    monkeypatch.setattr(inference, '_best_effort_release_memory', lambda clear_local_cache=False: None)
+    monkeypatch.setenv('G4F_PROVIDER_LIST', 'Alpha,Beta')
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+
+    out = inference.query_model('g4f:demo-model', 'user prompt', 'system prompt', tries=1, timeout=5.0)
+    assert out == 'provider-ok'
+    assert calls == ['Alpha', 'Beta']
+    assert inference._G4F_PROVIDER_SUCCESS_CACHE.get('demo-model') == 'Beta'
