@@ -29,13 +29,6 @@ except Exception:
 # If you want *local* inference that can use CUDA, pass model strings like:
 #   local:Qwen/Qwen2.5-0.5B-Instruct
 #
-# Additional backends supported by this repo:
-#   ollama:<model>                  -> local Ollama server via OpenAI-compatible API
-#   vllm:<model>                    -> local vLLM server via OpenAI-compatible API
-#   lmstudio:<model>                -> local LM Studio server via OpenAI-compatible API
-#   openai-compatible:<model>       -> any OpenAI-compatible endpoint
-#   g4fapi:<model>                  -> local/remote g4f Interference API endpoint
-#
 # This backend is intentionally lightweight and only activates when requested.
 
 _LOCAL_LM_CACHE = OrderedDict()
@@ -366,7 +359,6 @@ _G4F_MODULE = None
 _G4F_IMPORT_ERROR = None
 _G4F_ASYNC_CLIENT_CLASS = None
 _G4F_ASYNC_CLIENT_IMPORT_ERROR = None
-_G4F_PROVIDER_SUCCESS_CACHE = {}
 
 
 def _load_g4f_module():
@@ -422,208 +414,6 @@ def _g4f_api_key_from_env() -> str | None:
         if value:
             return value
     return None
-
-
-def _env_first_nonempty(*names: str) -> str | None:
-    for name in names:
-        value = (os.getenv(name) or "").strip()
-        if value:
-            return value
-    return None
-
-
-_MODEL_BACKEND_PREFIXES = (
-    ("openai-compatible:", "openai-compatible"),
-    ("openai_compatible:", "openai-compatible"),
-    ("openaicompat:", "openai-compatible"),
-    ("compat:", "openai-compatible"),
-    ("g4fapi:", "g4fapi"),
-    ("lmstudio:", "lmstudio"),
-    ("vllm:", "vllm"),
-    ("ollama:", "ollama"),
-    ("local:", "local"),
-    ("g4f:", "g4f"),
-)
-
-
-def _split_model_backend(model_str: str | None) -> tuple[str, str]:
-    raw = str(model_str or "").strip()
-    lowered = raw.lower()
-    for prefix, backend in _MODEL_BACKEND_PREFIXES:
-        if lowered.startswith(prefix):
-            return backend, raw[len(prefix):].strip()
-    return "default", raw
-
-
-def _parse_extra_body_json(env_name: str) -> dict | None:
-    raw = (os.getenv(env_name) or "").strip()
-    if not raw:
-        return None
-    try:
-        payload = json.loads(raw)
-    except Exception as exc:
-        raise RuntimeError(f"{env_name} must contain valid JSON: {exc}") from exc
-    if payload is None:
-        return None
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"{env_name} must decode to a JSON object")
-    return payload
-
-
-def _query_openai_compatible_text(
-    *,
-    model_id: str,
-    prompt: str,
-    system_prompt: str,
-    timeout: float,
-    temp,
-    base_url: str,
-    api_key: str,
-    extra_body: dict | None = None,
-) -> str:
-    if OpenAI is None:
-        raise ImportError("openai package is required for OpenAI-compatible backends")
-    if not str(base_url or "").strip():
-        raise RuntimeError("base_url is required for the selected OpenAI-compatible backend")
-    if not str(model_id or "").strip():
-        raise RuntimeError("model id is required for the selected OpenAI-compatible backend")
-
-    client = OpenAI(base_url=str(base_url).strip(), api_key=(str(api_key or "").strip() or "local"))
-
-    messages = []
-    if str(system_prompt or "").strip():
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
-
-    kwargs = {
-        "model": model_id,
-        "messages": messages,
-        "timeout": max(1.0, float(timeout)),
-    }
-    if temp is not None:
-        kwargs["temperature"] = temp
-    if extra_body:
-        kwargs["extra_body"] = extra_body
-
-    completion = client.chat.completions.create(**kwargs)
-
-    choices = getattr(completion, "choices", None) or []
-    if choices:
-        message = getattr(choices[0], "message", None)
-        content = getattr(message, "content", None)
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    txt = item.get("text") or item.get("content")
-                else:
-                    txt = getattr(item, "text", None) or getattr(item, "content", None)
-                if isinstance(txt, str):
-                    parts.append(txt)
-            if parts:
-                return "".join(parts)
-
-    output_text = getattr(completion, "output_text", None)
-    if isinstance(output_text, str):
-        return output_text
-    return str(completion or "")
-
-
-def _openai_compatible_backend_config(backend: str, model_id: str) -> tuple[str, str, str, dict | None]:
-    if backend == "ollama":
-        base_url = _env_first_nonempty("AGENTLAB_OLLAMA_BASE_URL", "OLLAMA_BASE_URL") or "http://localhost:11434/v1/"
-        api_key = _env_first_nonempty("AGENTLAB_OLLAMA_API_KEY", "OLLAMA_API_KEY") or "ollama"
-        model_name = model_id or (_env_first_nonempty("AGENTLAB_OLLAMA_MODEL") or "")
-        extra_body = _parse_extra_body_json("AGENTLAB_OLLAMA_EXTRA_BODY_JSON")
-        return base_url, api_key, model_name, extra_body
-    if backend == "vllm":
-        base_url = _env_first_nonempty("AGENTLAB_VLLM_BASE_URL", "VLLM_BASE_URL") or "http://localhost:8000/v1"
-        api_key = _env_first_nonempty("AGENTLAB_VLLM_API_KEY", "VLLM_API_KEY", "AGENTLAB_OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY") or "token-abc123"
-        model_name = model_id or (_env_first_nonempty("AGENTLAB_VLLM_MODEL") or "")
-        extra_body = _parse_extra_body_json("AGENTLAB_VLLM_EXTRA_BODY_JSON") or _parse_extra_body_json("AGENTLAB_OPENAI_COMPAT_EXTRA_BODY_JSON")
-        return base_url, api_key, model_name, extra_body
-    if backend == "lmstudio":
-        base_url = _env_first_nonempty("AGENTLAB_LMSTUDIO_BASE_URL", "LMSTUDIO_BASE_URL") or "http://127.0.0.1:1234/v1"
-        api_key = _env_first_nonempty("AGENTLAB_LMSTUDIO_API_KEY", "LMSTUDIO_API_KEY", "AGENTLAB_OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY") or "lm-studio"
-        model_name = model_id or (_env_first_nonempty("AGENTLAB_LMSTUDIO_MODEL") or "")
-        extra_body = _parse_extra_body_json("AGENTLAB_LMSTUDIO_EXTRA_BODY_JSON") or _parse_extra_body_json("AGENTLAB_OPENAI_COMPAT_EXTRA_BODY_JSON")
-        return base_url, api_key, model_name, extra_body
-    if backend == "g4fapi":
-        base_url = _env_first_nonempty("AGENTLAB_G4F_API_URL", "G4F_API_URL") or "http://localhost:1337/v1"
-        api_key = _env_first_nonempty("AGENTLAB_G4F_API_KEY", "G4F_API_KEY", "AGENTLAB_OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY") or "g4f"
-        model_name = model_id or (_env_first_nonempty("AGENTLAB_G4F_API_MODEL") or "")
-        extra_body = _parse_extra_body_json("AGENTLAB_G4F_API_EXTRA_BODY_JSON") or _parse_extra_body_json("AGENTLAB_OPENAI_COMPAT_EXTRA_BODY_JSON")
-        return base_url, api_key, model_name, extra_body
-
-    base_url = _env_first_nonempty("AGENTLAB_OPENAI_COMPAT_BASE_URL", "OPENAI_COMPAT_BASE_URL")
-    if not base_url:
-        raise RuntimeError(
-            "openai-compatible backend requires AGENTLAB_OPENAI_COMPAT_BASE_URL (or OPENAI_COMPAT_BASE_URL)"
-        )
-    api_key = _env_first_nonempty("AGENTLAB_OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY") or "local"
-    model_name = model_id or (_env_first_nonempty("AGENTLAB_OPENAI_COMPAT_MODEL", "OPENAI_COMPAT_MODEL") or "")
-    extra_body = _parse_extra_body_json("AGENTLAB_OPENAI_COMPAT_EXTRA_BODY_JSON")
-    return base_url, api_key, model_name, extra_body
-
-
-def _remember_g4f_provider_success(model_str: str, provider_name: str | None) -> None:
-    key = str(model_str or "").strip()
-    if not key:
-        return
-    if provider_name:
-        _G4F_PROVIDER_SUCCESS_CACHE[key] = provider_name
-
-
-def _g4f_provider_candidates(model_str: str | None) -> list[str | None]:
-    key = str(model_str or "").strip()
-    seen = set()
-    ordered: list[str | None] = []
-
-    explicit = (os.getenv("G4F_PROVIDER") or "").strip()
-    raw_list = _env_first_nonempty("AGENTLAB_G4F_PROVIDER_LIST", "G4F_PROVIDER_LIST") or ""
-
-    configured_names: list[str] = []
-    if explicit:
-        configured_names.append(explicit)
-    for chunk in raw_list.replace(";", ",").split(","):
-        item = chunk.strip()
-        if item:
-            configured_names.append(item)
-
-    strict_provider_selection = bool(configured_names) and not _env_truthy(
-        "AGENTLAB_G4F_PROVIDER_ALLOW_AUTO_FALLBACK",
-        default=False,
-    )
-    configured_set = {item.strip().lower() for item in configured_names if item and item.strip()}
-
-    cached = _G4F_PROVIDER_SUCCESS_CACHE.get(key)
-    if cached and (not strict_provider_selection or cached.strip().lower() in configured_set):
-        ordered.append(cached)
-
-    for item in configured_names:
-        ordered.append(item)
-
-    deduped: list[str | None] = []
-    for item in ordered:
-        key_item = (item or "").strip().lower()
-        if key_item in seen:
-            continue
-        seen.add(key_item)
-        deduped.append(item)
-
-    if not strict_provider_selection:
-        deduped.append(None)
-    final: list[str | None] = []
-    seen_final = set()
-    for item in deduped:
-        key_item = "__auto__" if item is None else item.strip().lower()
-        if key_item in seen_final:
-            continue
-        seen_final.add(key_item)
-        final.append(item)
-    return final
 
 
 def _g4f_async_enabled() -> bool:
@@ -783,23 +573,17 @@ async def _g4f_async_create_text(
     if max_tokens > 0:
         request_kwargs["max_tokens"] = max_tokens
 
-    try:
-        response = await asyncio.wait_for(
-            client.chat.completions.create(**request_kwargs),
-            timeout=max(1.0, float(timeout_s)),
-        )
-        text = await _g4f_async_to_text(
-            response,
-            max_chars=max_resp_chars,
-            stop_at_python_fence=stop_at_python_fence,
-            stream_timeout_s=stream_timeout_s if request_kwargs["stream"] else None,
-            stream_idle_timeout_s=stream_idle_timeout_s if request_kwargs["stream"] else None,
-        )
-    except asyncio.CancelledError as exc:
-        provider_label = provider_name or "auto"
-        raise RuntimeError(
-            f"g4f async request was cancelled by provider={provider_label} for model={model_str}"
-        ) from exc
+    response = await asyncio.wait_for(
+        client.chat.completions.create(**request_kwargs),
+        timeout=max(1.0, float(timeout_s)),
+    )
+    text = await _g4f_async_to_text(
+        response,
+        max_chars=max_resp_chars,
+        stop_at_python_fence=stop_at_python_fence,
+        stream_timeout_s=stream_timeout_s if request_kwargs["stream"] else None,
+        stream_idle_timeout_s=stream_idle_timeout_s if request_kwargs["stream"] else None,
+    )
     return text.strip() if isinstance(text, str) else ""
 
 
@@ -1376,35 +1160,18 @@ def query_model(
             raise last_err
         raise Exception("No model produced an answer (fallback list empty or all failed).")
 
-    backend_kind, backend_model_id = _split_model_backend(model_str)
-
     # --- Local transformers backend ---
-    if backend_kind == "local":
-        model_id = backend_model_id or os.getenv(
+    # Use: local:<hf_model_id>
+    if isinstance(model_str, str) and model_str.startswith("local:"):
+        model_id = model_str.split(":", 1)[1].strip() or os.getenv(
             "AGENTLAB_LOCAL_MODEL", "Qwen/Qwen2.5-0.5B-Instruct"
         )
         return _local_transformers_chat(model_id, prompt, system_prompt, temp=temp, timeout=timeout)
 
-    # --- Local/remote OpenAI-compatible servers (Ollama, vLLM, LM Studio, g4f Interference API, etc.) ---
-    if backend_kind in {"ollama", "vllm", "lmstudio", "openai-compatible", "g4fapi"}:
-        base_url, compat_api_key, compat_model_id, extra_body = _openai_compatible_backend_config(
-            backend_kind, backend_model_id
-        )
-        return _query_openai_compatible_text(
-            model_id=compat_model_id,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            timeout=timeout,
-            temp=temp,
-            base_url=base_url,
-            api_key=compat_api_key,
-            extra_body=extra_body,
-        )
-
     # If prefixed with 'g4f:' we force GPT4Free backend (no API key needed)
-    force_g4f = backend_kind == "g4f"
+    force_g4f = isinstance(model_str, str) and model_str.startswith("g4f:")
     if force_g4f:
-        model_str = backend_model_id
+        model_str = model_str.split(":", 1)[1].strip()
     preloaded_api = os.getenv('OPENAI_API_KEY')
     if openai_api_key is None and preloaded_api is not None:
         openai_api_key = preloaded_api
@@ -1430,6 +1197,8 @@ def query_model(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ]
+                kwargs = {}
+                provider_name = os.getenv("G4F_PROVIDER", "").strip() or None
                 max_resp_chars = _env_int("AGENTLAB_MAX_RESPONSE_CHARS", 60000)
                 if max_resp_chars <= 0:
                     max_resp_chars = None
@@ -1447,86 +1216,68 @@ def query_model(
                 if request_timeout_s <= 0:
                     request_timeout_s = max(1.0, float(timeout))
 
-                last_g4f_error = None
-                allow_sync_fallback = _env_truthy("AGENTLAB_G4F_ASYNC_FALLBACK_TO_SYNC", default=True)
-
-                for provider_name in _g4f_provider_candidates(model_str):
-                    if _g4f_async_enabled():
-                        try:
-                            answer = _run_coro_sync(
-                                _g4f_async_create_text(
-                                    model_str=model_str,
-                                    messages=messages,
-                                    provider_name=provider_name,
-                                    timeout_s=request_timeout_s,
-                                    stream_timeout_s=stream_timeout_s,
-                                    stream_idle_timeout_s=stream_idle_timeout_s,
-                                    max_resp_chars=max_resp_chars,
-                                    stop_at_python_fence=stop_at_python_fence,
-                                )
+                if _g4f_async_enabled():
+                    try:
+                        answer = _run_coro_sync(
+                            _g4f_async_create_text(
+                                model_str=model_str,
+                                messages=messages,
+                                provider_name=provider_name,
+                                timeout_s=request_timeout_s,
+                                stream_timeout_s=stream_timeout_s,
+                                stream_idle_timeout_s=stream_idle_timeout_s,
+                                max_resp_chars=max_resp_chars,
+                                stop_at_python_fence=stop_at_python_fence,
                             )
-                            if isinstance(answer, str):
-                                answer = answer.strip()
-                            if answer:
-                                _remember_g4f_provider_success(model_str, provider_name)
-                                _best_effort_release_memory(clear_local_cache=False)
-                                return answer
-                        except BaseException as exc:
-                            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                                raise
-                            last_g4f_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc) or type(exc).__name__)
-                            if not allow_sync_fallback:
-                                continue
-
-                    kwargs = {}
-                    # Some g4f providers require credentials (API key or .har). If the user provided
-                    # one via env vars, pass it through (only if supported by this installed g4f).
-                    try:
-                        import inspect
-                        sig = inspect.signature(g4f_mod.ChatCompletion.create)  # type: ignore
-                        if "api_key" in sig.parameters:
-                            api_key = _g4f_api_key_from_env()
-                            if api_key:
-                                kwargs["api_key"] = api_key
-                    except Exception:
-                        pass
-
-                    if provider_name:
-                        try:
-                            prov = getattr(g4f_mod.Provider, provider_name)  # type: ignore
-                            kwargs["provider"] = prov
-                        except Exception:
-                            kwargs["provider"] = provider_name
-                    if _g4f_supports_stream_flag(g4f_mod):
-                        kwargs["stream"] = True
-
-                    try:
-                        resp = g4f_mod.ChatCompletion.create(
-                            model=model_str,
-                            messages=messages,
-                            # Keep the provider request timeout aligned with the outer stream/worker budget.
-                            timeout=int(max(1, math.ceil(request_timeout_s))),
-                            **kwargs,
-                        )
-                        answer = _g4f_to_text(
-                            resp,
-                            max_chars=max_resp_chars,
-                            stop_at_python_fence=stop_at_python_fence,
-                            stream_timeout_s=stream_timeout_s,
-                            stream_idle_timeout_s=stream_idle_timeout_s,
                         )
                         if isinstance(answer, str):
                             answer = answer.strip()
                         if answer:
-                            _remember_g4f_provider_success(model_str, provider_name)
                             _best_effort_release_memory(clear_local_cache=False)
                             return answer
-                    except Exception as exc:
-                        last_g4f_error = exc
-                        continue
+                    except Exception:
+                        if not _env_truthy("AGENTLAB_G4F_ASYNC_FALLBACK_TO_SYNC", default=True):
+                            raise
 
-                if last_g4f_error is not None:
-                    raise last_g4f_error
+                # Some g4f providers require credentials (API key or .har). If the user provided
+                # one via env vars, pass it through (only if supported by this installed g4f).
+                try:
+                    import inspect
+                    sig = inspect.signature(g4f_mod.ChatCompletion.create)  # type: ignore
+                    if "api_key" in sig.parameters:
+                        api_key = _g4f_api_key_from_env()
+                        if api_key:
+                            kwargs["api_key"] = api_key
+                except Exception:
+                    pass
+
+                if provider_name:
+                    try:
+                        prov = getattr(g4f_mod.Provider, provider_name)  # type: ignore
+                        kwargs["provider"] = prov
+                    except Exception:
+                        kwargs["provider"] = provider_name
+                if _g4f_supports_stream_flag(g4f_mod):
+                    kwargs["stream"] = True
+                resp = g4f_mod.ChatCompletion.create(
+                    model=model_str,
+                    messages=messages,
+                    # Keep the provider request timeout aligned with the outer stream/worker budget.
+                    timeout=int(max(1, math.ceil(request_timeout_s))),
+                    **kwargs,
+                )
+                answer = _g4f_to_text(
+                    resp,
+                    max_chars=max_resp_chars,
+                    stop_at_python_fence=stop_at_python_fence,
+                    stream_timeout_s=stream_timeout_s,
+                    stream_idle_timeout_s=stream_idle_timeout_s,
+                )
+                if isinstance(answer, str):
+                    answer = answer.strip()
+                if answer:
+                    _best_effort_release_memory(clear_local_cache=False)
+                    return answer
 
             if model_str == "gpt-4o-mini" or model_str == "gpt4omini" or model_str == "gpt-4omini" or model_str == "gpt4o-mini":
                 model_str = "gpt-4o-mini"

@@ -280,16 +280,3 @@ def test_memory_env_for_codegen_defaults_to_stop_at_python_fence(monkeypatch):
     monkeypatch.delenv('AGENTLAB_G4F_STOP_AT_PYTHON_FENCE', raising=False)
     env = pipeline_cli._memory_env_for_codegen('g4f:gpt-4o-mini')
     assert env['AGENTLAB_G4F_STOP_AT_PYTHON_FENCE'] == '1'
-
-
-def test_validate_solver_raises_runtime_error_on_timeout(monkeypatch, tmp_path):
-    solver = tmp_path / 'solver.py'
-    validator = tmp_path / 'validator.py'
-    solver.write_text('print("{}")\n', encoding='utf-8')
-    validator.write_text('import time\ntime.sleep(5)\n', encoding='utf-8')
-
-    monkeypatch.setenv('AGENTLAB_VALIDATOR_TIMEOUT_S', '0.1')
-
-    import pytest
-    with pytest.raises(RuntimeError, match='Validator timed out'):
-        pipeline_cli._validate_solver(solver, validator, [1, 2, 3])

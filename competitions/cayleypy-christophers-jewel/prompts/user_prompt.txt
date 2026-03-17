@@ -1,40 +1,27 @@
-We are solving the Kaggle competition "CayleyPy Christopher's Jewel Solve Optimally".
-Reference: https://www.kaggle.com/competitions/cayleypy-christophers-jewel
+You are writing a solver for the Kaggle competition "CayleyPy Christopher's Jewel".
+Competition page (for reference): https://www.kaggle.com/competitions/cayleypy-christophers-jewel
 
-PROBLEM SUMMARY
-- State: a permutation vector of length 48.
-- Goal: transform the input state into the central solved state from competitions/cayleypy-christophers-jewel/data/puzzle_info.json.
-- Legal generators are the keys of puzzle_info.json.
-- Official rules describe moves such as DBRRF, UBBBLL, DFLBL, URBRBB, DBLBBBR, ULFR and their inverses.
-- Kaggle submissions use dot-separated move names.
+Task summary (local/offline version used by this repo):
+- Input to your solver is a puzzle state vector: a Python list of ints.
+- You must output a JSON object with keys:
+  - "moves": a list of generator names (strings)
+  - "sorted_array": the resulting state after applying those moves
 
-INPUT / OUTPUT CONTRACT
-- Implement solve(vec) -> (moves, sorted_array)
-- moves must be either list[str] of legal generator names or the string "UNSOLVED"
-- sorted_array must be the final state after applying the moves
-- Script mode must print JSON: {"moves": ..., "sorted_array": ...}
+Moves / generators:
+- Valid moves are the generator names from:
+    competitions/cayleypy-christophers-jewel/data/puzzle_info.json
+  under the key "generators".
+- Each generator is a permutation of indices. Applying a move permutes the state.
 
-ALGORITHM REQUIREMENTS
-- Polynomial time only.
-- No BFS / DFS / A* / IDA* / whole-state search.
-- Constant-depth lookahead over the fixed generator set is allowed.
-- Never invent moves; only use keys from puzzle_info.json.
+Goal:
+- Transform the given state into the "central_state" provided in puzzle_info.json.
 
-RECOMMENDED IMPLEMENTATION ORDER
-1. If bundled test.csv + sample_submission.csv are present, build an exact lookup baseline:
-       initial_state string -> valid path
-   Return that path for exact matches.
-2. For unseen states, use puzzle_info.json and a bounded-lookahead greedy fallback:
-   - apply_perm(state, perm)
-   - apply_moves(state, moves)
-   - score by matched positions / total mismatches / simple local improvements
-   - evaluate all legal 1-move candidates and optionally 2-move macros
-   - choose the best improving candidate at each step
-3. If progress stalls for a bounded number of polynomial steps, return "UNSOLVED".
+Implementation contract:
+- Implement solve(vec) -> (moves, out_vec)
+  where moves is List[str] and out_vec is List[int].
+- Provide a CLI entrypoint so the validator can run:
+    python solve_module.py "[ ... ]"
+  and print the JSON result to stdout.
 
-IMPLEMENTATION DETAILS
-- Standard library only.
-- Work on a copy of vec.
-- Verify that sorted_array equals the state obtained by the returned moves.
-- Return exactly one complete Python file inside one ```python``` block.
-- Do not add explanations outside the code block.
+Notes:
+- Correctness first. On Kaggle, shorter paths score better.

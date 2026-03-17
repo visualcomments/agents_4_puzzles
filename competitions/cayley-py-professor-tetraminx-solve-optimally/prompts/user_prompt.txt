@@ -1,38 +1,15 @@
-We are solving the Kaggle competition "CayleyPy Professor Tetraminx Solve Optimally".
-Reference: https://www.kaggle.com/competitions/cayley-py-professor-tetraminx-solve-optimally
+You are writing a solver for the Kaggle competition "CayleyPy Professor Tetraminx Solve Optimally".
+Competition page (for reference): https://www.kaggle.com/competitions/cayley-py-professor-tetraminx-solve-optimally
 
-PROBLEM SUMMARY
-- State: a permutation vector of length 88.
-- Goal: transform the input state to the solved state [0,1,2,...,87].
-- The full move set is stored in puzzle_info.json when that file is available.
-- Official notation: moves are layer turns of the tetrahedron written as #A, where A is one of BL, BR, F, D and # is the layer number; a leading minus denotes the inverse, e.g. 2BL or -4D.
+This repository currently contains a TEMPLATE pipeline for this competition.
 
-INPUT / OUTPUT CONTRACT
-- Implement solve(vec) -> (moves, sorted_array)
-- moves must be either list[str] of legal generator names or the string "UNSOLVED"
-- sorted_array must be the final state after applying the moves
-- Script mode must print JSON: {"moves": ..., "sorted_array": ...}
+Task summary:
+- Input: a puzzle state vector (Python list of ints).
+- Output: JSON dict with keys "moves" (list of move tokens) and "sorted_array" (final state).
 
-ALGORITHM REQUIREMENTS
-- Polynomial time only.
-- No BFS / DFS / A* / IDA* / exhaustive state-space search.
-- Constant-depth lookahead over a fixed generator set is allowed.
-- Use only legal move names from puzzle_info.json when that file is present.
+Implementation contract:
+- Implement solve(vec) -> (moves, out_vec)
+- Provide a CLI entrypoint to print the JSON result, e.g.:
+    python solve_module.py "[ ... ]"
 
-RECOMMENDED IMPLEMENTATION ORDER
-1. If bundled test.csv + sample_submission.csv are present, build an exact lookup baseline:
-       initial_state string -> valid dot-separated path
-   Return that path for exact matches.
-2. Otherwise, or for unseen states, load the generators from puzzle_info.json and implement a bounded-lookahead greedy solver:
-   - apply_perm(state, perm)
-   - apply_moves(state, moves)
-   - score(state) based on positions matching the solved state and other simple polynomial-time metrics
-   - repeatedly choose the best 1-move or 2-move candidate
-3. If a bounded number of iterations yields no progress, return "UNSOLVED".
-
-IMPLEMENTATION DETAILS
-- Standard library only.
-- Work on a copy of vec.
-- Verify that sorted_array is exactly the result of the emitted moves.
-- Return exactly one complete Python file inside one ```python``` block.
-- Do not add explanations outside the code block.
+If you do not implement a real solver yet, return moves="UNSOLVED" and out_vec=vec.

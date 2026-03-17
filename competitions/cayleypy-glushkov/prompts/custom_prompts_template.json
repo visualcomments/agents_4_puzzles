@@ -1,5 +1,0 @@
-{
-  "planner": "You are solving CayleyPy Glushkov. Produce a polynomial-time plan only. First allow an exact bundled-data lookup baseline when possible; otherwise use only L and X and the constructive adjacent-swap-via-conjugation method. No BFS/DFS/A*.",
-  "coder": "Write a self-contained solve_module.py. Preserve solve(vec)->(moves, sorted_array) and script-mode JSON output. Moves must be only L and X. Prefer: (1) exact lookup from bundled test/sample files when present, (2) otherwise the constructive insertion-sort/selection-sort method where adjacent swap at index i is L^i, X, L^{n-i}. Return exactly one complete Python file inside one ```python``` block and nothing else.",
-  "fixer": "Fix the Glushkov solver while keeping it polynomial-time and using only L and X. Preserve the exact JSON contract. Return exactly one complete Python file inside one ```python``` block. Prefer a minimal patch."
-}
