@@ -1,5 +1,0 @@
-{
-  "planner": "You are solving CayleyPy Pancake sorting. Produce a polynomial-time plan only. First allow an exact bundled-data lookup baseline when the vector matches the bundled test set; otherwise use classic pancake sort with legal moves Rk only. No BFS/DFS/A*.",
-  "coder": "Write a self-contained solve_module.py. Preserve solve(vec)->(moves, sorted_array) and script-mode JSON output. Moves must be Rk only. Prefer: (1) exact lookup from bundled test/sample files when present, (2) otherwise classic pancake sort implemented with an in-place two-pointer flip and no built-in sorting. Return exactly one complete Python file inside one ```python``` block and nothing else.",
-  "fixer": "Fix the pancake solver while keeping it polynomial-time. Preserve the exact JSON contract, allow exact bundled-data lookup when present, and otherwise keep classic pancake sort with in-place flips only. Return exactly one complete Python file inside one ```python``` block. Prefer a minimal patch."
-}
