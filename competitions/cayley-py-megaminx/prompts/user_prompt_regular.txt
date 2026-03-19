@@ -1,10 +1,11 @@
 We are solving the Kaggle competition "CayleyPy Megaminx Solve Optimally":
 https://www.kaggle.com/competitions/cayley-py-megaminx
 
-I need a Python module `solve_module.py` that improves an already working Megaminx solver while preserving full compatibility with the official competition bundle.
+I need a Python module `solve_module.py` written FROM SCRATCH that improves on the bundled-data solving approach while preserving full compatibility with the official competition bundle.
 
 ABSOLUTE REQUIREMENTS
-- Start from the baseline code below. It already produces a valid bundled-data submission.
+- Write the code from scratch. Do NOT rely on, patch, wrap, or extend any baseline implementation.
+- The module must be fully self-contained and use only the Python standard library.
 - Use ONLY the official competition move names from `puzzle_info.json`.
 - Do NOT rename generators internally.
 - Do NOT invent moves.
@@ -13,33 +14,95 @@ ABSOLUTE REQUIREMENTS
 - `sorted_array` must be the actual final state obtained after applying the returned moves.
 - When run as a script:
   `python solve_module.py "[1,2,3]"`
-  it must print JSON: `{"moves": [...], "sorted_array": [...]}`
+  it must print JSON:
+  `{"moves": [...], "sorted_array": [...]}`
 
 COMPETITION CONTEXT YOU MUST USE
 - The Megaminx competition state is a permutation vector of length 120.
 - The solved state is the central state from `puzzle_info.json`.
 - Legal generators are the Megaminx face turns and their inverses from `puzzle_info.json`.
 - Submission paths are dot-separated generator names.
-- The Kaggle score is the sum of move counts over all 1001 test states.
-- `sample_submission.csv` is valid but highly non-optimal, so improving existing valid paths is a correct and important direction.
+- The Kaggle score is the sum of move counts over all test states.
+- `sample_submission.csv` is valid but highly non-optimal, so improving valid existing paths is a correct and important direction.
 
-IMPORTANT SOLVER DESIGN RULES
-- Preserve the current exact-match bundled lookup behavior. If the input vector matches a bundled test state, return a valid path for that exact state.
-- The baseline already has an optimized bundled lookup pipeline. Do not throw that away.
-- Prefer deterministic polynomial-time optimizations over generic exponential search.
-- Small fixed-radius exact optimization is allowed, because the radius is constant and does not grow with input size.
-- Whole-state-space search, IDA*, A*, BFS, DFS, beam search over growing depth, or brute force over full states are forbidden.
+CORE DESIGN GOAL
+Implement a solver module from scratch that:
+1. loads the official bundled competition data;
+2. preserves exact bundled-state validity;
+3. deterministically improves move sequences when safe;
+4. stays polynomial-time and practical;
+5. never sacrifices correctness for speculative optimization.
 
+MANDATORY SOLVER BEHAVIOR
+- Build an exact bundled lookup pipeline from scratch.
+- If the input vector matches a bundled test state, return a valid solving path for that exact state.
+- Prefer exact bundled lookup first.
+- Add deterministic, correctness-preserving optimization passes that reduce move count and/or runtime overhead.
+- If a path is optimized, the returned `sorted_array` must equal the true result of applying the optimized moves.
+- For bundled competition rows, do NOT return `UNSOLVED` if a valid bundled path can be produced.
+- If no bundled solution is available for a non-bundled state, a safe deterministic fallback is allowed, but it must never break bundled correctness.
 
-VERY IMPORTANT
-- Do NOT replace the current approach with a generic heuristic that can return invalid or unsolved outputs for bundled states.
-- Do NOT return `UNSOLVED` for bundled competition rows if the baseline can solve them.
-- Prefer exact bundled lookup first, then safe deterministic fallback only if necessary.
-- Keep the implementation self-contained and standard-library only.
+ALLOWED IMPROVEMENT DIRECTIONS
+Use safe, high-leverage techniques such as:
+- exact bundled lookup built from the official files;
+- stronger cancellation of inverse pairs and repeated face powers using the correct face order;
+- canonicalization of commuting moves using commutation relations derived from `puzzle_info.json`;
+- stronger exact short-word replacement tables for local path fragments;
+- local dynamic programming or fixed-window exact optimization for dot-separated move sequences;
+- multi-pass normalization until convergence when still polynomial and practical;
+- caching of permutations, composed permutations, and short words to reduce runtime;
+- deterministic path compression passes that preserve the exact end state.
 
+ALLOWED SEARCH
+- Small fixed-radius exact optimization for local fragments is allowed, because the radius is constant and does not grow with input size.
 
+FORBIDDEN APPROACHES
+- Do NOT depend on any baseline code.
+- Do NOT assume any unofficial move naming scheme.
+- Do NOT use whole-state-space search.
+- Do NOT use IDA*, A*, BFS, DFS, beam search over growing depth, or brute force over full states.
+- Do NOT replace the bundled exact-solve behavior with a heuristic that can fail or return unsolved outputs for bundled states.
+- Do NOT return invalid or partially validated paths.
+- Do NOT hardcode unofficial generators or alternate notation.
 
-Output requirements for your answer
-- Return the full improved `solve_module.py` in exactly one ```python ...``` block.
+DATA / FILE HANDLING REQUIREMENTS
+- Detect the competition data directory robustly.
+- Load:
+  - `puzzle_info.json`
+  - `test.csv`
+  - optionally `optimized_lookup.json` if present
+  - optionally an optimized submission CSV if present
+  - otherwise `sample_submission.csv`
+- Preserve a robust bundled lookup strategy:
+  - prefer `optimized_lookup.json` if available;
+  - otherwise use an optimized submission file if available;
+  - otherwise build a lookup from `test.csv` + `sample_submission.csv`;
+  - then optimize those paths safely and deterministically.
+- Keep compatibility with the official competition bundle layout.
+
+CORRECTNESS REQUIREMENTS
+- `solve(vec)` must return one of:
+  - `([], vec)` if already solved;
+  - `([move1, move2, ...], final_state)` if solved by a valid path;
+  - optionally `("UNSOLVED", vec)` only for truly unsupported non-bundled inputs.
+- For every returned move list:
+  - every move must exist in `puzzle_info.json["generators"]`;
+  - the moves must be applicable left-to-right;
+  - the computed `sorted_array` must be the exact final state after applying those moves;
+  - for bundled states, the final state must be the solved central state.
+
+IMPLEMENTATION DETAILS TO PRESERVE
+- Keep the public API exactly:
+  `solve(vec) -> (moves, sorted_array)`
+- Keep script mode exactly:
+  `python solve_module.py "[1,2,3]"`
+  prints:
+  `{"moves": [...], "sorted_array": [...]}`
+- Use standard-library-only Python.
+- Keep the module self-contained and runnable as-is.
+
+OUTPUT REQUIREMENTS FOR YOUR ANSWER
+- Return the full `solve_module.py` in exactly one ```python ...``` block.
 - Do not include any text outside that code block.
 - The produced code must be self-contained and runnable.
+- The code must be written from scratch and must not mention or depend on any baseline implementation.
