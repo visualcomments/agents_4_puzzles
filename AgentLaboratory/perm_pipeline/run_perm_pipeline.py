@@ -1308,20 +1308,8 @@ def _recovery_enabled() -> bool:
     return _env_int("AGENTLAB_G4F_RECOVERY_ROUNDS", 1) > 0
 
 
-def _report_requires_credentials(report: str) -> bool:
-    lowered = (report or "").lower()
-    return "credentials required" in lowered
-
-
-def _all_reports_require_credentials(reports: Sequence[str]) -> bool:
-    relevant = [str(r or "").strip() for r in reports if str(r or "").strip()]
-    return bool(relevant) and all(_report_requires_credentials(r) for r in relevant)
-
-
 def _report_is_recoverable(report: str) -> bool:
     lowered = (report or "").lower()
-    if _report_requires_credentials(lowered):
-        return False
     markers = (
         "did not return a python file",
         "format-rescue failed",
@@ -1330,6 +1318,7 @@ def _report_is_recoverable(report: str) -> bool:
         "remote worker did not produce a result file",
         "failed to parse remote worker output",
         "no python block",
+        "provider",
         "timeout",
     )
     return any(marker in lowered for marker in markers)
@@ -1474,7 +1463,6 @@ def run_hybrid_codegen_search(
     while round_idx < len(plan_rounds) and round_idx <= refine_rounds:
         current_plans = plan_rounds[round_idx]
         frontier = build_plan_model_frontier(current_plans, coder_models, frontier_width=frontier_width)
-        frontier_reports: List[str] = []
         if frontier:
             for pair_idx, (plan_candidate, coder_model) in enumerate(frontier, start=1):
                 raw_plan_text = plan_candidate.plan_text
@@ -1504,7 +1492,6 @@ def run_hybrid_codegen_search(
                     stage_label=f"coder variant {plan_candidate.variant_index}" if round_idx == 0 else f"coder refine {round_idx} variant {plan_candidate.variant_index}",
                 )
                 generation_reports.append(report)
-                frontier_reports.append(report)
                 archive.add(
                     ArchiveEntry(
                         plan_text=raw_plan_text,
@@ -1528,13 +1515,6 @@ def run_hybrid_codegen_search(
         if not archive_summary:
             round_idx += 1
             continue
-        if _all_reports_require_credentials(frontier_reports):
-            log_status(
-                "[planner] stopping further refinement rounds because all frontier attempts in this round failed due to missing LLM credentials."
-            )
-            round_idx += 1
-            continue
-
         refined = generate_plan_candidates(
             planner_models,
             user_prompt,
@@ -1823,11 +1803,6 @@ def main() -> None:
 
     if archive.best_failures(limit=1):
         plan_for_codegen = _augment_plan_with_archive_context(plan, archive)
-
-    if _all_reports_require_credentials(generation_reports):
-        _fallback_to_baseline(
-            "All attempted LLM generations failed because credentials are missing for the configured providers."
-        )
 
     baseline_patch_models = resolve_agent_models("baseline-patcher", fixer_models or coder_models, agent_model_overrides)
     if baseline_code.strip() and baseline_patch_models:

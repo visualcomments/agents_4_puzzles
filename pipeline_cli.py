@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import csv
 import itertools
 import importlib
@@ -54,7 +53,6 @@ import sys
 import traceback
 from datetime import datetime
 import time
-import tempfile
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -845,203 +843,6 @@ def _resolve_default_puzzles(spec: PipelineSpec) -> Path:
         "    or into `competition_files/<slug>.zip` and re-run.\n"
     )
 
-
-
-
-def _resolve_bundle_member(spec: PipelineSpec, member_name: str) -> Optional[Path]:
-    """Locate a competition bundle member without mutating tracked fixtures."""
-    candidates = [
-        ROOT / "competitions" / spec.key / "data" / member_name,
-        ROOT / "competitions" / spec.competition / "data" / member_name,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-
-    zip_path = _resolve_competition_zip(spec)
-    if zip_path is None:
-        return None
-
-    target = ROOT / "_cache" / "competition_bundle_schema" / spec.key / member_name
-    try:
-        return _extract_named_member_from_zip(zip_path, member_name, target)
-    except Exception:
-        return None
-
-
-def _truncate_text(value: str, *, max_chars: int = 160) -> str:
-    text = str(value or "").strip()
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 3].rstrip() + "..."
-
-
-def _csv_rows_dict(path: Path) -> list[dict[str, str]]:
-    _ensure_csv_field_size_limit()
-    with path.open(newline='', encoding='utf-8') as f:
-        return list(csv.DictReader(f))
-
-
-def _split_moves(path_value: str) -> list[str]:
-    value = (path_value or "").strip()
-    return [] if not value else [token for token in value.split('.') if token]
-
-
-def _build_cayley_py_megaminx_prompt_context(spec: PipelineSpec) -> str:
-    puzzle_info_path = _resolve_bundle_member(spec, 'puzzle_info.json')
-    test_csv_path = _resolve_bundle_member(spec, 'test.csv')
-    sample_csv_path = _resolve_bundle_member(spec, 'sample_submission.csv')
-    if puzzle_info_path is None or test_csv_path is None or sample_csv_path is None:
-        return ""
-
-    try:
-        puzzle = json.loads(puzzle_info_path.read_text(encoding='utf-8'))
-        test_rows = _csv_rows_dict(test_csv_path)
-        sample_rows = _csv_rows_dict(sample_csv_path)
-    except Exception:
-        return ""
-
-    generators = dict(puzzle.get('generators') or {})
-    forward_faces = sorted(name for name in generators if isinstance(name, str) and not name.startswith('-'))
-    central_state = list(puzzle.get('central_state') or [])
-    state_len = len(central_state)
-    is_identity = central_state == list(range(state_len)) if state_len else False
-
-    sample_lengths = [len(_split_moves(row.get('path', ''))) for row in sample_rows]
-    sample_mean = (sum(sample_lengths) / len(sample_lengths)) if sample_lengths else 0.0
-
-    comp_dir = ROOT / 'competitions' / spec.key
-    optimized_submission = comp_dir / 'submissions' / 'optimized_submission.csv'
-    optimized_stats_path = comp_dir / 'data' / 'optimized_stats.json'
-    optimized_rows: list[dict[str, str]] = []
-    optimized_lengths: list[int] = []
-    if optimized_submission.exists():
-        try:
-            optimized_rows = _csv_rows_dict(optimized_submission)
-            optimized_lengths = [len(_split_moves(row.get('path', ''))) for row in optimized_rows]
-        except Exception:
-            optimized_rows = []
-            optimized_lengths = []
-
-    optimized_stats = None
-    if optimized_stats_path.exists():
-        try:
-            payload = json.loads(optimized_stats_path.read_text(encoding='utf-8'))
-            if isinstance(payload, dict):
-                optimized_stats = payload
-        except Exception:
-            optimized_stats = None
-
-    example_indices: list[int] = []
-    if test_rows:
-        example_indices.append(0)
-        mid = min(len(test_rows) - 1, 100)
-        if mid not in example_indices:
-            example_indices.append(mid)
-        if optimized_lengths and sample_lengths and len(optimized_lengths) == len(sample_lengths):
-            best_gain_idx = max(range(len(sample_lengths)), key=lambda i: sample_lengths[i] - optimized_lengths[i])
-            if best_gain_idx not in example_indices:
-                example_indices.append(best_gain_idx)
-        last_idx = len(test_rows) - 1
-        if last_idx not in example_indices and len(example_indices) < 3:
-            example_indices.append(last_idx)
-
-    example_lines: list[str] = []
-    for idx in example_indices[:3]:
-        test_row = test_rows[idx]
-        sample_row = sample_rows[idx] if idx < len(sample_rows) else {}
-        opt_row = optimized_rows[idx] if idx < len(optimized_rows) else {}
-        state_prefix = ','.join((test_row.get('initial_state') or '').split(',')[:18])
-        sample_moves = _split_moves(sample_row.get('path', ''))
-        opt_moves = _split_moves(opt_row.get('path', ''))
-        parts = [
-            f"- row {idx} / initial_state_id={test_row.get('initial_state_id', '?')}:",
-            f"state_prefix={_truncate_text(state_prefix, max_chars=120)}",
-            f"sample_len={len(sample_moves)}",
-            f"sample_prefix={_truncate_text('.'.join(sample_moves[:18]), max_chars=140)}",
-        ]
-        if opt_moves:
-            parts.append(f"optimized_len={len(opt_moves)}")
-            parts.append(f"optimized_prefix={_truncate_text('.'.join(opt_moves[:18]), max_chars=140)}")
-        example_lines.append(' '.join(parts))
-
-    appendix_lines = [
-        "AUTOGENERATED COMPETITION CONTEXT (derived from the actual bundled files for this run)",
-        "Use these facts and examples in addition to the baseline code above. Treat them as source-of-truth bundle metadata, not guesses.",
-        "",
-        "BUNDLE FILES DETECTED",
-        f"- puzzle_info.json: {puzzle_info_path}",
-        f"- test.csv: {test_csv_path}",
-        f"- sample_submission.csv: {sample_csv_path}",
-    ]
-    if optimized_submission.exists():
-        appendix_lines.append(f"- optimized_submission.csv: {optimized_submission}")
-    if optimized_stats_path.exists():
-        appendix_lines.append(f"- optimized_stats.json: {optimized_stats_path}")
-
-    appendix_lines.extend([
-        "",
-        "BUNDLE-DERIVED FACTS",
-        f"- central_state length: {state_len} (identity={is_identity})",
-        f"- total legal move tokens in puzzle_info.json: {len(generators)}",
-        f"- forward face names ({len(forward_faces)}): {', '.join(forward_faces)}",
-        f"- test row count: {len(test_rows)}",
-        f"- sample submission row count: {len(sample_rows)}",
-        f"- sample path length stats: min={min(sample_lengths) if sample_lengths else 0}, max={max(sample_lengths) if sample_lengths else 0}, mean={sample_mean:.2f}",
-    ])
-
-    if optimized_lengths:
-        opt_mean = sum(optimized_lengths) / len(optimized_lengths)
-        appendix_lines.append(
-            f"- optimized bundled submission stats: min={min(optimized_lengths)}, max={max(optimized_lengths)}, mean={opt_mean:.2f}"
-        )
-        if len(optimized_lengths) == len(sample_lengths):
-            appendix_lines.append(
-                f"- total bundled improvement vs sample: {sum(sample_lengths) - sum(optimized_lengths)} fewer moves over {len(sample_lengths)} rows"
-            )
-
-    if optimized_stats:
-        appendix_lines.append(
-            f"- optimized_stats.json reports score_original={optimized_stats.get('score_original')}, score_optimized={optimized_stats.get('score_optimized')}, score_delta={optimized_stats.get('score_delta')}, radius_exact_table={optimized_stats.get('radius_exact_table')}, local_window={optimized_stats.get('local_window')}"
-        )
-
-    appendix_lines.extend([
-        "",
-        "EXAMPLES FROM THE ACTUAL BUNDLE",
-        *example_lines,
-        "",
-        "PROMPTING IMPLICATIONS",
-        "- The model should reason about the real official move alphabet and the real bundled row distribution, not a generic Megaminx abstraction.",
-        "- The bundle already contains concrete evidence that local algebraic rewriting can beat sample_submission substantially, so safe path-compression is a primary optimization target.",
-    ])
-
-    return '\n'.join(appendix_lines).strip()
-
-
-def _build_competition_prompt_context(spec: PipelineSpec) -> str:
-    if spec.key == 'cayley-py-megaminx':
-        return _build_cayley_py_megaminx_prompt_context(spec)
-    return ""
-
-
-@contextlib.contextmanager
-def _materialize_prompt_with_competition_context(spec: PipelineSpec, prompt_file: Path):
-    appendix = _build_competition_prompt_context(spec)
-    if not appendix:
-        yield prompt_file
-        return
-
-    base_text = prompt_file.read_text(encoding='utf-8')
-    with tempfile.NamedTemporaryFile('w', encoding='utf-8', suffix='.txt', delete=False) as tmp:
-        tmp.write(base_text.rstrip() + '\n\n' + appendix + '\n')
-        tmp_path = Path(tmp.name)
-    try:
-        yield tmp_path
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
 
 def _variant_prompt_path(base: Optional[Path], variant: Optional[str], *, role: str) -> Optional[Path]:
     if base is None or not variant:
@@ -2198,37 +1999,36 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
 
     _gpu_diag_hint(args.models)
 
-    with _materialize_prompt_with_competition_context(spec, prompt_file) as materialized_prompt_file:
-        _run_agent_laboratory(
-            prompt_file=materialized_prompt_file,
-            out_path=out_path,
-            validator=spec.validator,
-            baseline=spec.baseline_solver,
-            custom_prompts=custom_prompts,
-            llm=args.models,
-            agent_models=args.agent_models,
-            planner_models=args.planner_models,
-            coder_models=args.coder_models,
-            fixer_models=args.fixer_models,
-            search_mode=args.search_mode,
-            plan_beam_width=args.plan_beam_width,
-            frontier_width=args.frontier_width,
-            archive_size=args.archive_size,
-            refine_rounds=args.refine_rounds,
-            max_iters=args.max_iters,
-            no_llm=False,
-            allow_baseline=args.allow_baseline,
-            g4f_recovery_rounds=args.g4f_recovery_rounds,
-            g4f_recovery_max_iters=args.g4f_recovery_max_iters,
-            g4f_recovery_sleep=args.g4f_recovery_sleep,
-            worker_no_kill_process_group=args.worker_no_kill_process_group,
-            print_generation=args.print_generation,
-            print_generation_max_chars=args.print_generation_max_chars,
-            g4f_async=args.g4f_async,
-            max_response_chars=args.max_response_chars,
-            g4f_request_timeout=args.g4f_request_timeout,
-            g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
-        )
+    _run_agent_laboratory(
+        prompt_file=prompt_file,
+        out_path=out_path,
+        validator=spec.validator,
+        baseline=spec.baseline_solver,
+        custom_prompts=custom_prompts,
+        llm=args.models,
+        agent_models=args.agent_models,
+        planner_models=args.planner_models,
+        coder_models=args.coder_models,
+        fixer_models=args.fixer_models,
+        search_mode=args.search_mode,
+        plan_beam_width=args.plan_beam_width,
+        frontier_width=args.frontier_width,
+        archive_size=args.archive_size,
+        refine_rounds=args.refine_rounds,
+        max_iters=args.max_iters,
+        no_llm=False,
+        allow_baseline=args.allow_baseline,
+        g4f_recovery_rounds=args.g4f_recovery_rounds,
+        g4f_recovery_max_iters=args.g4f_recovery_max_iters,
+        g4f_recovery_sleep=args.g4f_recovery_sleep,
+        worker_no_kill_process_group=args.worker_no_kill_process_group,
+        print_generation=args.print_generation,
+        print_generation_max_chars=args.print_generation_max_chars,
+        g4f_async=args.g4f_async,
+        max_response_chars=args.max_response_chars,
+        g4f_request_timeout=args.g4f_request_timeout,
+        g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
+    )
 
     _validate_solver(out_path, spec.validator, _resolve_smoke_vectors(spec))
 
@@ -2500,37 +2300,36 @@ def cmd_run(args: argparse.Namespace) -> None:
         else:
             prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
 
-            with _materialize_prompt_with_competition_context(spec, prompt_file) as materialized_prompt_file:
-                _run_agent_laboratory(
-                    prompt_file=materialized_prompt_file,
-                    out_path=solver_path,
-                    validator=spec.validator,
-                    baseline=spec.baseline_solver,
-                    custom_prompts=custom_prompts,
-                    llm=args.models,
-                    agent_models=args.agent_models,
-                    planner_models=args.planner_models,
-                    coder_models=args.coder_models,
-                    fixer_models=args.fixer_models,
-                    search_mode=args.search_mode,
-                    plan_beam_width=args.plan_beam_width,
-                    frontier_width=args.frontier_width,
-                    archive_size=args.archive_size,
-                    refine_rounds=args.refine_rounds,
-                    max_iters=args.max_iters,
-                    no_llm=False,
-                    allow_baseline=args.allow_baseline,
-                    g4f_recovery_rounds=args.g4f_recovery_rounds,
-                    g4f_recovery_max_iters=args.g4f_recovery_max_iters,
-                    g4f_recovery_sleep=args.g4f_recovery_sleep,
-                    worker_no_kill_process_group=args.worker_no_kill_process_group,
-                    print_generation=args.print_generation,
-                    print_generation_max_chars=args.print_generation_max_chars,
-                    g4f_async=args.g4f_async,
-                    max_response_chars=args.max_response_chars,
-                    g4f_request_timeout=args.g4f_request_timeout,
-                    g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
-                )
+            _run_agent_laboratory(
+                prompt_file=prompt_file,
+                out_path=solver_path,
+                validator=spec.validator,
+                baseline=spec.baseline_solver,
+                custom_prompts=custom_prompts,
+                llm=args.models,
+                agent_models=args.agent_models,
+                planner_models=args.planner_models,
+                coder_models=args.coder_models,
+                fixer_models=args.fixer_models,
+                search_mode=args.search_mode,
+                plan_beam_width=args.plan_beam_width,
+                frontier_width=args.frontier_width,
+                archive_size=args.archive_size,
+                refine_rounds=args.refine_rounds,
+                max_iters=args.max_iters,
+                no_llm=False,
+                allow_baseline=args.allow_baseline,
+                g4f_recovery_rounds=args.g4f_recovery_rounds,
+                g4f_recovery_max_iters=args.g4f_recovery_max_iters,
+                g4f_recovery_sleep=args.g4f_recovery_sleep,
+                worker_no_kill_process_group=args.worker_no_kill_process_group,
+                print_generation=args.print_generation,
+                print_generation_max_chars=args.print_generation_max_chars,
+                g4f_async=args.g4f_async,
+                max_response_chars=args.max_response_chars,
+                g4f_request_timeout=args.g4f_request_timeout,
+                g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
+            )
 
         report["stages"]["generate_solver"]["end"] = time.time()
         report["stages"]["generate_solver"]["seconds"] = report["stages"]["generate_solver"]["end"] - report["stages"]["generate_solver"]["start"]
@@ -2741,7 +2540,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--competition", required=True, help="Competition slug / pipeline key")
     sp.add_argument("--out", required=True, help="Output path for generated solver")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
-    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved"], help="Select a competition prompt bundle variant when available")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override AgentLaboratory custom prompts JSON")
     sp.add_argument(
         "--models",
@@ -2819,7 +2618,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--puzzles", required=False, default=None, help="Input puzzles/test CSV (optional; uses bundled competitions/<slug>/data/test.csv if omitted)")
     sp.add_argument("--output", required=True, help="Submission CSV output")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
-    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved"], help="Select a competition prompt bundle variant when available")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override custom prompts JSON")
     sp.add_argument(
         "--models",

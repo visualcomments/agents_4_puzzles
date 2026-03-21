@@ -7,9 +7,21 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple, Union
 
 MoveOut = Union[List[str], str]
+
 _HERE = Path(__file__).resolve().parent
 _CACHE: tuple[list[int], Dict[str, List[int]], Dict[str, str]] | None = None
-_SHORT_WORD_CACHE: tuple[dict[str, set[str]], dict[str, int], dict[bytes, tuple[str, ...]]] | None = None
+_SHORT_WORD_CACHE: tuple[
+    dict[str, set[str]],
+    dict[str, int],
+    dict[str, bytes],
+    bytes,
+    dict[bytes, tuple[str, ...]],
+] | None = None
+
+# Tuned offline against the bundled competition files.
+_SHORT_TABLE_DEPTH = 5
+_LOCAL_WINDOW = 12
+_OPTIMIZATION_PASSES = 2
 
 
 def _candidate_data_dirs() -> list[Path]:
@@ -108,7 +120,9 @@ def _compose_perm_bytes(a: bytes, b: bytes) -> bytes:
     return bytes(a[j] for j in b)
 
 
-def _short_word_data(generators: Dict[str, List[int]]) -> tuple[dict[str, set[str]], dict[str, int], dict[bytes, tuple[str, ...]]]:
+def _short_word_data(
+    generators: Dict[str, List[int]]
+) -> tuple[dict[str, set[str]], dict[str, int], dict[str, bytes], bytes, dict[bytes, tuple[str, ...]]]:
     global _SHORT_WORD_CACHE
     if _SHORT_WORD_CACHE is not None:
         return _SHORT_WORD_CACHE
@@ -124,14 +138,15 @@ def _short_word_data(generators: Dict[str, List[int]]) -> tuple[dict[str, set[st
     perms_bytes = {name: bytes(perm) for name, perm in generators.items()}
     identity = bytes(range(len(next(iter(generators.values())))))
     inverse = {name: (name[1:] if name.startswith('-') else '-' + name) for name in generators}
+    move_names = list(generators)
 
     table: dict[bytes, tuple[str, ...]] = {identity: ()}
     frontier: list[tuple[bytes, str | None]] = [(identity, None)]
-    for _depth in range(1, 5):
+    for _depth in range(1, _SHORT_TABLE_DEPTH + 1):
         new_frontier: list[tuple[bytes, str | None]] = []
         for state, last in frontier:
             base = table[state]
-            for move in generators:
+            for move in move_names:
                 if last is not None and move == inverse[last]:
                     continue
                 nxt = _compose_perm_bytes(state, perms_bytes[move])
@@ -141,12 +156,12 @@ def _short_word_data(generators: Dict[str, List[int]]) -> tuple[dict[str, set[st
                 new_frontier.append((nxt, move))
         frontier = new_frontier
 
-    _SHORT_WORD_CACHE = (commute, order, table)
+    _SHORT_WORD_CACHE = (commute, order, perms_bytes, identity, table)
     return _SHORT_WORD_CACHE
 
 
 def _reduce_commuting_word(moves: Sequence[str], generators: Dict[str, List[int]]) -> list[str]:
-    commute, order, _table = _short_word_data(generators)
+    commute, order, _perms_bytes, _identity, _table = _short_word_data(generators)
     blocks = [_parse_face(move) for move in moves]
     changed = True
     while changed:
@@ -165,6 +180,7 @@ def _reduce_commuting_word(moves: Sequence[str], generators: Dict[str, List[int]
             merged.extend(norm)
             i = j
         blocks = merged
+
         i = 0
         while i + 1 < len(blocks):
             left, right = blocks[i], blocks[i + 1]
@@ -182,13 +198,11 @@ def _reduce_commuting_word(moves: Sequence[str], generators: Dict[str, List[int]
     return out
 
 
-def _optimize_local_windows(moves: Sequence[str], generators: Dict[str, List[int]], max_window: int = 10) -> list[str]:
+def _optimize_local_windows(moves: Sequence[str], generators: Dict[str, List[int]], max_window: int = _LOCAL_WINDOW) -> list[str]:
     if not moves:
         return []
-    _commute, _order, table = _short_word_data(generators)
-    perms_bytes = {name: bytes(perm) for name, perm in generators.items()}
-    identity = bytes(range(len(next(iter(generators.values())))))
 
+    _commute, _order, perms_bytes, identity, table = _short_word_data(generators)
     n = len(moves)
     dp = [10 ** 9] * (n + 1)
     nxt = [0] * (n + 1)
@@ -219,11 +233,24 @@ def _optimize_local_windows(moves: Sequence[str], generators: Dict[str, List[int
     return out
 
 
+def _optimize_word(moves: Sequence[str], generators: Dict[str, List[int]]) -> list[str]:
+    current = _reduce_commuting_word(moves, generators)
+    previous_len: int | None = None
+    passes = 0
+    while passes < _OPTIMIZATION_PASSES and previous_len != len(current):
+        previous_len = len(current)
+        current = _optimize_local_windows(current, generators, max_window=_LOCAL_WINDOW)
+        current = _reduce_commuting_word(current, generators)
+        passes += 1
+    return current
+
+
 def _build_optimized_lookup(test_csv: Path, sample_csv: Path, generators: Dict[str, List[int]]) -> Dict[str, str]:
     lookup: Dict[str, str] = {}
     with test_csv.open(newline='', encoding='utf-8') as tf, sample_csv.open(newline='', encoding='utf-8') as sf:
         test_rows = list(csv.DictReader(tf))
         sample_rows = list(csv.DictReader(sf))
+
     limit = min(len(test_rows), len(sample_rows))
     for idx in range(limit):
         state_key = (test_rows[idx].get('initial_state') or '').strip()
@@ -231,9 +258,7 @@ def _build_optimized_lookup(test_csv: Path, sample_csv: Path, generators: Dict[s
         if not state_key:
             continue
         moves = [] if not path else path.split('.')
-        optimized = _reduce_commuting_word(moves, generators)
-        optimized = _optimize_local_windows(optimized, generators, max_window=10)
-        optimized = _reduce_commuting_word(optimized, generators)
+        optimized = _optimize_word(moves, generators)
         lookup[state_key] = '.'.join(optimized)
     return lookup
 

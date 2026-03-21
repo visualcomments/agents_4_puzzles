@@ -1,0 +1,59 @@
+Megaminx dataset-adapted validation
+Date: 2026-03-21
+
+Updated files:
+- competitions/cayley-py-megaminx/solve_module.py
+- competitions/cayley-py-megaminx/build_optimized_assets.py
+- competitions/cayley-py-megaminx/data/optimized_lookup.json
+- competitions/cayley-py-megaminx/data/optimized_stats.json
+- competitions/cayley-py-megaminx/submissions/optimized_submission.csv
+- competitions/cayley-py-megaminx/OPTIMIZATION_NOTES.md
+- competitions/cayley-py-megaminx/DATASET_ADAPTATION_NOTES.md
+- competitions/cayley-py-megaminx/PROMPT_VARIANTS.md
+- competitions/cayley-py-megaminx/prompts/README.md
+- competitions/cayley-py-megaminx/prompts/user_prompt_dataset_adapted.txt
+- competitions/cayley-py-megaminx/prompts/custom_prompts_dataset_adapted.json
+- competitions/cayley-py-megaminx/submissions/README.md
+- pipeline_cli.py
+
+Observed score:
+- original bundled sample_submission.csv: 500572
+- previous repo optimized bundle: 416067
+- refreshed optimized bundle: 415075
+- delta vs previous optimized bundle: 992 fewer moves
+
+Checks:
+1. py_compile
+   - competitions/cayley-py-megaminx/solve_module.py
+   - competitions/cayley-py-megaminx/build_optimized_assets.py
+   - competitions/cayley-py-megaminx/validate_solve_output.py
+   - pipeline_cli.py
+   Result: OK
+
+2. Direct solver checks
+   - rows checked: 0, 1, 100, 500, 1000
+   Result: all solve to central_state with expected bundled lengths
+
+3. Validator checks
+   - validate_solve_output.py on row 0 -> OK moves=72
+   - validate_solve_output.py on row 100 -> OK moves=86
+
+4. Pipeline smoke / submission build
+   Command:
+     python pipeline_cli.py run --competition cayley-py-megaminx --output /mnt/data/pywork/megaminx_submission_from_pipeline.csv --no-llm --no-progress --no-run-log
+   Result:
+     returncode = 0
+     output hash matches competitions/cayley-py-megaminx/submissions/optimized_submission.csv
+     submission score = 415075
+
+5. Prompt-variant smoke
+   Command:
+     python pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_dataset_adapted_smoke.py --no-llm --prompt-variant dataset_adapted
+   Result:
+     returncode = 0
+
+6. Repo tests
+   Command:
+     python -m pytest -q tests_test_submission_pipeline.py tests_test_cli_syntax.py
+   Result:
+     11 passed in 2.09s

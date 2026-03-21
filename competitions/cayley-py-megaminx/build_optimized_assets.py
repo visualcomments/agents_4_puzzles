@@ -4,7 +4,14 @@ import csv
 import json
 from pathlib import Path
 
-from solve_module import _build_optimized_lookup, _find_comp_dir, _find_data_dir  # type: ignore
+from solve_module import (  # type: ignore
+    _LOCAL_WINDOW,
+    _OPTIMIZATION_PASSES,
+    _SHORT_TABLE_DEPTH,
+    _build_optimized_lookup,
+    _find_comp_dir,
+    _find_data_dir,
+)
 
 
 def main() -> None:
@@ -29,6 +36,7 @@ def main() -> None:
     score_original = sum(0 if not row.get('path') else len(str(row['path']).split('.')) for row in sample_rows)
 
     optimized_submission = comp_dir / 'submissions' / 'optimized_submission.csv'
+    optimized_submission.parent.mkdir(parents=True, exist_ok=True)
     with optimized_submission.open('w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['initial_state_id', 'path'])
@@ -41,6 +49,12 @@ def main() -> None:
                 'score_optimized': score_optimized,
                 'score_delta': score_original - score_optimized,
                 'num_states': len(lookup),
+                'optimizer': {
+                    'kind': 'fixed-depth-word-dp',
+                    'short_table_depth': _SHORT_TABLE_DEPTH,
+                    'local_window': _LOCAL_WINDOW,
+                    'passes': _OPTIMIZATION_PASSES,
+                },
                 'lookup': lookup,
             },
             ensure_ascii=False,
@@ -56,8 +70,9 @@ def main() -> None:
                 'score_optimized': score_optimized,
                 'score_delta': score_original - score_optimized,
                 'num_states': len(lookup),
-                'radius_exact_table': 4,
-                'local_window': 10,
+                'short_table_depth': _SHORT_TABLE_DEPTH,
+                'local_window': _LOCAL_WINDOW,
+                'passes': _OPTIMIZATION_PASSES,
                 'generated_submission': str(optimized_submission.relative_to(comp_dir)),
             },
             ensure_ascii=False,

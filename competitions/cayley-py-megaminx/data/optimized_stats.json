@@ -1,9 +1,10 @@
 {
   "score_original": 500572,
-  "score_optimized": 416067,
-  "score_delta": 84505,
+  "score_optimized": 415075,
+  "score_delta": 85497,
   "num_states": 1001,
-  "radius_exact_table": 4,
-  "local_window": 10,
+  "short_table_depth": 5,
+  "local_window": 12,
+  "passes": 2,
   "generated_submission": "submissions/optimized_submission.csv"
 }
