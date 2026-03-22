@@ -28,3 +28,4 @@ Generate solver with prompt variants:
     python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_regular.py --prompt-variant regular
     python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_improved.py --prompt-variant improved
     python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_dataset_adapted.py --prompt-variant dataset_adapted
+    python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_heuristic_boosted.py --prompt-variant heuristic_boosted
