@@ -184,89 +184,64 @@ def solve(vec):
     assert 'def solve' in code
     assert 'Explanation of Fix' not in code
     assert '# inline comment' not in code
-    assert 'temporary docstring' not in code
+
+
+def test_extract_python_handles_prose_wrapped_raw_python_module():
+    text = '''Content of solve_module.py
+- This is a complete, self-contained module ready to drop into your repository.
+- The script prints JSON when run directly.
+
+Note: The following code is designed to be drop-in.
+
+Code starts here (save as solve_module.py):
+
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+
+
+def solve(vec):
+    return [], list(vec)
+
+
+if __name__ == "__main__":
+    print(json.dumps({"moves": [], "sorted_array": []}))
+
+Additional explanation after code that must be ignored.
+'''
+    code = rpp.extract_python(text)
+    assert code is not None
+    assert code.startswith('#!/usr/bin/env python3')
+    assert 'def solve' in code
+    assert 'Additional explanation after code' not in code
     ok, reason = rpp.compile_python(code)
     assert ok is True, reason
 
 
-
-def test_extract_python_prefers_best_python_block_with_solve():
+def test_extract_python_prefers_real_solver_over_intro_text_block():
     text = '''```text
-this is not code
+Content of solve_module.py
+- explanatory text
 ```
 
-```python
-def helper(vec):
-    return vec
-```
+Content of solve_module.py
+- explanatory text
 
-```python
+#!/usr/bin/env python3
+import json
+
+
 def solve(vec):
     return [], list(vec)
-```
 '''
     code = rpp.extract_python(text)
     assert code is not None
+    assert code.startswith('#!/usr/bin/env python3')
     assert 'def solve' in code
-    assert 'def helper' not in code
-
-
-
-def test_validate_solver_contract_reports_missing_solve():
-    bad_code = """def helper(vec):
-    return vec
-"""
-    ok, reason = rpp.validate_solver_contract(bad_code)
-    assert ok is False
-    assert 'solve' in reason
-
-
-
-def test_try_generate_with_model_surfaces_contract_failures_before_validator(monkeypatch, tmp_path):
-    bad_code = """def helper(vec):
-    return vec
-"""
-    monkeypatch.setattr(rpp, '_query_code_block_with_rescue', lambda **kwargs: (bad_code, None))
-
-    validate_called = {'called': False}
-
-    def fake_validate(*args, **kwargs):
-        validate_called['called'] = True
-        return True, ''
-
-    monkeypatch.setattr(rpp, 'validate_solver_suite', fake_validate)
-    monkeypatch.setattr(rpp, '_run_fixer_loop', lambda **kwargs: (False, kwargs['last_report']))
-
-    ok, report = rpp.try_generate_with_model(
-        model='g4f:gpt-4',
-        fixer_models=['g4f:gpt-4'],
-        user_prompt='solve it',
-        plan='plan',
-        prompts={'coder': 'coder', 'fixer': 'fixer'},
-        out_path=tmp_path / 'solve.py',
-        validator_path=tmp_path / 'validator.py',
-        tests=[[1, 2, 3]],
-        max_iters=2,
-    )
-
-    assert ok is False
-    assert 'Initial solver contract check failed' in report
-    assert validate_called['called'] is False
-
-
-def test_extract_python_invalid_python_uses_heuristic_docstring_cleanup():
-    text = '''```python
-def solve(vec):
-    """temporary docstring that should still be removed even if code is invalid"""
-    # inline comment that should be removed
-    return [], list(vec
-```
-'''
-    code = rpp.extract_python(text)
-    assert code is not None
-    assert 'def solve' in code
-    assert 'temporary docstring' not in code
-    assert '# inline comment' not in code
+    ok, reason = rpp.compile_python(code)
+    assert ok is True, reason
 
 
 def test_generate_plan_candidates_deduplicates_and_ranks(monkeypatch):

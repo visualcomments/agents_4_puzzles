@@ -4,6 +4,7 @@ import io
 import json
 import os
 import queue
+import re
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -137,21 +138,182 @@ def _iter_to_text(resp, *, max_chars: int | None = None) -> str:
         return buf.getvalue()
 
 
+
+RE_FENCED_BLOCK = re.compile(r"```(?P<lang>[a-zA-Z0-9_+-]*)\s*(?P<code>.*?)```", re.DOTALL)
+RE_RAW_CODE_START = re.compile(
+    r"^(?:#!\s*/|from\s+\S+\s+import|import\s+\S+|async\s+def\s+\w+\s*\(|def\s+\w+\s*\(|class\s+\w+\s*(?:\(|:)|if __name__ == [\"']__main__[\"']\s*:|@[A-Za-z_][A-Za-z0-9_\.\(\), ]*)",
+    re.IGNORECASE,
+)
+RE_CODE_LIKE_LINE = re.compile(
+    r"^(?:@|async\s+def\s+\w+\s*\(|def\s+\w+\s*\(|class\s+\w+\s*(?:\(|:)|from\s+\S+\s+import|import\s+\S+|if\b|elif\b|else:|for\b|while\b|try:|except\b|finally:|with\b|return\b|raise\b|assert\b|pass\b|break\b|continue\b|[A-Za-z_][A-Za-z0-9_\[\], ]*\s*=)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_python(code: str) -> bool:
+    low = (code or "").lower()
+    indicators = (
+        "def ",
+        "async def ",
+        "class ",
+        "import ",
+        "from ",
+        "__main__",
+        "return ",
+        "for ",
+        "while ",
+        "if ",
+        "try:",
+        "with ",
+    )
+    return any(token in low for token in indicators)
+
+
+def _looks_like_python_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("#!", "#", '"""', "'''")):
+        return True
+    if RE_CODE_LIKE_LINE.match(stripped):
+        return True
+    if line.startswith((" ", "\t")):
+        return True
+    if re.match(r"^[\]\)\}\],.:]+$", stripped):
+        return True
+    if stripped.endswith((":", "(", "[", "{", "\\")):
+        return True
+    return False
+
+
+def _looks_like_narrative_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    low = stripped.lower()
+    if stripped.startswith("```"):
+        return True
+    if low.startswith((
+        "content of ",
+        "code starts here",
+        "save as ",
+        "note:",
+        "explanation",
+        "here is",
+        "here's",
+        "the following code",
+        "this is ",
+    )):
+        return True
+    if stripped.startswith(("- ", "* ", "> ", "### ")):
+        return True
+    if re.match(r"^\d+[.)]\s", stripped):
+        return True
+    return False
+
+
+def _trim_candidate_edges(code: str) -> str:
+    lines = (code or "").splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and _looks_like_narrative_line(lines[-1]) and not _looks_like_python_line(lines[-1]):
+        lines.pop()
+    while lines and _looks_like_narrative_line(lines[0]) and not RE_RAW_CODE_START.match(lines[0].strip()):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def _extract_raw_python_candidates(text: str) -> List[str]:
+    source = (text or "").strip()
+    if not source:
+        return []
+    if not any(token in source for token in ("def solve", "def add", "import ", "from __future__", "if __name__", "class ")):
+        return []
+
+    lines = source.splitlines()
+    start_indexes: List[int] = []
+    for idx, line in enumerate(lines):
+        if RE_RAW_CODE_START.match(line.strip()):
+            start_indexes.append(idx)
+    if not start_indexes:
+        return []
+
+    candidates: List[str] = []
+    seen = set()
+    for start_idx in start_indexes:
+        kept: List[str] = []
+        for line in lines[start_idx:]:
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                break
+            if not stripped:
+                kept.append(line)
+                continue
+            if _looks_like_python_line(line):
+                kept.append(line.rstrip())
+                continue
+            if kept and _looks_like_narrative_line(line):
+                break
+            if kept:
+                break
+        candidate = _trim_candidate_edges("\n".join(kept))
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
+def _python_candidate_score(code: str, *, lang: str = "", fenced: bool = False) -> int:
+    score = 0
+    low = (code or "").lower()
+    norm_lang = (lang or "").strip().lower()
+    if norm_lang in {"python", "py", "python3"}:
+        score += 120
+    elif norm_lang:
+        score -= 20
+    if fenced:
+        score += 5
+    if "def solve" in low:
+        score += 140
+    if "def add" in low:
+        score += 80
+    if _looks_like_python(code):
+        score += 20
+    try:
+        ast.parse(code)
+        score += 60
+    except Exception:
+        score -= 10
+    score += min(sum(1 for line in code.splitlines() if line.strip()), 80)
+    return score
+
+
 def _extract_python_candidate(text: str) -> str:
     s = (text or "").strip()
     if not s:
         return ""
-    if "```python" in s:
-        try:
-            return s.split("```python", 1)[1].split("```", 1)[0].strip()
-        except Exception:
-            return ""
-    if "```" in s:
-        try:
-            return s.split("```", 1)[1].split("```", 1)[0].strip()
-        except Exception:
-            return ""
-    return s if "def solve" in s or "def add" in s else ""
+
+    candidates: List[tuple[int, int, str]] = []
+    for idx, match in enumerate(RE_FENCED_BLOCK.finditer(s)):
+        lang = (match.group("lang") or "").strip()
+        code = _trim_candidate_edges((match.group("code") or "").strip())
+        if not code:
+            continue
+        score = _python_candidate_score(code, lang=lang, fenced=True)
+        if lang and lang.lower() not in {"python", "py", "python3"} and not _looks_like_python(code):
+            score -= 50
+        candidates.append((score, -idx, code))
+
+    for idx, code in enumerate(_extract_raw_python_candidates(s), start=1):
+        score = _python_candidate_score(code, fenced=False)
+        candidates.append((score, -10_000 - idx, code))
+
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2].strip()
 
 
 def _python_compiles(code: str) -> bool:

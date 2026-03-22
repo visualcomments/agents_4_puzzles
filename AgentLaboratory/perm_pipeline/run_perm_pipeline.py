@@ -53,11 +53,11 @@ RE_PY_BLOCK = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 RE_ANY_BLOCK = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\s*(.*?)```", re.DOTALL)
 RE_FENCED_BLOCK = re.compile(r"```(?P<lang>[a-zA-Z0-9_+-]*)\s*(?P<code>.*?)```", re.DOTALL)
 RE_RAW_CODE_START = re.compile(
-    r"^(?:from\s+\S+\s+import|import\s+\S+|def\s+\w+\s*\(|class\s+\w+\s*(?:\(|:)|if __name__ == [\"']__main__[\"']\s*:)",
+    r"^(?:#!\s*/|from\s+\S+\s+import|import\s+\S+|async\s+def\s+\w+\s*\(|def\s+\w+\s*\(|class\s+\w+\s*(?:\(|:)|if __name__ == [\"']__main__[\"']\s*:|@[A-Za-z_][A-Za-z0-9_\.\(\), ]*)",
     re.IGNORECASE,
 )
 RE_CODE_LIKE_LINE = re.compile(
-    r"^(?:@|def\s+\w+\s*\(|class\s+\w+\s*(?:\(|:)|from\s+\S+\s+import|import\s+\S+|if\b|elif\b|else:|for\b|while\b|try:|except\b|finally:|with\b|return\b|raise\b|assert\b|pass\b|break\b|continue\b|[A-Za-z_][A-Za-z0-9_\[\], ]*\s*=)",
+    r"^(?:@|async\s+def\s+\w+\s*\(|def\s+\w+\s*\(|class\s+\w+\s*(?:\(|:)|from\s+\S+\s+import|import\s+\S+|if\b|elif\b|else:|for\b|while\b|try:|except\b|finally:|with\b|return\b|raise\b|assert\b|pass\b|break\b|continue\b|[A-Za-z_][A-Za-z0-9_\[\], ]*\s*=)",
     re.IGNORECASE,
 )
 
@@ -1108,6 +1108,13 @@ def _strip_python_comments_and_docstrings(code: str) -> str:
     if not source:
         return ''
 
+    original_lines = source.splitlines()
+    preserved_prefix: List[str] = []
+    if original_lines and original_lines[0].startswith('#!'):
+        preserved_prefix.append(original_lines[0].rstrip())
+    if len(original_lines) > 1 and re.match(r'^#.*coding[:=]', original_lines[1]):
+        preserved_prefix.append(original_lines[1].rstrip())
+
     try:
         ast.parse(source)
         parsed_ok = True
@@ -1118,11 +1125,22 @@ def _strip_python_comments_and_docstrings(code: str) -> str:
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
     except Exception:
-        return _heuristic_strip_comments_and_docstrings(source) or source
+        cleaned = _heuristic_strip_comments_and_docstrings(source) or source
+        if preserved_prefix:
+            body_lines = cleaned.splitlines()
+            while body_lines and body_lines[0].rstrip() in preserved_prefix:
+                body_lines.pop(0)
+            cleaned = '\n'.join(preserved_prefix + body_lines)
+        return cleaned.strip()
 
     kept = []
     for tok in tokens:
         if tok.type == tokenize.COMMENT:
+            token_text = tok.string or ''
+            if tok.start == (1, 0) and token_text.startswith('#!'):
+                kept.append(tok)
+            elif tok.start[0] == 2 and preserved_prefix and len(preserved_prefix) > 1 and re.match(r'^#.*coding[:=]', token_text):
+                kept.append(tok)
             continue
         if tok.type == tokenize.STRING and any(_span_contains(span, tok.start, tok.end) for span in spans):
             continue
@@ -1131,14 +1149,24 @@ def _strip_python_comments_and_docstrings(code: str) -> str:
     try:
         cleaned = tokenize.untokenize(kept)
     except Exception:
-        return _heuristic_strip_comments_and_docstrings(source) or source
+        cleaned = _heuristic_strip_comments_and_docstrings(source) or source
+        if preserved_prefix:
+            body_lines = cleaned.splitlines()
+            while body_lines and body_lines[0].rstrip() in preserved_prefix:
+                body_lines.pop(0)
+            cleaned = '\n'.join(preserved_prefix + body_lines)
+        return cleaned.strip()
 
     cleaned = '\n'.join(line.rstrip() for line in cleaned.splitlines())
     if not parsed_ok and ('\"\"\"' in cleaned or "'''" in cleaned):
         cleaned = _heuristic_strip_comments_and_docstrings(cleaned) or cleaned
+    if preserved_prefix:
+        body_lines = cleaned.splitlines()
+        while body_lines and body_lines[0].rstrip() in preserved_prefix:
+            body_lines.pop(0)
+        cleaned = '\n'.join(preserved_prefix + body_lines)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
-
 def _looks_like_python(code: str) -> bool:
     low = (code or '').lower()
     indicators = (
@@ -1157,39 +1185,102 @@ def _looks_like_python(code: str) -> bool:
     return any(token in low for token in indicators)
 
 
-def _extract_raw_python_candidate(text: str) -> Optional[str]:
+def _looks_like_python_line(line: str) -> bool:
+    stripped = (line or '').strip()
+    if not stripped:
+        return True
+    if stripped.startswith(('#!', '#', '"""', "'''")):
+        return True
+    if RE_CODE_LIKE_LINE.match(stripped):
+        return True
+    if line.startswith((' ', '	')):
+        return True
+    if re.match(r"^[\]\)\}\],.:]+$", stripped):
+        return True
+    if stripped.endswith((':', '(', '[', '{', '\\')):
+        return True
+    return False
+
+
+def _looks_like_narrative_line(line: str) -> bool:
+    stripped = (line or '').strip()
+    if not stripped:
+        return False
+    low = stripped.lower()
+    if stripped.startswith('```'):
+        return True
+    if low.startswith((
+        'content of ',
+        'code starts here',
+        'save as ',
+        'note:',
+        'explanation',
+        'here is',
+        "here's",
+        'the following code',
+        'this is ',
+    )):
+        return True
+    if stripped.startswith(('- ', '* ', '> ', '### ')):
+        return True
+    if re.match(r"^\d+[.)]\s", stripped):
+        return True
+    return False
+
+
+def _trim_candidate_edges(code: str) -> str:
+    lines = (code or '').splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and _looks_like_narrative_line(lines[-1]) and not _looks_like_python_line(lines[-1]):
+        lines.pop()
+    while lines and _looks_like_narrative_line(lines[0]) and not RE_RAW_CODE_START.match(lines[0].strip()):
+        lines.pop(0)
+    return '\n'.join(lines).strip()
+
+
+def _extract_raw_python_candidates(text: str) -> List[str]:
     source = (text or '').strip()
     if not source:
-        return None
+        return []
     if not any(token in source for token in ('def solve', 'import ', 'from __future__', 'if __name__', 'class ')):
-        return None
+        return []
 
     lines = source.splitlines()
-    start_idx: Optional[int] = None
+    start_indexes: List[int] = []
     for idx, line in enumerate(lines):
         if RE_RAW_CODE_START.match(line.strip()):
-            start_idx = idx
-            break
+            start_indexes.append(idx)
 
-    if start_idx is None:
-        return source
+    if not start_indexes:
+        return []
 
-    kept: List[str] = []
-    for line in lines[start_idx:]:
-        stripped = line.strip()
-        if stripped.startswith('```'):
-            break
-        if not stripped:
-            kept.append(line)
-            continue
-        if RE_CODE_LIKE_LINE.match(stripped) or line.startswith((' ', '\t')) or stripped.startswith('#'):
-            kept.append(line)
-            continue
-        if kept:
-            break
+    candidates: List[str] = []
+    seen = set()
+    for start_idx in start_indexes:
+        kept: List[str] = []
+        for line in lines[start_idx:]:
+            stripped = line.strip()
+            if stripped.startswith('```'):
+                break
+            if not stripped:
+                kept.append(line)
+                continue
+            if _looks_like_python_line(line):
+                kept.append(line.rstrip())
+                continue
+            if kept and _looks_like_narrative_line(line):
+                break
+            if kept:
+                break
 
-    candidate = '\n'.join(kept).strip()
-    return candidate or None
+        candidate = _trim_candidate_edges('\n'.join(kept))
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
 
 
 def _python_candidate_score(code: str, *, lang: str = '', fenced: bool = False) -> int:
@@ -1236,16 +1327,16 @@ def extract_python(resp: str) -> Optional[str]:
         code = (match.group('code') or '').strip()
         if not code:
             continue
-        cleaned = _strip_python_comments_and_docstrings(code) or code
+        cleaned = _trim_candidate_edges(_strip_python_comments_and_docstrings(code) or code)
         score = _python_candidate_score(cleaned, lang=lang, fenced=True)
         if lang and lang.lower() not in {'python', 'py', 'python3'} and not _looks_like_python(code):
             score -= 50
         candidates.append((score, -idx, cleaned))
 
-    raw_candidate = _extract_raw_python_candidate(text)
-    if raw_candidate:
-        cleaned = _strip_python_comments_and_docstrings(raw_candidate) or raw_candidate
-        candidates.append((_python_candidate_score(cleaned, fenced=False), -10_000, cleaned))
+    for raw_idx, raw_candidate in enumerate(_extract_raw_python_candidates(text), start=1):
+        cleaned = _trim_candidate_edges(_strip_python_comments_and_docstrings(raw_candidate) or raw_candidate)
+        if cleaned:
+            candidates.append((_python_candidate_score(cleaned, fenced=False), -10_000 - raw_idx, cleaned))
 
     if not candidates:
         return None

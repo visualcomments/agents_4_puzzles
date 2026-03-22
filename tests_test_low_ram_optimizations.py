@@ -41,6 +41,27 @@ def test_g4f_to_text_stops_after_python_fence():
     assert out.rstrip().endswith("```")
 
 
+def test_callllm_extract_python_candidate_from_prose_plus_code():
+    text = '''Content of solve_module.py
+- This is a complete, self-contained module ready to drop into your repository.
+
+Code starts here (save as solve_module.py):
+
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+
+
+def solve(vec):
+    return [], list(vec)
+'''
+    code = CallLLM._extract_python_candidate(text)
+    assert code.startswith('#!/usr/bin/env python3')
+    assert 'def solve' in code
+    assert CallLLM._python_compiles(code) is True
+
+
 def test_base_agent_spills_large_artifacts(tmp_path, monkeypatch):
     import types
     import sys as _sys
