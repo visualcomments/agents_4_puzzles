@@ -363,3 +363,76 @@ def test_validate_solver_suite_reports_timeout(monkeypatch, tmp_path):
     assert ok is False
     assert 'TEST 0 FAILED' in report
     assert 'validator timed out' in report
+
+def test_lenient_load_json_object_extracts_fenced_json():
+    text = 'before\n```json\n{"strategy_family":"bounded_window_dp","goal":"x"}\n```\nafter'
+    payload = rpp._lenient_load_json_object(text)
+    assert isinstance(payload, dict)
+    assert payload['strategy_family'] == 'bounded_window_dp'
+
+
+def test_ask_first_structured_plan_returns_payload_and_package(monkeypatch):
+    monkeypatch.setattr(
+        rpp,
+        '_query_model_stable',
+        lambda *args, **kwargs: '{"strategy_family":"stronger_exact_table","goal":"keep exact lookup first","edit_targets":["_short_word_data"],"must_preserve":["exact_lookup_first","solve_signature","script_json_output"],"complexity_claim":{"precompute":"constant","per_row":"O(L)","why_polynomial":"fixed constants only"},"proposed_changes":["tighten table","reuse cached effects"],"validation_plan":["compile","validator"],"forbidden":["BFS","DFS","beam search"]}'
+    )
+
+    plan_text, planner_model, plan_payload, strategy_package = rpp.ask_first_structured_plan(
+        ['g4f:planner-a'],
+        'solve it',
+        'planner system',
+        baseline_code='def solve(vec):\n    return [], list(vec)\n',
+    )
+
+    assert planner_model == 'g4f:planner-a'
+    assert plan_payload is not None
+    assert strategy_package is not None
+    assert plan_payload['strategy_family'] == 'stronger_exact_table'
+    assert 'Algorithm family' in plan_text
+
+
+def test_build_initial_codegen_prompt_embeds_structured_plan_and_baseline():
+    prompt = rpp.build_initial_codegen_prompt(
+        'task',
+        'Algorithm family: stronger_exact_table',
+        baseline_code='def solve(vec):\n    return [], list(vec)\n',
+        plan_payload={'strategy_family': 'stronger_exact_table', 'goal': 'goal', 'edit_targets': ['_short_word_data'], 'must_preserve': ['exact_lookup_first'], 'complexity_claim': {'precompute': 'constant', 'per_row': 'O(L)', 'why_polynomial': 'fixed constants'}, 'proposed_changes': ['a', 'b'], 'validation_plan': ['compile', 'validator'], 'forbidden': ['BFS']},
+        strategy_package={'strategy_family': 'stronger_exact_table', 'label': 'Variant A', 'goal': 'goal'},
+    )
+    assert '## STRATEGY PACKAGE' in prompt
+    assert '## PLANNER JSON' in prompt
+    assert 'KNOWN-GOOD BASELINE SOLVER' in prompt
+
+
+def test_try_generate_with_model_forwards_plan_payload_to_fixer(monkeypatch, tmp_path):
+    bad_code = 'def solve(:\n    pass\n'
+    monkeypatch.setattr(rpp, '_query_code_block_with_rescue', lambda **kwargs: (bad_code, None))
+    captured = {}
+
+    def fake_fixer(**kwargs):
+        captured.update(kwargs)
+        return False, kwargs['last_report']
+
+    monkeypatch.setattr(rpp, '_run_fixer_loop', fake_fixer)
+
+    ok, report = rpp.try_generate_with_model(
+        model='g4f:gpt-4',
+        fixer_models=['g4f:gpt-4'],
+        user_prompt='solve it',
+        plan='Algorithm family: stronger_exact_table',
+        prompts={'coder': 'coder', 'fixer': 'fixer'},
+        out_path=tmp_path / 'solve.py',
+        validator_path=tmp_path / 'validator.py',
+        tests=[[1, 2, 3]],
+        max_iters=2,
+        baseline_code='def solve(vec):\n    return [], list(vec)\n',
+        plan_payload={'strategy_family': 'stronger_exact_table', 'goal': 'goal', 'edit_targets': ['_short_word_data'], 'must_preserve': ['exact_lookup_first'], 'complexity_claim': {'precompute': 'constant', 'per_row': 'O(L)', 'why_polynomial': 'fixed constants'}, 'proposed_changes': ['a', 'b'], 'validation_plan': ['compile', 'validator'], 'forbidden': ['BFS']},
+        strategy_package={'strategy_family': 'stronger_exact_table', 'label': 'Variant A', 'goal': 'goal'},
+    )
+
+    assert ok is False
+    assert 'Initial compile check failed' in report
+    assert captured['plan_payload']['strategy_family'] == 'stronger_exact_table'
+    assert captured['strategy_package']['strategy_family'] == 'stronger_exact_table'
+    assert 'Algorithm family' in captured['plan']

@@ -1,0 +1,6 @@
+{
+  "strategy_family": "bidirectional_local_replacement",
+  "label": "Variant C / bidirectional local replacement",
+  "goal": "Improve local exact replacement strength with a constant-radius bidirectional table, never with full-state search.",
+  "edit_targets": ["_short_word_data", "_best_local_rewrite", "_optimize_word"]
+}

@@ -31,7 +31,7 @@ import time
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from tqdm.auto import tqdm
@@ -138,6 +138,8 @@ class PlanCandidate:
     variant_index: int
     depth: int = 0
     source: str = "planner"
+    planner_payload: Optional[Dict[str, Any]] = None
+    strategy_package: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -178,6 +180,334 @@ class CandidateArchive:
                 f"FAILURE:\n{_clip_middle(entry.report or '', 1600)}"
             )
         return "\n\n".join(blocks)
+
+
+COMMON_PLAN_MUST_PRESERVE: Tuple[str, ...] = (
+    "exact_lookup_first",
+    "solve_signature",
+    "script_json_output",
+    "dependency_free_python",
+    "deterministic_behavior",
+    "legal_move_names_only",
+)
+
+COMMON_PLAN_FORBIDDEN: Tuple[str, ...] = (
+    "instance-growing BFS",
+    "instance-growing DFS",
+    "IDA*",
+    "beam search over full puzzle state",
+    "brute force over bundled rows",
+    "UNSOLVED for bundled rows",
+    "changing public solve(vec) contract",
+)
+
+PLANNER_STRATEGY_PACKAGES: Tuple[Dict[str, Any], ...] = (
+    {
+        "strategy_family": "stronger_exact_table",
+        "label": "Variant A / stronger exact short-word table",
+        "goal": "Keep exact lookup first and improve constant-depth exact replacements for short move words.",
+        "edit_targets": ["_short_word_data", "_reduce_commuting_word", "_optimize_word"],
+        "proposed_changes": [
+            "Strengthen fixed-depth exact replacement table construction.",
+            "Canonicalize equivalent short effects before storing them.",
+            "Reuse cached packed effects instead of widening search depth.",
+        ],
+        "validation_plan": [
+            "Compile solver and preserve solve(vec) contract.",
+            "Replay bundled rows and compare final_state against baseline semantics.",
+            "Check score gain comes from shorter equivalent words rather than skipped moves.",
+        ],
+    },
+    {
+        "strategy_family": "bounded_window_dp",
+        "label": "Variant B / bounded-window DP rewrite",
+        "goal": "Keep per-row runtime polynomial by improving fixed-window local optimization passes only.",
+        "edit_targets": ["_optimize_local_windows", "_optimize_word", "_compose_words"],
+        "proposed_changes": [
+            "Use stronger bounded-window dynamic programming with fixed pass counts.",
+            "Memoize repeated local windows by packed effect.",
+            "Prefer deterministic left-to-right canonicalization before each pass.",
+        ],
+        "validation_plan": [
+            "Compile and run validator on bundled smoke vectors.",
+            "Ensure window size and pass count stay constant with input size.",
+            "Compare rewritten word length against baseline on sample rows.",
+        ],
+    },
+    {
+        "strategy_family": "bidirectional_local_replacement",
+        "label": "Variant C / bidirectional local replacement",
+        "goal": "Improve local exact replacement strength with a constant-radius bidirectional table, never with full-state search.",
+        "edit_targets": ["_short_word_data", "_best_local_rewrite", "_optimize_word"],
+        "proposed_changes": [
+            "Precompute constant-radius forward and reverse local effects.",
+            "Match windows by effect and replace them with the shortest equivalent word.",
+            "Keep all tables bounded by fixed radii independent of bundled row difficulty.",
+        ],
+        "validation_plan": [
+            "Compile solver and replay exact lookup outputs after replacement.",
+            "Verify no generic frontier or queue over puzzle states appears.",
+            "Benchmark per-row runtime on short and long bundled paths.",
+        ],
+    },
+    {
+        "strategy_family": "offline_parameter_sweep",
+        "label": "Variant D / offline parameter sweep",
+        "goal": "Add safe parameterization and deterministic auto-selection without changing the high-level exact-lookup-plus-rewrite architecture.",
+        "edit_targets": ["_short_word_data", "_optimize_local_windows", "solve"],
+        "proposed_changes": [
+            "Expose a tiny fixed grid of rewrite parameters.",
+            "Evaluate candidates with deterministic local score estimates only.",
+            "Choose the best bounded candidate without instance-growing search.",
+        ],
+        "validation_plan": [
+            "Compile solver and keep bundled output deterministic across runs.",
+            "Confirm the sweep grid is fixed and small.",
+            "Validate that the selected candidate still replays to the correct central state.",
+        ],
+    },
+)
+
+
+def _strategy_package_for_variant(variant_index: int) -> Dict[str, Any]:
+    if not PLANNER_STRATEGY_PACKAGES:
+        raise RuntimeError('planner strategy packages are not configured')
+    zero_based = max(0, int(variant_index) - 1)
+    template = PLANNER_STRATEGY_PACKAGES[zero_based % len(PLANNER_STRATEGY_PACKAGES)]
+    package = dict(template)
+    package.setdefault('must_preserve', list(COMMON_PLAN_MUST_PRESERVE))
+    package.setdefault('forbidden', list(COMMON_PLAN_FORBIDDEN))
+    package.setdefault('patch_scope', 'minimal_patch')
+    package.setdefault('complexity_claim', {
+        'precompute': 'constant with respect to row length',
+        'per_row': 'polynomial in the emitted baseline path length',
+        'why_polynomial': 'all search radii, window sizes, and pass counts stay fixed constants',
+    })
+    return package
+
+
+def _strategy_package_text(package: Optional[Dict[str, Any]]) -> str:
+    if not package:
+        return ''
+    lines = [
+        f"Family: {package.get('strategy_family', 'unspecified')}",
+        f"Label: {package.get('label', 'unnamed package')}",
+        f"Goal: {package.get('goal', '')}",
+    ]
+    edit_targets = [str(x).strip() for x in package.get('edit_targets', []) if str(x).strip()]
+    if edit_targets:
+        lines.append('Preferred edit targets: ' + ', '.join(edit_targets))
+    must_preserve = [str(x).strip() for x in package.get('must_preserve', []) if str(x).strip()]
+    if must_preserve:
+        lines.append('Must preserve: ' + ', '.join(must_preserve))
+    forbidden = [str(x).strip() for x in package.get('forbidden', []) if str(x).strip()]
+    if forbidden:
+        lines.append('Forbidden: ' + ', '.join(forbidden))
+    return '\n'.join(lines)
+
+
+def _planner_schema_for_package(package: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    enum_value = str((package or {}).get('strategy_family') or 'structured_plan')
+    return {
+        'type': 'object',
+        'required': [
+            'strategy_family',
+            'goal',
+            'edit_targets',
+            'must_preserve',
+            'complexity_claim',
+            'proposed_changes',
+            'validation_plan',
+            'forbidden',
+        ],
+        'properties': {
+            'strategy_family': {'type': 'string', 'enum': [enum_value]},
+            'goal': {'type': 'string'},
+            'edit_targets': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1},
+            'must_preserve': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 3},
+            'complexity_claim': {
+                'type': 'object',
+                'required': ['precompute', 'per_row', 'why_polynomial'],
+                'properties': {
+                    'precompute': {'type': 'string'},
+                    'per_row': {'type': 'string'},
+                    'why_polynomial': {'type': 'string'},
+                },
+            },
+            'proposed_changes': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 2},
+            'validation_plan': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 2},
+            'forbidden': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 3},
+            'patch_scope': {'type': 'string'},
+            'notes': {'type': 'string'},
+        },
+        'additionalProperties': True,
+    }
+
+
+def _balanced_json_object(text: str) -> Optional[str]:
+    start = text.find('{')
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    quote = ''
+    for idx, ch in enumerate(text[start:], start=start):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == quote:
+                in_string = False
+            continue
+        if ch in {'"', "'"}:
+            in_string = True
+            quote = ch
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start: idx + 1]
+    return None
+
+
+def _lenient_load_json_object(text: str) -> Optional[Dict[str, Any]]:
+    candidate = str(text or '').strip()
+    if not candidate:
+        return None
+    candidates: List[str] = [candidate]
+    fenced = RE_ANY_BLOCK.findall(candidate)
+    for block in fenced:
+        if block and block.strip() not in candidates:
+            candidates.append(block.strip())
+    balanced = _balanced_json_object(candidate)
+    if balanced and balanced not in candidates:
+        candidates.append(balanced)
+    for payload_text in candidates:
+        try:
+            loaded = json.loads(payload_text)
+        except Exception:
+            try:
+                loaded = ast.literal_eval(payload_text)
+            except Exception:
+                continue
+        if isinstance(loaded, dict):
+            return loaded
+    return None
+
+
+def _string_list(value: Any, fallback: Sequence[str]) -> List[str]:
+    if isinstance(value, (list, tuple)):
+        out = [str(item).strip() for item in value if str(item).strip()]
+        if out:
+            return out
+    return [str(item).strip() for item in fallback if str(item).strip()]
+
+
+def _normalize_complexity_claim(value: Any, package: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    default_claim = dict((package or {}).get('complexity_claim') or {})
+    out = {
+        'precompute': str(default_claim.get('precompute') or 'constant with respect to row length'),
+        'per_row': str(default_claim.get('per_row') or 'polynomial in the emitted baseline path length'),
+        'why_polynomial': str(default_claim.get('why_polynomial') or 'all search radii, window sizes, and pass counts stay fixed constants'),
+    }
+    if isinstance(value, dict):
+        for key in ('precompute', 'per_row', 'why_polynomial'):
+            raw = str(value.get(key, '') or '').strip()
+            if raw:
+                out[key] = raw
+    return out
+
+
+def _fallback_plan_notes(raw_text: str) -> str:
+    lines = [line.strip(' -*\t') for line in str(raw_text or '').splitlines() if line.strip()]
+    if not lines:
+        return ''
+    return ' | '.join(lines[:4])
+
+
+def _normalize_structured_plan(payload: Dict[str, Any], package: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    pkg = package or {}
+    normalized: Dict[str, Any] = {
+        'strategy_family': str(payload.get('strategy_family') or pkg.get('strategy_family') or 'structured_plan').strip(),
+        'goal': str(payload.get('goal') or pkg.get('goal') or '').strip(),
+        'edit_targets': _string_list(payload.get('edit_targets'), pkg.get('edit_targets', [])),
+        'must_preserve': _string_list(payload.get('must_preserve'), pkg.get('must_preserve', COMMON_PLAN_MUST_PRESERVE)),
+        'complexity_claim': _normalize_complexity_claim(payload.get('complexity_claim'), pkg),
+        'proposed_changes': _string_list(payload.get('proposed_changes'), pkg.get('proposed_changes', [])),
+        'validation_plan': _string_list(payload.get('validation_plan'), pkg.get('validation_plan', [])),
+        'forbidden': _string_list(payload.get('forbidden'), pkg.get('forbidden', COMMON_PLAN_FORBIDDEN)),
+        'patch_scope': str(payload.get('patch_scope') or pkg.get('patch_scope') or 'minimal_patch').strip(),
+    }
+    notes = str(payload.get('notes') or '').strip()
+    if notes:
+        normalized['notes'] = notes
+    return normalized
+
+
+def _fallback_structured_plan(raw_text: str, package: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    pkg = package or {}
+    fallback = {
+        'strategy_family': str(pkg.get('strategy_family') or 'structured_plan'),
+        'goal': str(pkg.get('goal') or 'Improve the baseline via bounded local rewrites.'),
+        'edit_targets': list(pkg.get('edit_targets') or []),
+        'must_preserve': list(pkg.get('must_preserve') or COMMON_PLAN_MUST_PRESERVE),
+        'complexity_claim': _normalize_complexity_claim(None, pkg),
+        'proposed_changes': list(pkg.get('proposed_changes') or []),
+        'validation_plan': list(pkg.get('validation_plan') or []),
+        'forbidden': list(pkg.get('forbidden') or COMMON_PLAN_FORBIDDEN),
+        'patch_scope': str(pkg.get('patch_scope') or 'minimal_patch'),
+        'notes': _fallback_plan_notes(raw_text),
+    }
+    return _normalize_structured_plan(fallback, pkg)
+
+
+def _coerce_structured_plan(raw_text: str, package: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = _lenient_load_json_object(raw_text)
+    if isinstance(payload, dict):
+        return _normalize_structured_plan(payload, package)
+    return _fallback_structured_plan(raw_text, package)
+
+
+def _structured_plan_json(plan_payload: Optional[Dict[str, Any]]) -> str:
+    if not plan_payload:
+        return ''
+    return json.dumps(plan_payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _render_structured_plan(plan_payload: Optional[Dict[str, Any]]) -> str:
+    if not plan_payload:
+        return ''
+    complexity = plan_payload.get('complexity_claim') if isinstance(plan_payload.get('complexity_claim'), dict) else {}
+    lines = [
+        f"Algorithm family: {plan_payload.get('strategy_family', 'structured_plan')}",
+        f"Goal: {plan_payload.get('goal', '')}",
+    ]
+    if plan_payload.get('edit_targets'):
+        lines.append('Edit targets: ' + ', '.join(str(x) for x in plan_payload['edit_targets']))
+    if plan_payload.get('must_preserve'):
+        lines.append('Invariants: ' + ', '.join(str(x) for x in plan_payload['must_preserve']))
+    if complexity:
+        lines.append(
+            'Complexity: precompute='
+            + str(complexity.get('precompute', ''))
+            + '; per_row='
+            + str(complexity.get('per_row', ''))
+            + '; proof='
+            + str(complexity.get('why_polynomial', ''))
+        )
+    if plan_payload.get('proposed_changes'):
+        lines.append('Repair strategy: ' + '; '.join(str(x) for x in plan_payload['proposed_changes']))
+    if plan_payload.get('validation_plan'):
+        lines.append('Validation plan: ' + '; '.join(str(x) for x in plan_payload['validation_plan']))
+    if plan_payload.get('forbidden'):
+        lines.append('Forbidden: ' + '; '.join(str(x) for x in plan_payload['forbidden']))
+    if plan_payload.get('notes'):
+        lines.append('Notes: ' + str(plan_payload.get('notes')))
+    return '\n'.join(line for line in lines if line.strip())
 
 
 def _plan_signature(text: str) -> str:
@@ -230,21 +560,27 @@ def _build_plan_variant_prompt(
     beam_width: int,
     archive_summary: str = "",
     baseline_code: str | None = None,
+    strategy_package: Optional[Dict[str, Any]] = None,
 ) -> str:
+    package = strategy_package or _strategy_package_for_variant(variant_index)
+    schema_json = json.dumps(_planner_schema_for_package(package), ensure_ascii=False, indent=2, sort_keys=True)
     parts = [
-        f"USER TASK:\n{user_prompt}",
+        "## USER TASK",
+        user_prompt,
+        "## STRATEGY PACKAGE",
+        _strategy_package_text(package),
+        "## REQUIRED OUTPUT",
         (
-            f"Generate algorithm-hypothesis variant {variant_index} of {beam_width}. "
-            "Make it materially distinct from previous variants in algorithm family, primitive-move synthesis, or repair strategy."
+            f"Generate planner variant {variant_index} of {beam_width}. Return exactly one JSON object and no prose outside JSON. "
+            "The object must describe a minimal patch-over-baseline plan that preserves correctness and polynomial-time guarantees."
         ),
-        (
-            "Return a compact plan with these headings: `Algorithm family`, `Primitive moves`, `Invariants`, `Complexity`, `Repair strategy`."
-        ),
+        "## JSON SCHEMA",
+        f"```json\n{schema_json}\n```",
     ]
     if baseline_code:
         parts.extend(
             [
-                "KNOWN-GOOD BASELINE SOLVER:",
+                "## KNOWN-GOOD BASELINE SOLVER",
                 f"```python\n{_clip_middle(baseline_code, 12000)}\n```",
                 "Prefer a minimal patch of the baseline if it can be upgraded into a stronger constructive solver.",
             ]
@@ -252,12 +588,16 @@ def _build_plan_variant_prompt(
     if archive_summary:
         parts.extend(
             [
-                "RECENT EXPERIMENT MANAGER MEMORY (avoid repeating these failures):",
+                "## RECENT FAILURE MEMORY",
                 archive_summary,
+                "Do not repeat the same failure modes; update the patch scope or validation plan instead.",
             ]
         )
-    parts.append(
-        "Do not write code yet. Focus on a verifiable algorithmic hypothesis that can be implemented as dependency-free Python."
+    parts.extend(
+        [
+            "## HARD RULES",
+            "Do not write code yet. Do not propose BFS/DFS/beam search over puzzle states. Keep all radii, windows, and passes fixed constants.",
+        ]
     )
     return "\n\n".join(parts)
 
@@ -281,23 +621,28 @@ def generate_plan_candidates(
     attempts = max(beam_width, min(len(ordered_models) * max(1, beam_width), beam_width * 3))
     for idx in range(attempts):
         model = ordered_models[idx % len(ordered_models)]
+        strategy_package = _strategy_package_for_variant(idx + 1)
         plan_prompt = _build_plan_variant_prompt(
             user_prompt,
             variant_index=idx + 1,
             beam_width=beam_width,
             archive_summary=archive_summary,
             baseline_code=baseline_code,
+            strategy_package=strategy_package,
         )
         try:
-            plan_text = _query_model_stable(model, plan_prompt, planner_system_prompt, tries=1, timeout=18.0)
+            raw_plan_text = _query_model_stable(model, plan_prompt, planner_system_prompt, tries=1, timeout=18.0)
         except MissingLLMCredentials:
             continue
         except Exception:
             continue
-        plan_text = str(plan_text or "").strip()
-        if not plan_text:
+        raw_plan_text = str(raw_plan_text or "").strip()
+        if not raw_plan_text:
             continue
-        signature = _plan_signature(plan_text)
+        parsed_payload = _lenient_load_json_object(raw_plan_text)
+        plan_payload = _normalize_structured_plan(parsed_payload, strategy_package) if isinstance(parsed_payload, dict) else _fallback_structured_plan(raw_plan_text, strategy_package)
+        plan_text = _render_structured_plan(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text
+        signature = _plan_signature(_structured_plan_json(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text)
         score = _plan_quality_score(plan_text)
         candidate = PlanCandidate(
             plan_text=plan_text,
@@ -306,6 +651,8 @@ def generate_plan_candidates(
             variant_index=idx + 1,
             depth=0 if not archive_summary else 1,
             source="planner" if not archive_summary else "refiner",
+            planner_payload=plan_payload,
+            strategy_package=strategy_package,
         )
         prev = dedup.get(signature)
         if prev is None or candidate.score > prev.score:
@@ -1019,6 +1366,42 @@ def ask_first_nonempty(models: Sequence[str], prompt: str, system_prompt: str) -
     return "", None
 
 
+def ask_first_structured_plan(
+    models: Sequence[str],
+    user_prompt: str,
+    system_prompt: str,
+    *,
+    baseline_code: Optional[str] = None,
+) -> Tuple[str, Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    last_error: Optional[Exception] = None
+    for idx, model in enumerate(models, start=1):
+        strategy_package = _strategy_package_for_variant(idx)
+        prompt = _build_plan_variant_prompt(
+            user_prompt,
+            variant_index=idx,
+            beam_width=max(1, len(models)),
+            baseline_code=baseline_code,
+            strategy_package=strategy_package,
+        )
+        try:
+            resp = _query_model_stable(model, prompt, system_prompt)
+            if isinstance(resp, str) and resp.strip():
+                _print_generation_preview("planner", model, resp.strip())
+                parsed_payload = _lenient_load_json_object(resp.strip())
+                plan_payload = _normalize_structured_plan(parsed_payload, strategy_package) if isinstance(parsed_payload, dict) else _fallback_structured_plan(resp.strip(), strategy_package)
+                plan_text = _render_structured_plan(plan_payload) if isinstance(parsed_payload, dict) else resp.strip()
+                return plan_text, model, plan_payload, strategy_package
+        except MissingLLMCredentials as e:
+            last_error = e
+            continue
+        except Exception as e:
+            last_error = e
+            continue
+    if last_error is not None:
+        raise last_error
+    return "", None, None, None
+
+
 def make_baseline_stub() -> str:
     return """from __future__ import annotations
 import json
@@ -1087,25 +1470,105 @@ def _strict_output_requirements(*, prefer_minimal_patch: bool) -> str:
     return '\n'.join(lines)
 
 
-def build_initial_codegen_prompt(user_prompt: str, plan: str, *, baseline_code: Optional[str] = None) -> str:
+def build_initial_codegen_prompt(
+    user_prompt: str,
+    plan: str,
+    *,
+    baseline_code: Optional[str] = None,
+    plan_payload: Optional[Dict[str, Any]] = None,
+    strategy_package: Optional[Dict[str, Any]] = None,
+) -> str:
+    max_plan_chars = _env_int("AGENTLAB_MAX_PLAN_PROMPT_CHARS", 12000)
     parts = [
-        f"USER TASK:\n{user_prompt}",
-        f"PLANNER NOTES:\n{plan}",
+        "## USER TASK",
+        user_prompt,
     ]
+    if strategy_package:
+        parts.extend(["## STRATEGY PACKAGE", _strategy_package_text(strategy_package)])
+    if plan_payload:
+        parts.extend(
+            [
+                "## PLANNER JSON",
+                f"```json\n{_structured_plan_json(plan_payload)}\n```",
+            ]
+        )
+    parts.extend(
+        [
+            "## PLANNER SUMMARY",
+            _clip_middle(plan, max_plan_chars),
+        ]
+    )
     if baseline_code is None:
-        parts.append('Now write the solver file.')
+        parts.append('Now write the solver file as a bounded patch-consistent implementation.')
     else:
         parts.extend(
             [
-                'KNOWN-GOOD BASELINE SOLVER:',
+                '## KNOWN-GOOD BASELINE SOLVER',
                 f"```python\n{baseline_code}\n```",
                 (
                     'Modify the baseline minimally to better solve the task while preserving the public entrypoints, '
-                    'stdout contract, and dependency-free behavior. Return the complete updated solver file.'
+                    'stdout contract, dependency-free behavior, exact lookup first, and deterministic replay semantics. '
+                    'Return the complete updated solver file.'
                 ),
             ]
         )
-    parts.append(_strict_output_requirements(prefer_minimal_patch=baseline_code is not None))
+    parts.extend(
+        [
+            '## IMPLEMENTATION RULES',
+            'Patch only the named edit targets unless another change is strictly required for correctness. Keep all search radii, window sizes, and pass counts bounded by constants.',
+            _strict_output_requirements(prefer_minimal_patch=baseline_code is not None),
+        ]
+    )
+    return '\n\n'.join(parts)
+
+
+def _build_fixer_prompt(
+    *,
+    user_prompt: str,
+    plan: str,
+    current_code: str,
+    last_report: str,
+    baseline_code: Optional[str],
+    plan_payload: Optional[Dict[str, Any]],
+    strategy_package: Optional[Dict[str, Any]],
+    max_code_chars: int,
+    max_report_chars: int,
+    max_plan_chars: int,
+) -> str:
+    parts = [
+        "## USER TASK",
+        user_prompt,
+    ]
+    if strategy_package:
+        parts.extend(["## STRATEGY PACKAGE", _strategy_package_text(strategy_package)])
+    if plan_payload:
+        parts.extend(["## PLANNER JSON", f"```json\n{_structured_plan_json(plan_payload)}\n```"])
+    parts.extend(
+        [
+            "## PLANNER SUMMARY",
+            _clip_middle(plan, max_plan_chars),
+            "## CURRENT CODE",
+            f"```python\n{_clip_middle(current_code, max_code_chars)}\n```",
+            "## FAILURE REPORT",
+            _clip_middle(last_report, max_report_chars),
+        ]
+    )
+    if baseline_code:
+        parts.extend(
+            [
+                "## KNOWN-GOOD BASELINE",
+                f"```python\n{_clip_middle(baseline_code, max_code_chars)}\n```",
+            ]
+        )
+    parts.extend(
+        [
+            "## REPAIR ORDER",
+            "1. Preserve solve(vec), stdout JSON contract, and legal move names.",
+            "2. Fix the smallest possible region that explains the failure.",
+            "3. Do not introduce BFS/DFS/beam search or any instance-growing frontier.",
+            _strict_output_requirements(prefer_minimal_patch=True),
+        ]
+    )
     return '\n\n'.join(parts)
 
 
@@ -1162,9 +1625,14 @@ def _run_fixer_loop(
     current_code: str,
     last_report: str,
     progress_label: str,
+    plan: str,
+    baseline_code: Optional[str] = None,
+    plan_payload: Optional[Dict[str, Any]] = None,
+    strategy_package: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     max_code_chars = _env_int("AGENTLAB_MAX_CODE_PROMPT_CHARS", 24000)
     max_report_chars = _env_int("AGENTLAB_MAX_FAILURE_REPORT_CHARS", 12000)
+    max_plan_chars = _env_int("AGENTLAB_MAX_PLAN_PROMPT_CHARS", 12000)
 
     exceeded, rss_mb, limit_mb = _memory_limit_exceeded()
     if exceeded:
@@ -1189,12 +1657,17 @@ def _run_fixer_loop(
                     f"the configured limit {limit_mb} MB. Reduce --max-iters or raise AGENTLAB_MAX_RSS_MB."
                 )
 
-            fix_prompt = (
-                f"USER TASK:\n{user_prompt}\n\n"
-                f"CURRENT CODE:\n```python\n{_clip_middle(current_code, max_code_chars)}\n```\n\n"
-                f"FAILURE REPORT:\n{_clip_middle(last_report, max_report_chars)}\n\n"
-                'Return a corrected full python file.\n\n'
-                + _strict_output_requirements(prefer_minimal_patch=True)
+            fix_prompt = _build_fixer_prompt(
+                user_prompt=user_prompt,
+                plan=plan,
+                current_code=current_code,
+                last_report=last_report,
+                baseline_code=baseline_code,
+                plan_payload=plan_payload,
+                strategy_package=strategy_package,
+                max_code_chars=max_code_chars,
+                max_report_chars=max_report_chars,
+                max_plan_chars=max_plan_chars,
             )
 
             new_code = None
@@ -1264,8 +1737,16 @@ def try_generate_with_model(
     max_iters: int,
     baseline_code: Optional[str] = None,
     stage_label: str = "coder",
+    plan_payload: Optional[Dict[str, Any]] = None,
+    strategy_package: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
-    coder_prompt = build_initial_codegen_prompt(user_prompt, plan, baseline_code=baseline_code)
+    coder_prompt = build_initial_codegen_prompt(
+        user_prompt,
+        plan,
+        baseline_code=baseline_code,
+        plan_payload=plan_payload,
+        strategy_package=strategy_package,
+    )
     code, err = _query_code_block_with_rescue(
         model=model,
         prompt=coder_prompt,
@@ -1301,6 +1782,10 @@ def try_generate_with_model(
         current_code=code,
         last_report=last_report,
         progress_label=progress_label,
+        plan=plan,
+        baseline_code=baseline_code,
+        plan_payload=plan_payload,
+        strategy_package=strategy_package,
     )
 
 
@@ -1489,7 +1974,10 @@ def run_hybrid_codegen_search(
                     validator_path=validator_path,
                     tests=tests,
                     max_iters=max_iters,
+                    baseline_code=baseline_code,
                     stage_label=f"coder variant {plan_candidate.variant_index}" if round_idx == 0 else f"coder refine {round_idx} variant {plan_candidate.variant_index}",
+                    plan_payload=plan_candidate.planner_payload,
+                    strategy_package=plan_candidate.strategy_package,
                 )
                 generation_reports.append(report)
                 archive.add(
@@ -1715,6 +2203,8 @@ def main() -> None:
     archive = CandidateArchive(max_items=archive_size)
     plan = ""
     planner_model: Optional[str] = None
+    plan_payload: Optional[Dict[str, Any]] = None
+    strategy_package: Optional[Dict[str, Any]] = None
 
     if search_mode == "hybrid":
         hybrid_ok, hybrid_reports, archive, plan, planner_model, winner_model = run_hybrid_codegen_search(
@@ -1744,7 +2234,12 @@ def main() -> None:
 
     if not plan:
         try:
-            plan, planner_model = ask_first_nonempty(planner_models, user_prompt, prompts["planner"])
+            plan, planner_model, plan_payload, strategy_package = ask_first_structured_plan(
+                planner_models,
+                user_prompt,
+                prompts["planner"],
+                baseline_code=baseline_code,
+            )
             if not plan:
                 plan = "(planner failed; proceeding without planner notes)"
             log_status(f"[planner] selected model: {planner_model or 'none'}")
@@ -1778,6 +2273,9 @@ def main() -> None:
                 validator_path=validator_path,
                 tests=tests,
                 max_iters=args.max_iters,
+                baseline_code=baseline_code,
+                plan_payload=plan_payload,
+                strategy_package=strategy_package,
             )
             generation_reports.append(report)
             archive.add(
@@ -1824,6 +2322,8 @@ def main() -> None:
                 max_iters=patch_iters,
                 baseline_code=baseline_code,
                 stage_label="baseline-patcher",
+                plan_payload=plan_payload,
+                strategy_package=strategy_package,
             )
             generation_reports.append(report)
             archive.add(
