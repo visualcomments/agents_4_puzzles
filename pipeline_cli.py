@@ -2540,7 +2540,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--competition", required=True, help="Competition slug / pipeline key")
     sp.add_argument("--out", required=True, help="Output path for generated solver")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
-    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted"], help="Select a competition prompt bundle variant when available")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override AgentLaboratory custom prompts JSON")
     sp.add_argument(
         "--models",
@@ -2550,11 +2550,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Comma-separated model list (passed to AgentLaboratory --models). "
             "Bare names use g4f backend (remote providers). "
             "You can also pass explicit backends like 'local:<hf_model_id>', 'ollama:<model>', 'vllm:<model>', "
-            "'lmstudio:<model>', 'openai-compatible:<model>', or 'g4fapi:<model>'."
+            "'lmstudio:<model>', 'g4fapi:<model>', or plain g4f model names like 'gpt-4o-mini'."
         ),
     )
     sp.add_argument("--llm", dest="models", default=None, help=argparse.SUPPRESS)
-    sp.add_argument("--agent-models", default=None, help="Optional per-agent override mapping for AgentLaboratory, e.g. 'planner=gpt-4;coder=local:Qwen/Qwen2.5-Coder-1.5B;fixer=gpt-4o-mini'.")
+    sp.add_argument("--agent-models", default=None, help="Optional per-agent override mapping for AgentLaboratory, e.g. 'planner=claude-3.5-sonnet;coder=deepseek-chat,qwen2.5-coder;fixer=gpt-4o-mini'.")
     sp.add_argument("--planner-models", default=None, help="Optional model list override for the planner agent.")
     sp.add_argument("--coder-models", default=None, help="Optional model list override for the coder agent.")
     sp.add_argument("--fixer-models", default=None, help="Optional model list override for the fixer agent.")
@@ -2618,7 +2618,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--puzzles", required=False, default=None, help="Input puzzles/test CSV (optional; uses bundled competitions/<slug>/data/test.csv if omitted)")
     sp.add_argument("--output", required=True, help="Submission CSV output")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
-    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted"], help="Select a competition prompt bundle variant when available")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override custom prompts JSON")
     sp.add_argument(
         "--models",
@@ -2628,11 +2628,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Comma-separated model list (passed to AgentLaboratory --models). "
             "Bare names use g4f backend (remote providers). "
             "You can also pass explicit backends like 'local:<hf_model_id>', 'ollama:<model>', 'vllm:<model>', "
-            "'lmstudio:<model>', 'openai-compatible:<model>', or 'g4fapi:<model>'."
+            "'lmstudio:<model>', 'g4fapi:<model>', or plain g4f model names like 'gpt-4o-mini'."
         ),
     )
     sp.add_argument("--llm", dest="models", default=None, help=argparse.SUPPRESS)
-    sp.add_argument("--agent-models", default=None, help="Optional per-agent override mapping for AgentLaboratory, e.g. 'planner=gpt-4;coder=local:Qwen/Qwen2.5-Coder-1.5B;fixer=gpt-4o-mini'.")
+    sp.add_argument("--agent-models", default=None, help="Optional per-agent override mapping for AgentLaboratory, e.g. 'planner=claude-3.5-sonnet;coder=deepseek-chat,qwen2.5-coder;fixer=gpt-4o-mini'.")
     sp.add_argument("--planner-models", default=None, help="Optional model list override for the planner agent.")
     sp.add_argument("--coder-models", default=None, help="Optional model list override for the coder agent.")
     sp.add_argument("--fixer-models", default=None, help="Optional model list override for the fixer agent.")

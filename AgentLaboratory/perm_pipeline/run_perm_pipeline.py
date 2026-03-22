@@ -2039,14 +2039,14 @@ def main() -> None:
         help=(
             "Comma-separated default model list. Bare names use g4f backend (remote providers). "
             "You can also pass explicit backends like local:<hf_model_id>, ollama:<model>, vllm:<model>, "
-            "lmstudio:<model>, openai-compatible:<model>, or g4fapi:<model>."
+            "lmstudio:<model>, g4fapi:<model>, or plain g4f model names like gpt-4o-mini."
         ),
     )
     p.add_argument(
         "--agent-models",
         default=None,
         help=(
-            "Optional per-agent override mapping, e.g. 'planner=gpt-4;coder=local:Qwen/Qwen2.5-Coder-1.5B;fixer=gpt-4o-mini'. "
+            "Optional per-agent override mapping, e.g. 'planner=claude-3.5-sonnet;coder=deepseek-chat,qwen2.5-coder;fixer=gpt-4o-mini'. "
             "Each value accepts the same comma-separated syntax as --models."
         ),
     )

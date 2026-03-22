@@ -176,6 +176,22 @@ python pipeline_cli.py generate-solver \
   --max-iters 8
 ```
 
+### 6.1b Structured Megaminx bundle (g4f-first)
+
+```bash
+python pipeline_cli.py generate-solver \
+  --competition cayley-py-megaminx \
+  --out generated/solve_megaminx_structured.py \
+  --prompt-variant structured \
+  --models gpt-4o-mini,claude-3.5-sonnet,deepseek-chat \
+  --search-mode hybrid \
+  --plan-beam-width 4 \
+  --frontier-width 8 \
+  --archive-size 12 \
+  --refine-rounds 2 \
+  --max-iters 3
+```
+
 ### 6.2 Без LLM (просто копировать baseline)
 
 ```bash
