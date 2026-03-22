@@ -140,6 +140,8 @@ class PlanCandidate:
     source: str = "planner"
     planner_payload: Optional[Dict[str, Any]] = None
     strategy_package: Optional[Dict[str, Any]] = None
+    parent_signature: str = ""
+    prompt_score: float = 0.0
 
 
 @dataclass
@@ -553,6 +555,120 @@ def _plan_quality_score(text: str) -> float:
     return score
 
 
+def _string_items(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    out: List[str] = []
+    for item in value:
+        s = str(item or "").strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _score_plan_payload(plan_payload: Optional[Dict[str, Any]]) -> float:
+    if not isinstance(plan_payload, dict):
+        return 0.0
+    score = 0.0
+    edit_targets = _string_items(plan_payload.get("edit_targets"))
+    proposed_changes = _string_items(plan_payload.get("proposed_changes"))
+    validation_plan = _string_items(plan_payload.get("validation_plan"))
+    must_preserve = set(_string_items(plan_payload.get("must_preserve")))
+    forbidden = set(_string_items(plan_payload.get("forbidden")))
+    score += min(len(edit_targets), 4) * 4.0
+    score += min(len(proposed_changes), 4) * 3.0
+    score += min(len(validation_plan), 4) * 3.0
+    score += len(must_preserve & set(COMMON_PLAN_MUST_PRESERVE)) * 2.0
+    score += len(forbidden & set(COMMON_PLAN_FORBIDDEN)) * 1.5
+    if str(plan_payload.get("goal") or "").strip():
+        score += 4.0
+    if str(plan_payload.get("patch_scope") or "").strip():
+        score += 3.0
+    if str(plan_payload.get("notes") or "").strip():
+        score += 2.0
+    complexity = plan_payload.get("complexity_claim") or {}
+    if isinstance(complexity, dict):
+        for key in ("precompute", "per_row", "why_polynomial"):
+            if str(complexity.get(key) or "").strip():
+                score += 3.0
+    return score
+
+
+def _combined_plan_score(
+    plan_text: str,
+    plan_payload: Optional[Dict[str, Any]],
+    *,
+    parent: Optional[PlanCandidate] = None,
+    archive_summary: str = "",
+) -> float:
+    score = _plan_quality_score(plan_text) + _score_plan_payload(plan_payload)
+    low = str(plan_text or "").lower()
+    if archive_summary:
+        if "avoid" in low or "do not repeat" in low or "failure" in low or "regression" in low:
+            score += 5.0
+        if "validation plan:" in low:
+            score += 2.0
+    if parent is None:
+        return score
+    parent_payload = parent.planner_payload if isinstance(parent.planner_payload, dict) else {}
+    cand_signature = _plan_signature(_structured_plan_json(plan_payload) if isinstance(plan_payload, dict) else plan_text)
+    if cand_signature == (parent.parent_signature or _plan_signature(parent.plan_text)):
+        score -= 40.0
+    parent_targets = set(_string_items(parent_payload.get("edit_targets")))
+    cand_targets = set(_string_items((plan_payload or {}).get("edit_targets")))
+    target_delta = cand_targets - parent_targets
+    if target_delta:
+        score += min(len(target_delta), 2) * 6.0
+    elif cand_targets == parent_targets:
+        score -= 3.0
+    parent_changes = set(_string_items(parent_payload.get("proposed_changes")))
+    cand_changes = set(_string_items((plan_payload or {}).get("proposed_changes")))
+    change_delta = cand_changes - parent_changes
+    if change_delta:
+        score += min(len(change_delta), 2) * 5.0
+    elif cand_changes == parent_changes:
+        score -= 3.0
+    parent_valid = set(_string_items(parent_payload.get("validation_plan")))
+    cand_valid = set(_string_items((plan_payload or {}).get("validation_plan")))
+    valid_delta = cand_valid - parent_valid
+    if valid_delta:
+        score += min(len(valid_delta), 2) * 4.0
+    elif cand_valid == parent_valid:
+        score -= 2.0
+    parent_len = len(str(parent.plan_text or ""))
+    cand_len = len(str(plan_text or ""))
+    if parent_len > 0 and cand_len < max(60, int(parent_len * 0.6)):
+        score -= 4.0
+    return score
+
+
+def _record_plan_candidates(history: List[Dict[str, Any]], round_idx: int, plans: Sequence[PlanCandidate], *, phase: str) -> None:
+    for plan in plans:
+        history.append(
+            {
+                "phase": phase,
+                "round": round_idx,
+                "variant_index": plan.variant_index,
+                "planner_model": plan.planner_model,
+                "score": round(plan.score, 3),
+                "prompt_score": round(plan.prompt_score or plan.score, 3),
+                "source": plan.source,
+                "parent_signature": plan.parent_signature,
+                "signature": _plan_signature(_structured_plan_json(plan.planner_payload) if isinstance(plan.planner_payload, dict) else plan.plan_text),
+                "summary": _clip_middle(plan.plan_text, 1200),
+            }
+        )
+
+
+def _write_plan_history(out_path: Path, history: Sequence[Dict[str, Any]]) -> None:
+    try:
+        target = out_path.with_name(out_path.stem + "_plan_history.json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(list(history), ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        return
+
+
 def _build_plan_variant_prompt(
     user_prompt: str,
     *,
@@ -643,7 +759,7 @@ def generate_plan_candidates(
         plan_payload = _normalize_structured_plan(parsed_payload, strategy_package) if isinstance(parsed_payload, dict) else _fallback_structured_plan(raw_plan_text, strategy_package)
         plan_text = _render_structured_plan(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text
         signature = _plan_signature(_structured_plan_json(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text)
-        score = _plan_quality_score(plan_text)
+        score = _combined_plan_score(plan_text, plan_payload, archive_summary=archive_summary)
         candidate = PlanCandidate(
             plan_text=plan_text,
             planner_model=model,
@@ -653,13 +769,130 @@ def generate_plan_candidates(
             source="planner" if not archive_summary else "refiner",
             planner_payload=plan_payload,
             strategy_package=strategy_package,
+            parent_signature="",
+            prompt_score=score,
         )
         prev = dedup.get(signature)
         if prev is None or candidate.score > prev.score:
             dedup[signature] = candidate
         if len(dedup) >= beam_width and idx + 1 >= beam_width:
-            # Keep some headroom for diversity, but do not over-query unnecessarily.
             break
+
+    ranked = sorted(dedup.values(), key=lambda c: (-c.score, c.variant_index, c.planner_model))
+    return ranked[:beam_width]
+
+
+def _build_plan_refinement_prompt(
+    user_prompt: str,
+    *,
+    parent: PlanCandidate,
+    refinement_round: int,
+    archive_summary: str,
+    baseline_code: str | None = None,
+) -> str:
+    package = parent.strategy_package or _strategy_package_for_variant(parent.variant_index)
+    schema_json = json.dumps(_planner_schema_for_package(package), ensure_ascii=False, indent=2, sort_keys=True)
+    parts = [
+        "## USER TASK",
+        user_prompt,
+        "## STRATEGY PACKAGE",
+        _strategy_package_text(package),
+        "## PREVIOUS ACCEPTED PLAN",
+        _clip_middle(parent.plan_text, 2400),
+    ]
+    if parent.planner_payload:
+        parts.extend(["## PREVIOUS PLANNER JSON", f"```json\n{_structured_plan_json(parent.planner_payload)}\n```"])
+    parts.extend(
+        [
+            "## FAILURE MEMORY",
+            archive_summary,
+            "## IMPROVEMENT GOAL",
+            (
+                f"Refinement round {refinement_round}. Return exactly one JSON object and no prose outside JSON. "
+                "Produce a STRICTLY BETTER planner prompt/plan than the previous accepted one: preserve all good constraints, "
+                "explicitly address at least one failure mode from memory, and add at least one concrete improvement in edit_targets, "
+                "proposed_changes, or validation_plan. Do not merely rephrase the previous plan."
+            ),
+            "## JSON SCHEMA",
+            f"```json\n{schema_json}\n```",
+        ]
+    )
+    if baseline_code:
+        parts.extend(
+            [
+                "## KNOWN-GOOD BASELINE SOLVER",
+                f"```python\n{_clip_middle(baseline_code, 12000)}\n```",
+            ]
+        )
+    parts.extend(
+        [
+            "## HARD RULES",
+            "Do not write code yet. Keep the plan polynomial-time, bounded-radius, and bundle-safe.",
+            "If the new JSON would not beat the previous plan on specificity or validation strength, produce a more concrete plan instead.",
+        ]
+    )
+    return "\n\n".join(parts)
+def generate_refined_plan_candidates(
+    planner_models: Sequence[str],
+    user_prompt: str,
+    planner_system_prompt: str,
+    *,
+    parent_candidates: Sequence[PlanCandidate],
+    beam_width: int,
+    archive_summary: str,
+    baseline_code: str | None = None,
+    min_improvement: float = 4.0,
+) -> List[PlanCandidate]:
+    if beam_width <= 0 or not parent_candidates:
+        return []
+    dedup: Dict[str, PlanCandidate] = {}
+    ordered_models = _interleave_by_backend_diversity(list(planner_models)) or list(planner_models)
+    if not ordered_models:
+        return []
+
+    for parent_idx, parent in enumerate(parent_candidates[:beam_width], start=1):
+        model = ordered_models[(parent_idx - 1) % len(ordered_models)]
+        prompt = _build_plan_refinement_prompt(
+            user_prompt,
+            parent=parent,
+            refinement_round=max(1, parent.depth + 1),
+            archive_summary=archive_summary,
+            baseline_code=baseline_code,
+        )
+        try:
+            raw_plan_text = _query_model_stable(model, prompt, planner_system_prompt, tries=1, timeout=18.0)
+        except MissingLLMCredentials:
+            continue
+        except Exception:
+            continue
+        raw_plan_text = str(raw_plan_text or "").strip()
+        if not raw_plan_text:
+            continue
+        parsed_payload = _lenient_load_json_object(raw_plan_text)
+        strategy_package = parent.strategy_package or _strategy_package_for_variant(parent.variant_index)
+        plan_payload = _normalize_structured_plan(parsed_payload, strategy_package) if isinstance(parsed_payload, dict) else _fallback_structured_plan(raw_plan_text, strategy_package)
+        plan_text = _render_structured_plan(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text
+        signature = _plan_signature(_structured_plan_json(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text)
+        score = _combined_plan_score(plan_text, plan_payload, parent=parent, archive_summary=archive_summary)
+        if signature == _plan_signature(_structured_plan_json(parent.planner_payload) if isinstance(parent.planner_payload, dict) else parent.plan_text):
+            continue
+        if score <= (parent.score + min_improvement):
+            continue
+        candidate = PlanCandidate(
+            plan_text=plan_text,
+            planner_model=model,
+            score=score,
+            variant_index=parent.variant_index,
+            depth=parent.depth + 1,
+            source="refiner",
+            planner_payload=plan_payload,
+            strategy_package=strategy_package,
+            parent_signature=_plan_signature(_structured_plan_json(parent.planner_payload) if isinstance(parent.planner_payload, dict) else parent.plan_text),
+            prompt_score=score,
+        )
+        prev = dedup.get(signature)
+        if prev is None or candidate.score > prev.score:
+            dedup[signature] = candidate
 
     ranked = sorted(dedup.values(), key=lambda c: (-c.score, c.variant_index, c.planner_model))
     return ranked[:beam_width]
@@ -1925,6 +2158,7 @@ def run_hybrid_codegen_search(
     attempts_seen: set[tuple[str, str]] = set()
     last_plan = ""
     last_planner_model: Optional[str] = None
+    prompt_history: List[Dict[str, Any]] = []
 
     initial_plans = generate_plan_candidates(
         planner_models,
@@ -1936,6 +2170,8 @@ def run_hybrid_codegen_search(
     )
     if not initial_plans:
         return False, generation_reports, archive, "", None, None
+    _record_plan_candidates(prompt_history, 0, initial_plans, phase="initial")
+    _write_plan_history(out_path, prompt_history)
 
     if len(initial_plans) > 1:
         log_status(
@@ -1962,7 +2198,7 @@ def run_hybrid_codegen_search(
                 label_suffix = f"variant {plan_candidate.variant_index} planner={plan_candidate.planner_model} coder={coder_model}"
                 if round_idx > 0:
                     label_suffix += f" refine_round={round_idx}"
-                log_status(f"[hybrid] attempt {len(attempts_seen)}: {label_suffix}")
+                log_status(f"[hybrid] attempt {len(attempts_seen)}: {label_suffix} score={plan_candidate.score:.1f}")
 
                 ok, report = try_generate_with_model(
                     model=coder_model,
@@ -1991,6 +2227,7 @@ def run_hybrid_codegen_search(
                         score=_attempt_score(ok, report),
                     )
                 )
+                _write_plan_history(out_path, prompt_history)
                 if ok:
                     return True, generation_reports, archive, last_plan, last_planner_model, coder_model
                 log_status(f"[hybrid] {report}")
@@ -2003,29 +2240,33 @@ def run_hybrid_codegen_search(
         if not archive_summary:
             round_idx += 1
             continue
-        refined = generate_plan_candidates(
+        refined = generate_refined_plan_candidates(
             planner_models,
             user_prompt,
             prompts["planner"],
+            parent_candidates=current_plans,
             beam_width=plan_beam_width,
             archive_summary=archive_summary,
             baseline_code=baseline_code,
         )
         if refined:
+            _record_plan_candidates(prompt_history, round_idx + 1, refined, phase="refinement")
+            _write_plan_history(out_path, prompt_history)
             log_status(
                 f"[planner] experiment-manager refinement {round_idx + 1}/{refine_rounds} "
-                f"produced {len(refined)} additional plan candidates."
+                f"accepted {len(refined)} strictly improved plan candidates."
             )
             plan_rounds.append(refined)
         else:
             log_status(
-                f"[planner] experiment-manager refinement {round_idx + 1}/{refine_rounds} produced no additional plan candidates; "
+                f"[planner] experiment-manager refinement {round_idx + 1}/{refine_rounds} produced no strictly improved plan candidates; "
                 "stopping further refinement rounds."
             )
         round_idx += 1
 
     primary_plan = last_plan or initial_plans[0].plan_text
     primary_planner_model = last_planner_model or initial_plans[0].planner_model
+    _write_plan_history(out_path, prompt_history)
     return False, generation_reports, archive, primary_plan, primary_planner_model, None
 
 
