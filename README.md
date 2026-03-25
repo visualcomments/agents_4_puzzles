@@ -124,6 +124,18 @@ python pipeline_cli.py run \
 
 ### 2) Generate a solver with AgentLaboratory (custom prompt + per-competition validator)
 
+#### Megaminx (master prompt bundle included)
+
+```bash
+python pipeline_cli.py generate-solver \
+  --competition cayley-py-megaminx \
+  --out generated/solve_megaminx_master_hybrid.py \
+  --prompt-variant master_hybrid \
+  --models gpt-4o-mini \
+  --max-iters 8
+```
+
+
 #### RapaportM2 (custom prompt bundle included)
 
 ```bash

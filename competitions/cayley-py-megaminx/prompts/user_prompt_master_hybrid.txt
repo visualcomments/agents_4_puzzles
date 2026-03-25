@@ -1,0 +1,146 @@
+We are solving the Kaggle competition "CayleyPy Megaminx Solve Optimally":
+https://www.kaggle.com/competitions/cayley-py-megaminx
+
+I need a Python module `solve_module.py` that preserves the exact bundled-state lookup pipeline and upgrades the Megaminx local optimizer with the strongest deterministic hybrid word-rewriting strategy that still remains competition-safe.
+
+PRIMARY GOAL
+Produce the best bundled-data score you can while keeping the solver fully deterministic, standard-library only, and competition-contract safe.
+
+ABSOLUTE REQUIREMENTS
+- Start from the exact working bundled baseline and patch it rather than replacing it.
+- Preserve `solve(vec) -> (moves, sorted_array)`.
+- Preserve script mode:
+  `python solve_module.py "[1,2,3]"`
+  -> `{"moves": [...], "sorted_array": [...]}`
+- `vec` is a Python list[int].
+- `moves` must be a list[str] using ONLY official move names from `puzzle_info.json`.
+- Do NOT invent moves, aliases, macros-as-fake-moves, or renamed generators.
+- `sorted_array` must be the actual final state obtained by replaying `moves` from `vec`.
+- Preserve compatibility with the existing competition folder layout and bundled assets.
+- Keep exact bundled lookup compatibility with:
+  - `optimized_lookup.json` if present,
+  - bundled optimized submission if present,
+  - otherwise deterministic rebuilding from `sample_submission.csv`.
+
+COMPETITION FACTS YOU MUST USE
+- State vectors have length 120.
+- The solved state is `central_state` from `puzzle_info.json`.
+- Legal generators are exactly the Megaminx face turns from `puzzle_info.json` and their inverses.
+- Submission paths are dot-separated move names.
+- The Kaggle score is the SUM of path lengths over all bundled rows.
+- `sample_submission.csv` contains valid but non-optimal words, so exact word rewriting over those valid paths is a legitimate and high-value strategy.
+
+NON-NEGOTIABLE ARCHITECTURE
+Keep the current successful structure:
+1. load the official bundle;
+2. prefer exact bundled state -> path lookup;
+3. optimize those known-valid words locally;
+4. replay the optimized path to obtain the actual final state.
+
+Do NOT replace this with a risky generic solver that can fail on bundled rows.
+Do NOT regress bundled correctness.
+Do NOT remove compatibility with `optimized_lookup.json` / bundled optimized submission / deterministic rebuilding from `sample_submission.csv`.
+
+MASTER STRATEGY
+Implement a hybrid local optimizer that combines several deterministic, bounded, semantics-preserving layers. The key idea is NOT to solve Megaminx from scratch, but to compress already-valid Megaminx words much more aggressively while preserving exact correctness.
+
+The optimizer should combine ALL of these ideas in a competition-safe way:
+
+1. Official move algebra from `puzzle_info.json`
+- derive everything from the official permutations only;
+- derive inverse pairs from the official generators, not by guessing names;
+- exploit the true order-5 structure of each face turn;
+- reduce repeated powers of the same face modulo 5;
+- cancel adjacent inverse pairs online and after each optimization pass.
+
+2. Official commutation graph + multiple deterministic normalization policies
+- compute commutation only from official permutations;
+- do NOT rely on a single canonical commuting order;
+- implement a tiny fixed bank of admissible deterministic orderings for commuting blocks;
+- examples of safe policies: lexical, reverse lexical, graph-degree order, reverse graph-degree order, first-occurrence order, last-occurrence order, and one or two stable path-fingerprint-derived cyclic rotations if useful;
+- for each candidate path, run the optimizer under several such policies and keep the shortest valid result;
+- the number of policies must remain a tiny fixed constant.
+
+3. Strong exact short-word effect atlas
+- build a stronger fixed-radius exact table of short word effects using official permutations only;
+- preserve the shortest representative for each local permutation effect;
+- prune obvious inverse backtracking while building the table;
+- canonicalize equivalent local words before storage;
+- use compact packed permutation/effect keys to avoid recomputing composed effects.
+
+4. Bounded bidirectional window rewriting
+- run bounded-window DP or exact segmentation over local path windows;
+- do both left-to-right and right-to-left passes if useful;
+- allow a tiny fixed number of passes until convergence or a small pass limit;
+- memoize repeated windows and composed local effects;
+- prefer exact replacements over heuristic guesses.
+
+5. Deterministic commutator / conjugate macro mining over SMALL SUPPORT only
+Adapt the safe insight from external Megaminx repositories, but translate it into competition-safe local rewriting rather than a whole new solver:
+- enumerate only bounded short words and their conjugates / commutators;
+- keep only macros whose official permutation support is small or especially structured;
+- treat them as local rewrite candidates only if they produce an already-seen exact effect with a shorter representative;
+- do NOT add fake macro move names;
+- do NOT introduce instance-growing search.
+
+6. Per-row best-of-fixed-candidates sweep
+- bundled rows benefit from different commuting orders and local rewrite schedules;
+- run a tiny deterministic family of candidate optimization pipelines per row;
+- examples: different commuting-order policies, different bounded pass orderings, left-first vs right-first window sweeps, with or without the small-support macro atlas;
+- keep only the shortest valid equivalent word;
+- the candidate family must be fixed and tiny.
+
+7. Bundle-aware memoization without overfitting hacks
+- it is allowed to cache repeated bundled path fragments or repeated local effects if derived deterministically from bundled valid paths;
+- keep the code general enough to work for any valid path over the same official generators;
+- do NOT hardcode row ids or per-row handwritten answers.
+
+ALLOWED SEARCH / OPTIMIZATION
+Allowed:
+- exact fixed-radius precomputation on short words;
+- exact local replacement tables;
+- bounded-window dynamic programming;
+- deterministic comparison of a fixed small bank of normalization / rewrite policies;
+- local conjugate / commutator mining over a fixed small radius;
+- exact semantic-equivalence replacement only.
+
+Forbidden:
+- BFS / DFS / A* / IDA* / beam search whose depth grows with the instance;
+- whole-state-space search;
+- generic solving from scratch per row;
+- non-deterministic random search;
+- returning `UNSOLVED` for bundled rows that the baseline solves;
+- provider-dependent behavior or non-standard-library dependencies.
+
+IMPLEMENTATION REQUIREMENTS
+- Keep the solver self-contained and standard-library only.
+- Preserve exact bundled-state solving first.
+- Every returned path for bundled rows must still solve to the central state.
+- Preserve the actual final-state replay contract.
+- Keep runtime comfortably practical on the full bundled set.
+- Prefer readable, well-factored helpers.
+- Add comments only where they explain invariants or non-obvious correctness constraints.
+
+EDIT TARGETS / HIGH-LEVERAGE AREAS
+The best edits are likely in helpers such as:
+- `_short_word_data`
+- `_reduce_commuting_word`
+- `_optimize_local_windows`
+- `_best_local_rewrite`
+- `_optimize_word`
+- any packed-permutation helpers
+- exact bundled lookup / optimized lookup loading
+- any new helper that evaluates multiple deterministic optimizer policies
+
+QUALITY BAR FOR THIS MASTER VARIANT
+This variant should be stronger and more synthesis-heavy than `heuristic_boosted`:
+- keep exact lookup first;
+- keep the bounded local-rewrite philosophy;
+- add multi-policy candidate sweeps;
+- add small-support commutator/conjugate mining as a local rewrite source only;
+- add more deliberate shortest-representative handling for exact local effects;
+- preserve polynomial-time guarantees by keeping all radii, windows, candidate banks, and pass counts fixed constants.
+
+OUTPUT CONTRACT
+Return exactly one complete Python file inside one ```python``` block and nothing else.
+The file must be ready to save as `solve_module.py`.

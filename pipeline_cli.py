@@ -2540,7 +2540,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--competition", required=True, help="Competition slug / pipeline key")
     sp.add_argument("--out", required=True, help="Output path for generated solver")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
-    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted"], help="Select a competition prompt bundle variant when available")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override AgentLaboratory custom prompts JSON")
     sp.add_argument(
         "--models",
@@ -2618,7 +2618,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--puzzles", required=False, default=None, help="Input puzzles/test CSV (optional; uses bundled competitions/<slug>/data/test.csv if omitted)")
     sp.add_argument("--output", required=True, help="Submission CSV output")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
-    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted"], help="Select a competition prompt bundle variant when available")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override custom prompts JSON")
     sp.add_argument(
         "--models",
