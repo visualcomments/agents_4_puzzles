@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
 import io
 import json
 import math
@@ -1570,6 +1571,89 @@ def _validator_timeout_s() -> float:
         return 20.0
 
 
+def _parse_int_list(text: str) -> List[int]:
+    return [int(part.strip()) for part in str(text).split(',') if part.strip() != '']
+
+
+def _extract_state_from_row(row: Dict[str, str]) -> Optional[List[int]]:
+    preferred_keys = ("initial_state", "vector", "permutation", "state")
+    for key in preferred_keys:
+        raw = row.get(key)
+        if raw is None or str(raw).strip() == '':
+            continue
+        try:
+            return _parse_int_list(str(raw))
+        except Exception:
+            continue
+
+    non_empty = {k: v for k, v in row.items() if v is not None and str(v).strip() != ''}
+    if len(non_empty) == 1:
+        try:
+            return _parse_int_list(next(iter(non_empty.values())))
+        except Exception:
+            return None
+
+    for key, value in non_empty.items():
+        if key.lower() in {"id", "index", "initial_state_id", "puzzle_id"}:
+            continue
+        try:
+            return _parse_int_list(str(value))
+        except Exception:
+            continue
+    return None
+
+
+def resolve_validator_smoke_vectors(validator_path: Path, *, extra_rows: int = 2) -> List[List[int]]:
+    vectors: List[List[int]] = []
+    seen: set[Tuple[int, ...]] = set()
+
+    def _add(vec: Optional[Sequence[int]]) -> None:
+        if vec is None:
+            return
+        norm = [int(x) for x in vec]
+        if not norm:
+            return
+        sig = tuple(norm)
+        if sig in seen:
+            return
+        seen.add(sig)
+        vectors.append(norm)
+
+    validator_dir = validator_path.resolve().parent
+    candidate_csvs = [
+        validator_dir / 'data' / 'test.csv',
+        validator_dir / 'data' / 'puzzles.csv',
+        validator_dir / 'test.csv',
+        validator_dir / 'puzzles.csv',
+    ]
+
+    for csv_path in candidate_csvs:
+        if not csv_path.exists():
+            continue
+        try:
+            with csv_path.open(newline='', encoding='utf-8', errors='ignore') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    vec = _extract_state_from_row(row)
+                    if vec:
+                        _add(vec)
+                    if len(vectors) >= 1 + max(0, int(extra_rows)):
+                        return vectors
+        except Exception:
+            continue
+
+    fallback_tests: List[List[int]] = [
+        [3, 1, 2, 5, 4],
+        [1, 2, 3, 4],
+        [4, 3, 2, 1],
+        [2, 0, 3, 1],
+        [10, -1, 7, 3, 5],
+    ]
+    for vec in fallback_tests:
+        _add(vec)
+    return vectors
+
+
 def validate_solver_contract(code: str) -> Tuple[bool, str]:
     try:
         tree = ast.parse(code)
@@ -2526,13 +2610,8 @@ def main() -> None:
         log_status(f"[+] Wrote baseline solver to {out_path}")
         sys.exit(0)
 
-    tests: List[List[int]] = [
-        [3, 1, 2, 5, 4],
-        [1, 2, 3, 4],
-        [4, 3, 2, 1],
-        [2, 0, 3, 1],
-        [10, -1, 7, 3, 5],
-    ]
+    tests = resolve_validator_smoke_vectors(validator_path)
+    log_status(f"[validate] prepared {len(tests)} smoke vector(s) from {validator_path.parent}")
 
     generation_reports: List[str] = []
     archive = CandidateArchive(max_items=archive_size)

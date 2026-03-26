@@ -411,3 +411,25 @@ def test_try_generate_with_model_forwards_plan_payload_to_fixer(monkeypatch, tmp
     assert captured['plan_payload']['strategy_family'] == 'stronger_exact_table'
     assert captured['strategy_package']['strategy_family'] == 'stronger_exact_table'
     assert 'Algorithm family' in captured['plan']
+
+
+def test_resolve_validator_smoke_vectors_prefers_competition_dataset():
+    validator = (ROOT / 'competitions' / 'cayley-py-megaminx' / 'validate_solve_output.py').resolve()
+    vectors = rpp.resolve_validator_smoke_vectors(validator)
+    assert len(vectors) >= 2
+    assert all(len(vec) == 120 for vec in vectors[:2])
+
+
+def test_megaminx_baseline_fails_generic_tests_but_passes_resolved_smoke_vectors():
+    validator = (ROOT / 'competitions' / 'cayley-py-megaminx' / 'validate_solve_output.py').resolve()
+    solver = (ROOT / 'competitions' / 'cayley-py-megaminx' / 'solve_module.py').resolve()
+
+    generic_tests = [
+        [3, 1, 2, 5, 4],
+        [1, 2, 3, 4],
+    ]
+    generic_ok, _ = rpp.validate_solver_suite(validator, solver, generic_tests)
+    assert generic_ok is False
+
+    resolved_ok, report = rpp.validate_solver_suite(validator, solver, rpp.resolve_validator_smoke_vectors(validator))
+    assert resolved_ok is True, report
