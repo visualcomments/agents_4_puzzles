@@ -600,8 +600,11 @@ def _combined_plan_score(
     *,
     parent: Optional[PlanCandidate] = None,
     archive_summary: str = "",
+    structured_payload: bool = True,
 ) -> float:
-    score = _plan_quality_score(plan_text) + _score_plan_payload(plan_payload)
+    score = _plan_quality_score(plan_text)
+    if structured_payload:
+        score += _score_plan_payload(plan_payload)
     low = str(plan_text or "").lower()
     if archive_summary:
         if "avoid" in low or "do not repeat" in low or "failure" in low or "regression" in low:
@@ -759,7 +762,7 @@ def generate_plan_candidates(
         plan_payload = _normalize_structured_plan(parsed_payload, strategy_package) if isinstance(parsed_payload, dict) else _fallback_structured_plan(raw_plan_text, strategy_package)
         plan_text = _render_structured_plan(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text
         signature = _plan_signature(_structured_plan_json(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text)
-        score = _combined_plan_score(plan_text, plan_payload, archive_summary=archive_summary)
+        score = _combined_plan_score(plan_text, plan_payload, archive_summary=archive_summary, structured_payload=isinstance(parsed_payload, dict))
         candidate = PlanCandidate(
             plan_text=plan_text,
             planner_model=model,
@@ -873,7 +876,7 @@ def generate_refined_plan_candidates(
         plan_payload = _normalize_structured_plan(parsed_payload, strategy_package) if isinstance(parsed_payload, dict) else _fallback_structured_plan(raw_plan_text, strategy_package)
         plan_text = _render_structured_plan(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text
         signature = _plan_signature(_structured_plan_json(plan_payload) if isinstance(parsed_payload, dict) else raw_plan_text)
-        score = _combined_plan_score(plan_text, plan_payload, parent=parent, archive_summary=archive_summary)
+        score = _combined_plan_score(plan_text, plan_payload, parent=parent, archive_summary=archive_summary, structured_payload=isinstance(parsed_payload, dict))
         if signature == _plan_signature(_structured_plan_json(parent.planner_payload) if isinstance(parent.planner_payload, dict) else parent.plan_text):
             continue
         if score <= (parent.score + min_improvement):
