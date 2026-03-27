@@ -1875,6 +1875,7 @@ def _generate_solver_with_optional_improvement(
     competition_format_slug: str,
     vector_col_override: Optional[str] = None,
     max_rows: Optional[int] = None,
+    validated_round_hook: Optional[Callable[[int, Path], Optional[Dict[str, Any]]]] = None,
 ) -> dict[str, Any]:
     smoke_vectors = _resolve_smoke_vectors(spec)
     scoring_enabled = bool(keep_improving and puzzles_csv_for_score is not None)
@@ -1900,6 +1901,7 @@ def _generate_solver_with_optional_improvement(
 
     best_candidate_path: Optional[Path] = None
     best_round: Optional[int] = None
+    submitted_rounds: list[int] = []
 
     for round_idx in range(1, rounds + 1):
         candidate_path = out_path if (not keep_improving and round_idx == 1) else out_path.parent / f'{out_path.stem}.round{round_idx}{out_path.suffix}'
@@ -1938,6 +1940,12 @@ def _generate_solver_with_optional_improvement(
         )
         _validate_solver(candidate_path, spec.validator, smoke_vectors)
 
+        round_hook_result: Optional[Dict[str, Any]] = None
+        if validated_round_hook is not None:
+            round_hook_result = validated_round_hook(round_idx, candidate_path)
+            if isinstance(round_hook_result, dict) and round_hook_result.get('submitted'):
+                submitted_rounds.append(round_idx)
+
         candidate_score: Optional[int] = None
         if scoring_enabled and puzzles_csv_for_score is not None:
             candidate_score = _score_solver_with_submission(
@@ -1958,7 +1966,13 @@ def _generate_solver_with_optional_improvement(
         else:
             accepted = True
 
-        score_history.append({'round': round_idx, 'score': candidate_score, 'accepted': accepted, 'path': str(candidate_path)})
+        score_history.append({
+            'round': round_idx,
+            'score': candidate_score,
+            'accepted': accepted,
+            'path': str(candidate_path),
+            'post_validation': round_hook_result,
+        })
 
         if accepted:
             if candidate_path != out_path:
@@ -1985,6 +1999,8 @@ def _generate_solver_with_optional_improvement(
         'scoring_enabled': scoring_enabled,
         'history': score_history,
         'rounds_requested': rounds,
+        'submitted_rounds': submitted_rounds,
+        'selected_round_already_submitted': best_round in submitted_rounds if best_round is not None else False,
     }
 
 
@@ -2262,6 +2278,8 @@ def cmd_build_submission(args: argparse.Namespace) -> None:
     except Exception:
         sample_for_log = None
 
+    allowed_moves = _load_allowed_moves_from_validator(spec.validator)
+
     try:
         if candidate_out.exists():
             candidate_out.unlink()
@@ -2282,7 +2300,6 @@ def cmd_build_submission(args: argparse.Namespace) -> None:
         report["stages"]["build_submission"]["seconds"] = report["stages"]["build_submission"]["end"] - report["stages"]["build_submission"]["start"]
         _stage_done("build submission", t2)
 
-        allowed_moves = _load_allowed_moves_from_validator(spec.validator)
         if allowed_moves:
             tmc = _stage("content check")
             report["stages"]["content_check"] = {"start": time.time()}
@@ -2490,6 +2507,86 @@ def cmd_run(args: argparse.Namespace) -> None:
     except Exception:
         sample_for_log = None
 
+    if args.submit and not args.message:
+        raise SystemExit("--submit requires --message")
+
+    improvement_result: dict[str, Any] | None = None
+    per_round_submit_reports: list[dict[str, Any]] = []
+    do_schema_check = (args.submit or args.schema_check) and (not args.no_schema_check)
+    allowed_moves = _load_allowed_moves_from_validator(spec.validator)
+    move_column, joiner = _resolve_submission_move_column(args.format or spec.competition)
+    schema_sample: Path | None = None
+    if do_schema_check:
+        try:
+            schema_sample = _resolve_sample_submission(spec)
+        except Exception:
+            schema_sample = None
+    submit_during_improvement = bool(args.submit and args.keep_improving and not args.no_llm)
+    callback_state = {'schema_warning_emitted': False}
+
+    def _validated_round_hook(round_idx: int, candidate_solver_path: Path) -> dict[str, Any]:
+        round_submission_csv = candidate_out.parent / f'{candidate_out.stem}.round{round_idx}{candidate_out.suffix}'
+        if round_submission_csv.exists():
+            round_submission_csv.unlink()
+
+        print(f"[improve] round {round_idx}: build submission before next iteration", flush=True)
+        _build_submission(
+            puzzles_csv=puzzles_csv,
+            out_csv=round_submission_csv,
+            competition_format_slug=args.format or spec.format_slug,
+            solver_path=candidate_solver_path,
+            spec=spec,
+            vector_col_override=args.vector_col,
+            max_rows=args.max_rows,
+            no_progress=True,
+        )
+
+        round_result: dict[str, Any] = {
+            'round': round_idx,
+            'submission_csv': str(round_submission_csv),
+            'submitted': False,
+        }
+
+        if allowed_moves:
+            round_result['move_validation'] = _validate_submission_move_tokens(
+                submission_csv=round_submission_csv,
+                move_column=move_column,
+                allowed_moves=allowed_moves,
+                joiner=joiner,
+            )
+
+        if do_schema_check:
+            if schema_sample is None:
+                if not callback_state['schema_warning_emitted']:
+                    print(f"[schema] WARNING: no bundled sample_submission.csv found for '{spec.key}'. Skipping.")
+                    callback_state['schema_warning_emitted'] = True
+            else:
+                round_result['schema'] = {
+                    'sample': str(schema_sample),
+                    **_validate_submission_schema(
+                        submission_csv=round_submission_csv,
+                        sample_submission_csv=schema_sample,
+                        check_ids=(not args.no_schema_check_ids),
+                    ),
+                }
+
+        if submit_during_improvement:
+            submit_comp = args.submit_competition or spec.competition
+            round_message = args.message if max(1, int(args.improvement_rounds)) <= 1 else f"{args.message} [round {round_idx}/{max(1, int(args.improvement_rounds))}]"
+            print(f"[improve] round {round_idx}: submit to Kaggle before next iteration", flush=True)
+            round_result['kaggle_submit'] = _kaggle_submit(
+                competition=submit_comp,
+                submission_csv=round_submission_csv,
+                message=round_message,
+                kaggle_json=args.kaggle_json,
+                submit_via=args.submit_via,
+                kaggle_config_dir=args.kaggle_config_dir,
+            )
+            round_result['submitted'] = True
+            per_round_submit_reports.append(round_result)
+
+        return round_result
+
     try:
         t0 = _stage("generate solver")
         report["stages"]["generate_solver"] = {"start": time.time()}
@@ -2532,8 +2629,11 @@ def cmd_run(args: argparse.Namespace) -> None:
                 competition_format_slug=args.format or spec.format_slug,
                 vector_col_override=args.vector_col,
                 max_rows=args.max_rows,
+                validated_round_hook=_validated_round_hook if submit_during_improvement else None,
             )
             report['stages']['generate_solver']['improvement'] = improvement_result
+            if per_round_submit_reports:
+                report['round_kaggle_submissions'] = per_round_submit_reports
 
         report["stages"]["generate_solver"]["end"] = time.time()
         report["stages"]["generate_solver"]["seconds"] = report["stages"]["generate_solver"]["end"] - report["stages"]["generate_solver"]["start"]
@@ -2584,20 +2684,18 @@ def cmd_run(args: argparse.Namespace) -> None:
             _stage_done("content check", tmc)
 
         # Schema check (auto before submit; optional otherwise)
-        do_schema_check = (args.submit or args.schema_check) and (not args.no_schema_check)
         if do_schema_check:
-            sample = _resolve_sample_submission(spec)
-            if sample is None:
+            if schema_sample is None:
                 print(f"[schema] WARNING: no bundled sample_submission.csv found for '{spec.key}'. Skipping.")
             else:
                 tsc = _stage("schema check")
                 report["stages"]["schema_check"] = {"start": time.time()}
                 stats = _validate_submission_schema(
                     submission_csv=candidate_out,
-                    sample_submission_csv=sample,
+                    sample_submission_csv=schema_sample,
                     check_ids=(not args.no_schema_check_ids),
                 )
-                report["schema"] = {"sample": str(sample), **stats}
+                report["schema"] = {"sample": str(schema_sample), **stats}
                 report["stages"]["schema_check"]["end"] = time.time()
                 report["stages"]["schema_check"]["seconds"] = report["stages"]["schema_check"]["end"] - report["stages"]["schema_check"]["start"]
                 _stage_done("schema check", tsc)
@@ -2606,24 +2704,32 @@ def cmd_run(args: argparse.Namespace) -> None:
 
         # Optionally submit to Kaggle
         if args.submit:
-            if not args.message:
-                raise SystemExit("--submit requires --message")
-
-            t3 = _stage("submit to Kaggle")
-            report["stages"]["submit_kaggle"] = {"start": time.time()}
-            submit_comp = args.submit_competition or spec.competition
-            kaggle_submit_report = _kaggle_submit(
-                competition=submit_comp,
-                submission_csv=out_csv,
-                message=args.message,
-                kaggle_json=args.kaggle_json,
-                submit_via=args.submit_via,
-                kaggle_config_dir=args.kaggle_config_dir,
-            )
-            report["kaggle_submit"] = kaggle_submit_report
-            report["stages"]["submit_kaggle"]["end"] = time.time()
-            report["stages"]["submit_kaggle"]["seconds"] = report["stages"]["submit_kaggle"]["end"] - report["stages"]["submit_kaggle"]["start"]
-            _stage_done("submit to Kaggle", t3)
+            if submit_during_improvement and improvement_result is not None and improvement_result.get('selected_round_already_submitted'):
+                report["kaggle_submit"] = {
+                    "mode": "already_submitted_in_round",
+                    "selected_round": improvement_result.get('best_round'),
+                    "submitted_rounds": improvement_result.get('submitted_rounds', []),
+                }
+                print(
+                    f"[kaggle] final selected solver was already submitted during improvement round {improvement_result.get('best_round')}; skipping duplicate final submit.",
+                    flush=True,
+                )
+            else:
+                t3 = _stage("submit to Kaggle")
+                report["stages"]["submit_kaggle"] = {"start": time.time()}
+                submit_comp = args.submit_competition or spec.competition
+                kaggle_submit_report = _kaggle_submit(
+                    competition=submit_comp,
+                    submission_csv=out_csv,
+                    message=args.message,
+                    kaggle_json=args.kaggle_json,
+                    submit_via=args.submit_via,
+                    kaggle_config_dir=args.kaggle_config_dir,
+                )
+                report["kaggle_submit"] = kaggle_submit_report
+                report["stages"]["submit_kaggle"]["end"] = time.time()
+                report["stages"]["submit_kaggle"]["seconds"] = report["stages"]["submit_kaggle"]["end"] - report["stages"]["submit_kaggle"]["start"]
+                _stage_done("submit to Kaggle", t3)
 
         report["status"] = "ok"
         print("[run] Done.")
