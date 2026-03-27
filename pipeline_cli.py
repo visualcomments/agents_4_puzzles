@@ -1315,8 +1315,20 @@ def _resolve_submission_move_column(competition_slug: str) -> tuple[str, str]:
     return str(cfg.moves_key or 'moves'), str(cfg.move_joiner or '.')
 
 
+def _append_label_before_suffixes(path: Path, label: str) -> Path:
+    suffixes = ''.join(path.suffixes)
+    if suffixes:
+        base_name = path.name[:-len(suffixes)]
+        return path.with_name(f'{base_name}{label}{suffixes}')
+    return path.with_name(path.name + label)
+
+
 def _candidate_output_path(out_csv: Path) -> Path:
-    return out_csv.with_name(out_csv.name + '.candidate')
+    return _append_label_before_suffixes(out_csv, '.candidate')
+
+
+def _round_submission_output_path(out_csv: Path, round_idx: int) -> Path:
+    return _append_label_before_suffixes(out_csv, f'.round{max(1, int(round_idx))}')
 
 
 def _backup_output_path(out_csv: Path) -> Path:
@@ -2885,7 +2897,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             )
 
     def _validated_round_hook(round_idx: int, candidate_solver_path: Path) -> dict[str, Any]:
-        round_submission_csv = candidate_out.parent / f'{candidate_out.stem}.round{round_idx}{candidate_out.suffix}'
+        round_submission_csv = _round_submission_output_path(out_csv, round_idx)
         if round_submission_csv.exists():
             round_submission_csv.unlink()
 

@@ -49,6 +49,24 @@ def test_finalize_submission_output_preserves_backup(tmp_path):
     assert not candidate.exists()
 
 
+def test_candidate_output_path_preserves_submit_extension(tmp_path):
+    out_csv = tmp_path / 'submission_best.csv'
+    candidate = pipeline_cli._candidate_output_path(out_csv)
+    round1 = pipeline_cli._round_submission_output_path(out_csv, 1)
+
+    assert candidate.name == 'submission_best.candidate.csv'
+    assert round1.name == 'submission_best.round1.csv'
+
+
+def test_candidate_output_path_preserves_multi_suffix_submit_extension(tmp_path):
+    out_csv = tmp_path / 'submission_best.csv.gz'
+    candidate = pipeline_cli._candidate_output_path(out_csv)
+    round2 = pipeline_cli._round_submission_output_path(out_csv, 2)
+
+    assert candidate.name == 'submission_best.candidate.csv.gz'
+    assert round2.name == 'submission_best.round2.csv.gz'
+
+
 def test_discover_default_kaggle_credentials_path_prefers_existing_files(tmp_path, monkeypatch):
     fake_home = tmp_path / 'home'
     kaggle_dir = fake_home / '.kaggle'
