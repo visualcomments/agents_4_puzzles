@@ -1908,86 +1908,112 @@ def _generate_solver_with_optional_improvement(
         candidate_path.parent.mkdir(parents=True, exist_ok=True)
         print(f'[improve] round {round_idx}/{rounds}: baseline={baseline_for_round} -> candidate={candidate_path}', flush=True)
 
-        _run_agent_laboratory(
-            prompt_file=prompt_file,
-            out_path=candidate_path,
-            validator=spec.validator,
-            baseline=baseline_for_round,
-            custom_prompts=custom_prompts,
-            llm=llm,
-            agent_models=agent_models,
-            planner_models=planner_models,
-            coder_models=coder_models,
-            fixer_models=fixer_models,
-            search_mode=search_mode,
-            plan_beam_width=plan_beam_width,
-            frontier_width=frontier_width,
-            archive_size=archive_size,
-            refine_rounds=refine_rounds,
-            max_iters=max_iters,
-            no_llm=False,
-            allow_baseline=allow_baseline,
-            g4f_recovery_rounds=g4f_recovery_rounds,
-            g4f_recovery_max_iters=g4f_recovery_max_iters,
-            g4f_recovery_sleep=g4f_recovery_sleep,
-            worker_no_kill_process_group=worker_no_kill_process_group,
-            print_generation=print_generation,
-            print_generation_max_chars=print_generation_max_chars,
-            g4f_async=g4f_async,
-            max_response_chars=max_response_chars,
-            g4f_request_timeout=g4f_request_timeout,
-            g4f_stop_at_python_fence=g4f_stop_at_python_fence,
-        )
-        _validate_solver(candidate_path, spec.validator, smoke_vectors)
-
-        round_hook_result: Optional[Dict[str, Any]] = None
-        if validated_round_hook is not None:
-            round_hook_result = validated_round_hook(round_idx, candidate_path)
-            if isinstance(round_hook_result, dict) and round_hook_result.get('submitted'):
-                submitted_rounds.append(round_idx)
-
-        candidate_score: Optional[int] = None
-        if scoring_enabled and puzzles_csv_for_score is not None:
-            candidate_score = _score_solver_with_submission(
-                spec=spec,
-                solver_path=candidate_path,
-                puzzles_csv=puzzles_csv_for_score,
-                competition_format_slug=competition_format_slug,
-                vector_col_override=vector_col_override,
-                max_rows=max_rows,
+        try:
+            _run_agent_laboratory(
+                prompt_file=prompt_file,
+                out_path=candidate_path,
+                validator=spec.validator,
+                baseline=baseline_for_round,
+                custom_prompts=custom_prompts,
+                llm=llm,
+                agent_models=agent_models,
+                planner_models=planner_models,
+                coder_models=coder_models,
+                fixer_models=fixer_models,
+                search_mode=search_mode,
+                plan_beam_width=plan_beam_width,
+                frontier_width=frontier_width,
+                archive_size=archive_size,
+                refine_rounds=refine_rounds,
+                max_iters=max_iters,
+                no_llm=False,
+                allow_baseline=allow_baseline,
+                g4f_recovery_rounds=g4f_recovery_rounds,
+                g4f_recovery_max_iters=g4f_recovery_max_iters,
+                g4f_recovery_sleep=g4f_recovery_sleep,
+                worker_no_kill_process_group=worker_no_kill_process_group,
+                print_generation=print_generation,
+                print_generation_max_chars=print_generation_max_chars,
+                g4f_async=g4f_async,
+                max_response_chars=max_response_chars,
+                g4f_request_timeout=g4f_request_timeout,
+                g4f_stop_at_python_fence=g4f_stop_at_python_fence,
             )
-            print(f'[improve] round {round_idx}: local score = {candidate_score}', flush=True)
+            _validate_solver(candidate_path, spec.validator, smoke_vectors)
 
-        accepted = False
-        if not keep_improving:
-            accepted = True
-        elif scoring_enabled:
-            accepted = best_score is None or (candidate_score is not None and candidate_score < best_score)
-        else:
-            accepted = True
+            round_hook_result: Optional[Dict[str, Any]] = None
+            if validated_round_hook is not None:
+                round_hook_result = validated_round_hook(round_idx, candidate_path)
+                if isinstance(round_hook_result, dict) and round_hook_result.get('submitted'):
+                    submitted_rounds.append(round_idx)
 
-        score_history.append({
-            'round': round_idx,
-            'score': candidate_score,
-            'accepted': accepted,
-            'path': str(candidate_path),
-            'post_validation': round_hook_result,
-        })
+            candidate_score: Optional[int] = None
+            if scoring_enabled and puzzles_csv_for_score is not None:
+                candidate_score = _score_solver_with_submission(
+                    spec=spec,
+                    solver_path=candidate_path,
+                    puzzles_csv=puzzles_csv_for_score,
+                    competition_format_slug=competition_format_slug,
+                    vector_col_override=vector_col_override,
+                    max_rows=max_rows,
+                )
+                print(f'[improve] round {round_idx}: local score = {candidate_score}', flush=True)
 
-        if accepted:
-            if candidate_path != out_path:
-                shutil.copyfile(candidate_path, out_path)
-            baseline_for_round = out_path
-            best_candidate_path = out_path
-            best_round = round_idx
-            if scoring_enabled:
-                best_score = candidate_score
-                print(f'[improve] accepted round {round_idx} as new best local score.', flush=True)
-            elif keep_improving:
-                print(f'[improve] accepted round {round_idx} as the latest validated solver.', flush=True)
-        elif scoring_enabled:
-            print(f'[improve] round {round_idx} did not improve local score; keeping round {best_round} output.', flush=True)
-            break
+            accepted = False
+            if not keep_improving:
+                accepted = True
+            elif scoring_enabled:
+                accepted = best_score is None or (candidate_score is not None and candidate_score < best_score)
+            else:
+                accepted = True
+
+            score_history.append({
+                'round': round_idx,
+                'score': candidate_score,
+                'accepted': accepted,
+                'path': str(candidate_path),
+                'post_validation': round_hook_result,
+            })
+
+            if accepted:
+                if candidate_path != out_path:
+                    shutil.copyfile(candidate_path, out_path)
+                baseline_for_round = out_path
+                best_candidate_path = out_path
+                best_round = round_idx
+                if scoring_enabled:
+                    best_score = candidate_score
+                    print(f'[improve] accepted round {round_idx} as new best local score.', flush=True)
+                elif keep_improving:
+                    print(f'[improve] accepted round {round_idx} as the latest validated solver.', flush=True)
+            elif scoring_enabled:
+                print(f'[improve] round {round_idx} did not improve local score; keeping round {best_round} output and continuing.', flush=True)
+        except KeyboardInterrupt:
+            raise
+        except SystemExit as e:
+            if not keep_improving:
+                raise
+            score_history.append({
+                'round': round_idx,
+                'score': None,
+                'accepted': False,
+                'path': str(candidate_path),
+                'error': str(e),
+            })
+            print(f'[improve] round {round_idx} failed with SystemExit; continuing from best known solver: {e}', flush=True)
+            continue
+        except Exception as e:
+            if not keep_improving:
+                raise
+            score_history.append({
+                'round': round_idx,
+                'score': None,
+                'accepted': False,
+                'path': str(candidate_path),
+                'error': f'{type(e).__name__}: {e}',
+            })
+            print(f'[improve] round {round_idx} failed; continuing from best known solver: {type(e).__name__}: {e}', flush=True)
+            continue
 
     if best_candidate_path is None:
         shutil.copyfile(spec.baseline_solver, out_path)

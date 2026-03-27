@@ -135,7 +135,7 @@ def test_generate_solver_with_optional_improvement_keeps_best_local_score(tmp_pa
     assert out_path.read_text(encoding='utf-8') == 'round-1'
     assert result['best_score'] == 90
     assert result['best_round'] == 1
-    assert rounds['count'] == 2
+    assert rounds['count'] == 3
 
 
 def test_megaminx_regular_prompt_bundle_is_from_scratch_and_creative():
@@ -318,3 +318,170 @@ def test_cmd_run_skips_duplicate_final_submit_when_best_round_was_already_submit
     assert kaggle_calls[0]['competition'] == 'demo-kaggle'
     assert '[round 1/2]' in kaggle_calls[0]['message']
     assert Path(args.output).exists()
+
+
+def test_generate_solver_with_optional_improvement_does_not_stop_on_first_non_improving_round(tmp_path, monkeypatch):
+    baseline = tmp_path / 'baseline.py'
+    baseline.write_text('baseline', encoding='utf-8')
+    validator = tmp_path / 'validator.py'
+    validator.write_text('# validator', encoding='utf-8')
+    prompt_file = tmp_path / 'prompt.txt'
+    prompt_file.write_text('FROM SCRATCH\nCREATIVE_SCORE_SEARCH', encoding='utf-8')
+    out_path = tmp_path / 'solve_best.py'
+
+    spec = PipelineSpec(
+        key='demo',
+        competition='demo',
+        format_slug='format/moves-dot',
+        baseline_solver=baseline,
+        validator=validator,
+        prompt_file=prompt_file,
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+
+    rounds = {'count': 0}
+
+    def fake_run_agent_laboratory(**kwargs):
+        rounds['count'] += 1
+        Path(kwargs['out_path']).write_text(f'round-{rounds["count"]}', encoding='utf-8')
+
+    def fake_validate_solver(*args, **kwargs):
+        return None
+
+    def fake_score_solver_with_submission(**kwargs):
+        solver_path = Path(kwargs['solver_path'])
+        text = solver_path.read_text(encoding='utf-8')
+        if text == 'baseline':
+            return 100
+        if text == 'round-1':
+            return 90
+        if text == 'round-2':
+            return 95
+        if text == 'round-3':
+            return 85
+        raise AssertionError(text)
+
+    monkeypatch.setattr(pipeline_cli, '_run_agent_laboratory', fake_run_agent_laboratory)
+    monkeypatch.setattr(pipeline_cli, '_validate_solver', fake_validate_solver)
+    monkeypatch.setattr(pipeline_cli, '_score_solver_with_submission', fake_score_solver_with_submission)
+
+    result = pipeline_cli._generate_solver_with_optional_improvement(
+        spec=spec,
+        out_path=out_path,
+        prompt_file=prompt_file,
+        custom_prompts=None,
+        llm='gpt-4o-mini',
+        agent_models=None,
+        planner_models=None,
+        coder_models=None,
+        fixer_models=None,
+        search_mode='hybrid',
+        plan_beam_width=3,
+        frontier_width=6,
+        archive_size=6,
+        refine_rounds=1,
+        max_iters=2,
+        allow_baseline=False,
+        g4f_recovery_rounds=None,
+        g4f_recovery_max_iters=None,
+        g4f_recovery_sleep=None,
+        worker_no_kill_process_group=False,
+        print_generation=False,
+        print_generation_max_chars=None,
+        g4f_async=None,
+        max_response_chars=None,
+        g4f_request_timeout=None,
+        g4f_stop_at_python_fence=None,
+        keep_improving=True,
+        improvement_rounds=3,
+        puzzles_csv_for_score=tmp_path / 'test.csv',
+        competition_format_slug='format/moves-dot',
+    )
+
+    assert rounds['count'] == 3
+    assert out_path.read_text(encoding='utf-8') == 'round-3'
+    assert result['best_score'] == 85
+    assert result['best_round'] == 3
+
+
+
+def test_generate_solver_with_optional_improvement_continues_after_round_hook_system_exit(tmp_path, monkeypatch):
+    baseline = tmp_path / 'baseline.py'
+    baseline.write_text('baseline', encoding='utf-8')
+    validator = tmp_path / 'validator.py'
+    validator.write_text('# validator', encoding='utf-8')
+    prompt_file = tmp_path / 'prompt.txt'
+    prompt_file.write_text('FROM SCRATCH\nCREATIVE_SCORE_SEARCH', encoding='utf-8')
+    out_path = tmp_path / 'solve_best.py'
+
+    spec = PipelineSpec(
+        key='demo',
+        competition='demo',
+        format_slug='format/moves-dot',
+        baseline_solver=baseline,
+        validator=validator,
+        prompt_file=prompt_file,
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+
+    rounds = {'count': 0}
+
+    def fake_run_agent_laboratory(**kwargs):
+        rounds['count'] += 1
+        Path(kwargs['out_path']).write_text(f'round-{rounds["count"]}', encoding='utf-8')
+
+    def fake_validate_solver(*args, **kwargs):
+        return None
+
+    def round_hook(round_idx: int, _path: Path):
+        if round_idx == 1:
+            raise SystemExit('simulated submit failure')
+        return {'submitted': True, 'round': round_idx}
+
+    monkeypatch.setattr(pipeline_cli, '_run_agent_laboratory', fake_run_agent_laboratory)
+    monkeypatch.setattr(pipeline_cli, '_validate_solver', fake_validate_solver)
+
+    result = pipeline_cli._generate_solver_with_optional_improvement(
+        spec=spec,
+        out_path=out_path,
+        prompt_file=prompt_file,
+        custom_prompts=None,
+        llm='gpt-4o-mini',
+        agent_models=None,
+        planner_models=None,
+        coder_models=None,
+        fixer_models=None,
+        search_mode='hybrid',
+        plan_beam_width=3,
+        frontier_width=6,
+        archive_size=6,
+        refine_rounds=1,
+        max_iters=2,
+        allow_baseline=False,
+        g4f_recovery_rounds=None,
+        g4f_recovery_max_iters=None,
+        g4f_recovery_sleep=None,
+        worker_no_kill_process_group=False,
+        print_generation=False,
+        print_generation_max_chars=None,
+        g4f_async=None,
+        max_response_chars=None,
+        g4f_request_timeout=None,
+        g4f_stop_at_python_fence=None,
+        keep_improving=True,
+        improvement_rounds=2,
+        puzzles_csv_for_score=None,
+        competition_format_slug='format/moves-dot',
+        validated_round_hook=round_hook,
+    )
+
+    assert rounds['count'] == 2
+    assert out_path.read_text(encoding='utf-8') == 'round-2'
+    assert result['best_round'] == 2
+    assert result['submitted_rounds'] == [2]
+    assert result['selected_round_already_submitted'] is True
+    assert result['history'][0]['error'] == 'simulated submit failure'
