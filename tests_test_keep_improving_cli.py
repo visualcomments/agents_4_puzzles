@@ -485,3 +485,272 @@ def test_generate_solver_with_optional_improvement_continues_after_round_hook_sy
     assert result['submitted_rounds'] == [2]
     assert result['selected_round_already_submitted'] is True
     assert result['history'][0]['error'] == 'simulated submit failure'
+
+
+def test_resolve_effective_baseline_prefers_saved_adaptive_baseline_for_patch_prompt(tmp_path, monkeypatch):
+    old_root = pipeline_cli.ROOT
+    monkeypatch.setattr(pipeline_cli, 'ROOT', tmp_path)
+
+    spec = PipelineSpec(
+        key='demo-adaptive',
+        competition='demo-adaptive',
+        format_slug='format/moves-dot',
+        baseline_solver=tmp_path / 'baseline.py',
+        validator=tmp_path / 'validator.py',
+        prompt_file=tmp_path / 'prompt.txt',
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+    spec.baseline_solver.write_text('baseline', encoding='utf-8')
+    spec.validator.write_text('# validator', encoding='utf-8')
+    spec.prompt_file.write_text('Start from the exact baseline code below.', encoding='utf-8')
+
+    adaptive_paths = pipeline_cli._adaptive_baseline_paths(spec, spec.prompt_file, None)
+    adaptive_paths['root'].mkdir(parents=True, exist_ok=True)
+    adaptive_paths['solver'].write_text('adaptive', encoding='utf-8')
+    adaptive_paths['meta'].write_text('{"selection_metric": {"source": "local_score", "value": 77}}', encoding='utf-8')
+
+    effective, info = pipeline_cli._resolve_effective_baseline(spec, spec.prompt_file, None)
+
+    assert effective == adaptive_paths['solver']
+    assert info['enabled'] is True
+    assert info['adaptive_exists'] is True
+    assert info['selection_metric']['value'] == 77
+    monkeypatch.setattr(pipeline_cli, 'ROOT', old_root)
+
+
+
+def test_persist_adaptive_baseline_writes_local_score_manifest(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_cli, 'ROOT', tmp_path)
+
+    spec = PipelineSpec(
+        key='demo-local',
+        competition='demo-local',
+        format_slug='format/moves-dot',
+        baseline_solver=tmp_path / 'baseline.py',
+        validator=tmp_path / 'validator.py',
+        prompt_file=tmp_path / 'prompt.txt',
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+    spec.baseline_solver.write_text('baseline', encoding='utf-8')
+    spec.validator.write_text('# validator', encoding='utf-8')
+    spec.prompt_file.write_text('Start from the exact baseline code below.', encoding='utf-8')
+    candidate = tmp_path / 'candidate.py'
+    candidate.write_text('candidate-v1', encoding='utf-8')
+
+    manifest = pipeline_cli._persist_adaptive_baseline(
+        spec=spec,
+        prompt_file=spec.prompt_file,
+        custom_prompts=None,
+        solver_path=candidate,
+        round_idx=1,
+        local_score=80,
+        round_result=None,
+    )
+
+    assert manifest is not None
+    assert manifest['selection_metric']['source'] == 'local_score'
+    assert manifest['selection_metric']['value'] == 80.0
+    persisted_solver = Path(manifest['solver_path'])
+    assert persisted_solver.read_text(encoding='utf-8') == 'candidate-v1'
+
+    candidate.write_text('candidate-v2', encoding='utf-8')
+    manifest2 = pipeline_cli._persist_adaptive_baseline(
+        spec=spec,
+        prompt_file=spec.prompt_file,
+        custom_prompts=None,
+        solver_path=candidate,
+        round_idx=2,
+        local_score=85,
+        round_result=None,
+    )
+
+    assert manifest2 is None
+    assert persisted_solver.read_text(encoding='utf-8') == 'candidate-v1'
+
+
+
+def test_persist_adaptive_baseline_prefers_kaggle_score_when_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_cli, 'ROOT', tmp_path)
+
+    spec = PipelineSpec(
+        key='demo-kaggle-score',
+        competition='demo-kaggle-score',
+        format_slug='format/moves-dot',
+        baseline_solver=tmp_path / 'baseline.py',
+        validator=tmp_path / 'validator.py',
+        prompt_file=tmp_path / 'prompt.txt',
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+    spec.baseline_solver.write_text('baseline', encoding='utf-8')
+    spec.validator.write_text('# validator', encoding='utf-8')
+    spec.prompt_file.write_text('Start from the exact baseline code below.', encoding='utf-8')
+
+    paths = pipeline_cli._adaptive_baseline_paths(spec, spec.prompt_file, None)
+    paths['root'].mkdir(parents=True, exist_ok=True)
+    paths['solver'].write_text('old-best', encoding='utf-8')
+    paths['meta'].write_text(
+        '{"selection_metric": {"source": "local_score", "value": 80}, "solver_path": "%s"}' % str(paths['solver']).replace('\\', '\\\\'),
+        encoding='utf-8',
+    )
+
+    candidate = tmp_path / 'candidate.py'
+    candidate.write_text('new-best', encoding='utf-8')
+    round_result = {
+        'kaggle_submit': {
+            'status': {
+                'id': 'sub-123',
+                'status': 'complete',
+                'public_score': '70.0',
+                'private_score': '',
+            }
+        }
+    }
+
+    manifest = pipeline_cli._persist_adaptive_baseline(
+        spec=spec,
+        prompt_file=spec.prompt_file,
+        custom_prompts=None,
+        solver_path=candidate,
+        round_idx=3,
+        local_score=95,
+        round_result=round_result,
+    )
+
+    assert manifest is not None
+    assert manifest['selection_metric']['source'] == 'kaggle_public_score'
+    assert manifest['selection_metric']['value'] == 70.0
+    assert Path(manifest['solver_path']).read_text(encoding='utf-8') == 'new-best'
+
+
+def test_resolve_effective_baseline_enables_reference_only_ranked_reuse_for_regular_prompt(tmp_path, monkeypatch):
+    old_root = pipeline_cli.ROOT
+    monkeypatch.setattr(pipeline_cli, 'ROOT', tmp_path)
+
+    spec = PipelineSpec(
+        key='demo-regular',
+        competition='demo-regular',
+        format_slug='format/moves-dot',
+        baseline_solver=tmp_path / 'baseline.py',
+        validator=tmp_path / 'validator.py',
+        prompt_file=tmp_path / 'prompt.txt',
+        custom_prompts_file=tmp_path / 'custom.json',
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+    spec.baseline_solver.write_text('baseline', encoding='utf-8')
+    spec.validator.write_text('# validator', encoding='utf-8')
+    spec.prompt_file.write_text('Write the code from scratch. NO_BASELINE_PATCH_BIAS', encoding='utf-8')
+    spec.custom_prompts_file.write_text('baseline, if shown, is only a compatibility and score reference', encoding='utf-8')
+
+    adaptive_paths = pipeline_cli._adaptive_baseline_paths(spec, spec.prompt_file, spec.custom_prompts_file)
+    adaptive_paths['root'].mkdir(parents=True, exist_ok=True)
+    adaptive_paths['solver'].write_text('reference-best', encoding='utf-8')
+    adaptive_paths['meta'].write_text('{"selection_metric": {"source": "kaggle_public_score", "value": 70.0}}', encoding='utf-8')
+
+    effective, info = pipeline_cli._resolve_effective_baseline(spec, spec.prompt_file, spec.custom_prompts_file)
+
+    assert effective == adaptive_paths['solver']
+    assert info['enabled'] is True
+    assert info['from_scratch'] is True
+    assert info['uses_baseline'] is False
+    assert info['mode'] == 'reference_only'
+    monkeypatch.setattr(pipeline_cli, 'ROOT', old_root)
+
+
+
+def test_generate_solver_with_optional_improvement_prefers_kaggle_metric_for_regular_ranking(tmp_path, monkeypatch):
+    baseline = tmp_path / 'baseline.py'
+    baseline.write_text('baseline', encoding='utf-8')
+    validator = tmp_path / 'validator.py'
+    validator.write_text('# validator', encoding='utf-8')
+    prompt_file = tmp_path / 'prompt.txt'
+    prompt_file.write_text('FROM SCRATCH\nCREATIVE_SCORE_SEARCH\nNO_BASELINE_PATCH_BIAS', encoding='utf-8')
+    out_path = tmp_path / 'solve_best.py'
+
+    spec = PipelineSpec(
+        key='demo-regular-ranking',
+        competition='demo-regular-ranking',
+        format_slug='format/moves-dot',
+        baseline_solver=baseline,
+        validator=validator,
+        prompt_file=prompt_file,
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+
+    rounds = {'count': 0}
+
+    def fake_run_agent_laboratory(**kwargs):
+        rounds['count'] += 1
+        Path(kwargs['out_path']).write_text(f'round-{rounds["count"]}', encoding='utf-8')
+
+    def fake_validate_solver(*args, **kwargs):
+        return None
+
+    def fake_score_solver_with_submission(**kwargs):
+        solver_path = Path(kwargs['solver_path'])
+        text = solver_path.read_text(encoding='utf-8')
+        mapping = {
+            'baseline': 100,
+            'round-1': 90,
+            'round-2': 95,
+        }
+        return mapping[text]
+
+    def validated_round_hook(round_idx, candidate_solver_path):
+        statuses = {
+            1: {'id': 'sub-1', 'status': 'complete', 'public_score': '500', 'private_score': ''},
+            2: {'id': 'sub-2', 'status': 'complete', 'public_score': '450', 'private_score': ''},
+        }
+        return {'submitted': True, 'kaggle_submit': {'status': statuses[round_idx]}}
+
+    monkeypatch.setattr(pipeline_cli, '_run_agent_laboratory', fake_run_agent_laboratory)
+    monkeypatch.setattr(pipeline_cli, '_validate_solver', fake_validate_solver)
+    monkeypatch.setattr(pipeline_cli, '_score_solver_with_submission', fake_score_solver_with_submission)
+
+    result = pipeline_cli._generate_solver_with_optional_improvement(
+        spec=spec,
+        out_path=out_path,
+        prompt_file=prompt_file,
+        custom_prompts=None,
+        llm='gpt-4o-mini',
+        agent_models=None,
+        planner_models=None,
+        coder_models=None,
+        fixer_models=None,
+        search_mode='hybrid',
+        plan_beam_width=3,
+        frontier_width=6,
+        archive_size=6,
+        refine_rounds=1,
+        max_iters=2,
+        allow_baseline=False,
+        g4f_recovery_rounds=None,
+        g4f_recovery_max_iters=None,
+        g4f_recovery_sleep=None,
+        worker_no_kill_process_group=False,
+        print_generation=False,
+        print_generation_max_chars=None,
+        g4f_async=None,
+        max_response_chars=None,
+        g4f_request_timeout=None,
+        g4f_stop_at_python_fence=None,
+        keep_improving=True,
+        improvement_rounds=2,
+        puzzles_csv_for_score=tmp_path / 'test.csv',
+        competition_format_slug='format/moves-dot',
+        validated_round_hook=validated_round_hook,
+    )
+
+    assert rounds['count'] == 2
+    assert out_path.read_text(encoding='utf-8') == 'round-2'
+    assert result['best_round'] == 2
+    assert result['best_metric']['source'] == 'kaggle_public_score'
+    assert result['best_metric']['value'] == 450.0

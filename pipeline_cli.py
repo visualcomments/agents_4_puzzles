@@ -880,6 +880,234 @@ def _resolve_prompt_bundle(spec: PipelineSpec, args: argparse.Namespace) -> tupl
     return prompt_file, custom_prompts
 
 
+def _safe_read_text(path: Optional[Path]) -> str:
+    if path is None or not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        return ""
+
+
+def _prompt_bundle_requests_from_scratch(prompt_file: Path, custom_prompts: Optional[Path] = None) -> bool:
+    text = ("\n".join([_safe_read_text(prompt_file), _safe_read_text(custom_prompts)])).lower()
+    markers = [
+        'from scratch',
+        'no_baseline_patch_bias',
+        'do not rely on, patch, wrap, or extend any baseline',
+        'write the code from scratch',
+        'fresh solver from scratch',
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _prompt_bundle_uses_baseline(prompt_file: Path, custom_prompts: Optional[Path] = None) -> bool:
+    if _prompt_bundle_requests_from_scratch(prompt_file, custom_prompts):
+        return False
+    text = ("\n".join([_safe_read_text(prompt_file), _safe_read_text(custom_prompts)])).lower()
+    return 'baseline' in text
+
+
+def _prompt_bundle_supports_ranked_reuse(prompt_file: Path, custom_prompts: Optional[Path] = None) -> bool:
+    return _prompt_bundle_uses_baseline(prompt_file, custom_prompts) or _prompt_bundle_requests_from_scratch(prompt_file, custom_prompts)
+
+
+def _adaptive_baseline_bundle_slug(prompt_file: Path, custom_prompts: Optional[Path] = None) -> str:
+    pieces = [prompt_file.stem]
+    if custom_prompts is not None:
+        pieces.append(custom_prompts.stem)
+    raw = '__'.join(pieces).strip().lower()
+    slug = re.sub(r'[^a-z0-9._-]+', '-', raw).strip('-._')
+    return slug or 'default'
+
+
+def _adaptive_baseline_paths(spec: PipelineSpec, prompt_file: Path, custom_prompts: Optional[Path] = None) -> dict[str, Path]:
+    slug = _adaptive_baseline_bundle_slug(prompt_file, custom_prompts)
+    root = ROOT / 'competitions' / spec.key / 'generated' / 'adaptive_baselines'
+    return {
+        'root': root,
+        'solver': root / f'{slug}.py',
+        'meta': root / f'{slug}.json',
+    }
+
+
+def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _parse_score_value(raw: Any) -> Optional[float]:
+    if raw in (None, '', 'None'):
+        return None
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        return None
+
+
+def _extract_kaggle_score_info(round_result: Optional[dict[str, Any]]) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        'submission_id': None,
+        'status': None,
+        'public_score': None,
+        'private_score': None,
+        'leaderboard_score': None,
+        'leaderboard_score_source': None,
+        'error_description': None,
+    }
+    if not isinstance(round_result, dict):
+        return info
+    submit_report = round_result.get('kaggle_submit') if isinstance(round_result.get('kaggle_submit'), dict) else None
+    status = submit_report.get('status') if isinstance(submit_report, dict) and isinstance(submit_report.get('status'), dict) else None
+    if not isinstance(status, dict):
+        return info
+
+    public_score = _parse_score_value(status.get('public_score', status.get('publicScore')))
+    private_score = _parse_score_value(status.get('private_score', status.get('privateScore')))
+    leaderboard_score = public_score if public_score is not None else private_score
+    leaderboard_source = 'public_score' if public_score is not None else ('private_score' if private_score is not None else None)
+
+    info.update({
+        'submission_id': status.get('id') or status.get('ref'),
+        'status': status.get('status') or status.get('state'),
+        'public_score': public_score,
+        'private_score': private_score,
+        'leaderboard_score': leaderboard_score,
+        'leaderboard_score_source': leaderboard_source,
+        'error_description': status.get('error_description') or status.get('errorDescription'),
+    })
+    return info
+
+
+def _adaptive_metric_from_round(*, local_score: Optional[int], round_result: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    kaggle_info = _extract_kaggle_score_info(round_result)
+    leaderboard_score = kaggle_info.get('leaderboard_score')
+    if leaderboard_score is not None:
+        return {
+            'source': f"kaggle_{kaggle_info.get('leaderboard_score_source') or 'score'}",
+            'value': float(leaderboard_score),
+            'submission_id': kaggle_info.get('submission_id'),
+            'status': kaggle_info.get('status'),
+            'public_score': kaggle_info.get('public_score'),
+            'private_score': kaggle_info.get('private_score'),
+        }
+    if local_score is not None:
+        return {
+            'source': 'local_score',
+            'value': float(local_score),
+        }
+    return None
+
+
+_ADAPTIVE_METRIC_PRIORITY = {
+    'kaggle_public_score': 3,
+    'kaggle_private_score': 2,
+    'kaggle_score': 2,
+    'local_score': 1,
+}
+
+
+def _is_better_metric(current_metric: Optional[dict[str, Any]], candidate_metric: Optional[dict[str, Any]]) -> bool:
+    if not candidate_metric:
+        return False
+    if not isinstance(current_metric, dict) or not current_metric:
+        return True
+
+    current_priority = int(_ADAPTIVE_METRIC_PRIORITY.get(str(current_metric.get('source') or ''), 0))
+    candidate_priority = int(_ADAPTIVE_METRIC_PRIORITY.get(str(candidate_metric.get('source') or ''), 0))
+    if candidate_priority != current_priority:
+        return candidate_priority > current_priority
+
+    current_value = _parse_score_value(current_metric.get('value'))
+    candidate_value = _parse_score_value(candidate_metric.get('value'))
+    if current_value is None:
+        return candidate_value is not None
+    if candidate_value is None:
+        return False
+    return candidate_value < current_value
+
+
+def _should_promote_adaptive_baseline(current_meta: Optional[dict[str, Any]], candidate_metric: Optional[dict[str, Any]]) -> bool:
+    if not candidate_metric:
+        return False
+    if not isinstance(current_meta, dict):
+        return True
+
+    current_metric = current_meta.get('selection_metric') if isinstance(current_meta.get('selection_metric'), dict) else None
+    return _is_better_metric(current_metric, candidate_metric)
+
+
+def _resolve_effective_baseline(spec: PipelineSpec, prompt_file: Path, custom_prompts: Optional[Path] = None) -> tuple[Path, dict[str, Any]]:
+    uses_baseline = _prompt_bundle_uses_baseline(prompt_file, custom_prompts)
+    from_scratch = _prompt_bundle_requests_from_scratch(prompt_file, custom_prompts)
+    supports_ranked_reuse = _prompt_bundle_supports_ranked_reuse(prompt_file, custom_prompts)
+    paths = _adaptive_baseline_paths(spec, prompt_file, custom_prompts)
+    meta = _read_json_file(paths['meta'])
+    adaptive_solver = paths['solver']
+    effective_baseline = adaptive_solver if supports_ranked_reuse and adaptive_solver.exists() else spec.baseline_solver
+    mode = 'baseline_patch' if uses_baseline else ('reference_only' if from_scratch else 'disabled')
+    info = {
+        'enabled': supports_ranked_reuse,
+        'from_scratch': from_scratch,
+        'uses_baseline': uses_baseline,
+        'mode': mode,
+        'bundle_slug': _adaptive_baseline_bundle_slug(prompt_file, custom_prompts),
+        'effective_baseline': str(effective_baseline),
+        'default_baseline': str(spec.baseline_solver),
+        'adaptive_solver': str(adaptive_solver),
+        'adaptive_meta': str(paths['meta']),
+        'adaptive_exists': adaptive_solver.exists(),
+        'selection_metric': meta.get('selection_metric') if isinstance(meta, dict) else None,
+    }
+    return effective_baseline, info
+
+
+def _persist_adaptive_baseline(
+    *,
+    spec: PipelineSpec,
+    prompt_file: Path,
+    custom_prompts: Optional[Path],
+    solver_path: Path,
+    round_idx: int,
+    local_score: Optional[int],
+    round_result: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    metric = _adaptive_metric_from_round(local_score=local_score, round_result=round_result)
+    if metric is None:
+        return None
+
+    paths = _adaptive_baseline_paths(spec, prompt_file, custom_prompts)
+    current_meta = _read_json_file(paths['meta'])
+    if not _should_promote_adaptive_baseline(current_meta, metric):
+        return None
+
+    paths['root'].mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(solver_path, paths['solver'])
+    kaggle_info = _extract_kaggle_score_info(round_result)
+    manifest = {
+        'competition': spec.key,
+        'competition_slug': spec.competition,
+        'prompt_bundle': _adaptive_baseline_bundle_slug(prompt_file, custom_prompts),
+        'updated_at': datetime.now().isoformat(),
+        'solver_path': str(paths['solver']),
+        'source_solver_path': str(solver_path),
+        'round': round_idx,
+        'local_score': local_score,
+        'selection_metric': metric,
+        'kaggle': kaggle_info,
+        'prompt_file': str(prompt_file),
+        'custom_prompts': str(custom_prompts) if custom_prompts is not None else None,
+        'default_baseline': str(spec.baseline_solver),
+    }
+    paths['meta'].write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+    return manifest
+
+
 def _resolve_sample_submission(spec: PipelineSpec) -> Optional[Path]:
     """Locate sample_submission.csv, preferring the competition ZIP when present."""
     from_zip = _prefer_sample_submission_from_zip(spec)
@@ -1876,24 +2104,29 @@ def _generate_solver_with_optional_improvement(
     vector_col_override: Optional[str] = None,
     max_rows: Optional[int] = None,
     validated_round_hook: Optional[Callable[[int, Path], Optional[Dict[str, Any]]]] = None,
+    initial_baseline: Optional[Path] = None,
+    candidate_round_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
     smoke_vectors = _resolve_smoke_vectors(spec)
     scoring_enabled = bool(keep_improving and puzzles_csv_for_score is not None)
     rounds = max(1, int(improvement_rounds) if keep_improving else 1)
-    baseline_for_round = spec.baseline_solver
+    baseline_origin = initial_baseline or spec.baseline_solver
+    baseline_for_round = baseline_origin
     best_score: Optional[int] = None
+    best_metric: Optional[dict[str, Any]] = None
     score_history: list[dict[str, Any]] = []
 
     if scoring_enabled:
         try:
             best_score = _score_solver_with_submission(
                 spec=spec,
-                solver_path=spec.baseline_solver,
+                solver_path=baseline_origin,
                 puzzles_csv=puzzles_csv_for_score,
                 competition_format_slug=competition_format_slug,
                 vector_col_override=vector_col_override,
                 max_rows=max_rows,
             )
+            best_metric = _adaptive_metric_from_round(local_score=best_score, round_result=None)
             print(f'[improve] baseline local score = {best_score}', flush=True)
         except Exception as e:
             scoring_enabled = False
@@ -1959,17 +2192,34 @@ def _generate_solver_with_optional_improvement(
                 )
                 print(f'[improve] round {round_idx}: local score = {candidate_score}', flush=True)
 
+            if candidate_round_hook is not None:
+                try:
+                    candidate_round_hook({
+                        'round': round_idx,
+                        'candidate_path': str(candidate_path),
+                        'candidate_score': candidate_score,
+                        'post_validation': round_hook_result,
+                        'baseline_path': str(baseline_for_round),
+                    })
+                except KeyboardInterrupt:
+                    raise
+                except Exception as hook_exc:
+                    print(f'[improve] WARNING: candidate_round_hook failed for round {round_idx}: {type(hook_exc).__name__}: {hook_exc}', flush=True)
+
+            candidate_metric = _adaptive_metric_from_round(local_score=candidate_score, round_result=round_hook_result)
+
             accepted = False
             if not keep_improving:
                 accepted = True
             elif scoring_enabled:
-                accepted = best_score is None or (candidate_score is not None and candidate_score < best_score)
+                accepted = _is_better_metric(best_metric, candidate_metric)
             else:
                 accepted = True
 
             score_history.append({
                 'round': round_idx,
                 'score': candidate_score,
+                'metric': candidate_metric,
                 'accepted': accepted,
                 'path': str(candidate_path),
                 'post_validation': round_hook_result,
@@ -1983,11 +2233,16 @@ def _generate_solver_with_optional_improvement(
                 best_round = round_idx
                 if scoring_enabled:
                     best_score = candidate_score
-                    print(f'[improve] accepted round {round_idx} as new best local score.', flush=True)
+                    best_metric = candidate_metric
+                    metric_source = (candidate_metric or {}).get('source')
+                    metric_value = (candidate_metric or {}).get('value')
+                    print(f'[improve] accepted round {round_idx} as new best {metric_source}={metric_value}.', flush=True)
                 elif keep_improving:
                     print(f'[improve] accepted round {round_idx} as the latest validated solver.', flush=True)
             elif scoring_enabled:
-                print(f'[improve] round {round_idx} did not improve local score; keeping round {best_round} output and continuing.', flush=True)
+                current_metric_source = (best_metric or {}).get('source')
+                current_metric_value = (best_metric or {}).get('value')
+                print(f'[improve] round {round_idx} did not improve {current_metric_source}={current_metric_value}; keeping round {best_round} output and continuing.', flush=True)
         except KeyboardInterrupt:
             raise
         except SystemExit as e:
@@ -2016,17 +2271,19 @@ def _generate_solver_with_optional_improvement(
             continue
 
     if best_candidate_path is None:
-        shutil.copyfile(spec.baseline_solver, out_path)
+        shutil.copyfile(baseline_origin, out_path)
         best_candidate_path = out_path
 
     return {
         'best_score': best_score,
+        'best_metric': best_metric,
         'best_round': best_round,
         'scoring_enabled': scoring_enabled,
         'history': score_history,
         'rounds_requested': rounds,
         'submitted_rounds': submitted_rounds,
         'selected_round_already_submitted': best_round in submitted_rounds if best_round is not None else False,
+        'initial_baseline': str(baseline_origin),
     }
 
 
@@ -2225,15 +2482,46 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
 
     # Select prompt bundle (can be overridden, or switched via --prompt-variant)
     prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
+    effective_baseline, adaptive_baseline_info = _resolve_effective_baseline(spec, prompt_file, custom_prompts)
+
+    if adaptive_baseline_info.get('enabled'):
+        print(
+            f"[adaptive-baseline] using {adaptive_baseline_info.get('effective_baseline')} "
+            f"for bundle={adaptive_baseline_info.get('bundle_slug')}",
+            flush=True,
+        )
 
     if args.no_llm:
-        # Copy baseline
-        shutil.copyfile(spec.baseline_solver, out_path)
+        shutil.copyfile(effective_baseline, out_path)
         print(f"[generate-solver] --no-llm: copied baseline -> {out_path}")
         _validate_solver(out_path, spec.validator, _resolve_smoke_vectors(spec))
         return
 
     _gpu_diag_hint(args.models)
+
+    adaptive_updates: list[dict[str, Any]] = []
+
+    def _candidate_round_hook(payload: dict[str, Any]) -> None:
+        if not adaptive_baseline_info.get('enabled'):
+            return
+        solver_candidate = Path(str(payload['candidate_path']))
+        manifest = _persist_adaptive_baseline(
+            spec=spec,
+            prompt_file=prompt_file,
+            custom_prompts=custom_prompts,
+            solver_path=solver_candidate,
+            round_idx=int(payload['round']),
+            local_score=payload.get('candidate_score'),
+            round_result=payload.get('post_validation'),
+        )
+        if manifest is not None:
+            adaptive_updates.append(manifest)
+            metric = manifest.get('selection_metric') if isinstance(manifest.get('selection_metric'), dict) else {}
+            print(
+                f"[adaptive-baseline] promoted round {manifest.get('round')} -> {manifest.get('solver_path')} "
+                f"via {metric.get('source')}={metric.get('value')}",
+                flush=True,
+            )
 
     puzzles_for_score = _resolve_default_puzzles(spec) if args.keep_improving else None
     result = _generate_solver_with_optional_improvement(
@@ -2267,9 +2555,18 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         improvement_rounds=args.improvement_rounds,
         puzzles_csv_for_score=puzzles_for_score,
         competition_format_slug=spec.format_slug,
+        initial_baseline=effective_baseline,
+        candidate_round_hook=_candidate_round_hook if adaptive_baseline_info.get('enabled') else None,
     )
     if args.keep_improving:
         print(f"[improve] best_round={result.get('best_round')} best_score={result.get('best_score')}", flush=True)
+    if adaptive_updates:
+        latest_metric = adaptive_updates[-1].get('selection_metric') if isinstance(adaptive_updates[-1].get('selection_metric'), dict) else {}
+        print(
+            f"[adaptive-baseline] saved reusable baseline {adaptive_updates[-1].get('solver_path')} "
+            f"with {latest_metric.get('source')}={latest_metric.get('value')}",
+            flush=True,
+        )
 
 
 def cmd_build_submission(args: argparse.Namespace) -> None:
@@ -2549,6 +2846,43 @@ def cmd_run(args: argparse.Namespace) -> None:
             schema_sample = None
     submit_during_improvement = bool(args.submit and args.keep_improving and not args.no_llm)
     callback_state = {'schema_warning_emitted': False}
+    prompt_file: Path | None = None
+    custom_prompts: Path | None = None
+    effective_baseline = spec.baseline_solver
+    adaptive_baseline_info: dict[str, Any] = {'enabled': False}
+    adaptive_updates: list[dict[str, Any]] = []
+
+    if not args.no_llm:
+        prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
+        effective_baseline, adaptive_baseline_info = _resolve_effective_baseline(spec, prompt_file, custom_prompts)
+        report['adaptive_baseline'] = adaptive_baseline_info
+        if adaptive_baseline_info.get('enabled'):
+            print(
+                f"[adaptive-baseline] using {adaptive_baseline_info.get('effective_baseline')} "
+                f"for bundle={adaptive_baseline_info.get('bundle_slug')}",
+                flush=True,
+            )
+
+    def _candidate_round_hook(payload: dict[str, Any]) -> None:
+        if not adaptive_baseline_info.get('enabled') or prompt_file is None:
+            return
+        manifest = _persist_adaptive_baseline(
+            spec=spec,
+            prompt_file=prompt_file,
+            custom_prompts=custom_prompts,
+            solver_path=Path(str(payload['candidate_path'])),
+            round_idx=int(payload['round']),
+            local_score=payload.get('candidate_score'),
+            round_result=payload.get('post_validation'),
+        )
+        if manifest is not None:
+            adaptive_updates.append(manifest)
+            metric = manifest.get('selection_metric') if isinstance(manifest.get('selection_metric'), dict) else {}
+            print(
+                f"[adaptive-baseline] promoted round {manifest.get('round')} -> {manifest.get('solver_path')} "
+                f"via {metric.get('source')}={metric.get('value')}",
+                flush=True,
+            )
 
     def _validated_round_hook(round_idx: int, candidate_solver_path: Path) -> dict[str, Any]:
         round_submission_csv = candidate_out.parent / f'{candidate_out.stem}.round{round_idx}{candidate_out.suffix}'
@@ -2620,8 +2954,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             shutil.copyfile(spec.baseline_solver, solver_path)
             print(f"[run] --no-llm: copied baseline solver -> {solver_path}")
         else:
-            prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
-
+            assert prompt_file is not None
             improvement_result = _generate_solver_with_optional_improvement(
                 spec=spec,
                 out_path=solver_path,
@@ -2656,10 +2989,14 @@ def cmd_run(args: argparse.Namespace) -> None:
                 vector_col_override=args.vector_col,
                 max_rows=args.max_rows,
                 validated_round_hook=_validated_round_hook if submit_during_improvement else None,
+                initial_baseline=effective_baseline,
+                candidate_round_hook=_candidate_round_hook if adaptive_baseline_info.get('enabled') else None,
             )
             report['stages']['generate_solver']['improvement'] = improvement_result
             if per_round_submit_reports:
                 report['round_kaggle_submissions'] = per_round_submit_reports
+            if adaptive_updates:
+                report['adaptive_baseline_updates'] = adaptive_updates
 
         report["stages"]["generate_solver"]["end"] = time.time()
         report["stages"]["generate_solver"]["seconds"] = report["stages"]["generate_solver"]["end"] - report["stages"]["generate_solver"]["start"]
