@@ -1881,6 +1881,34 @@ def _strict_output_requirements(*, prefer_minimal_patch: bool) -> str:
     return '\n'.join(lines)
 
 
+_FROM_SCRATCH_MARKERS = (
+    'from scratch',
+    'no_baseline_patch_bias',
+    'write the code from scratch',
+    'do not rely on, patch, wrap, or extend any baseline implementation',
+)
+
+_CREATIVE_SCORE_MARKERS = (
+    'creative_score_search',
+    'creative score search',
+    'creative search',
+    'multiple candidate families',
+    'best local score',
+    'best bundled-data score',
+    'best bundled data score',
+)
+
+
+def _prompt_requests_from_scratch(user_prompt: str) -> bool:
+    lowered = str(user_prompt or '').lower()
+    return any(marker in lowered for marker in _FROM_SCRATCH_MARKERS)
+
+
+def _prompt_requests_creative_score_search(user_prompt: str) -> bool:
+    lowered = str(user_prompt or '').lower()
+    return any(marker in lowered for marker in _CREATIVE_SCORE_MARKERS)
+
+
 def build_initial_codegen_prompt(
     user_prompt: str,
     plan: str,
@@ -1890,6 +1918,8 @@ def build_initial_codegen_prompt(
     strategy_package: Optional[Dict[str, Any]] = None,
 ) -> str:
     max_plan_chars = _env_int("AGENTLAB_MAX_PLAN_PROMPT_CHARS", 12000)
+    from_scratch = _prompt_requests_from_scratch(user_prompt)
+    creative_score_search = _prompt_requests_creative_score_search(user_prompt)
     parts = [
         "## USER TASK",
         user_prompt,
@@ -1911,6 +1941,19 @@ def build_initial_codegen_prompt(
     )
     if baseline_code is None:
         parts.append('Now write the solver file as a bounded patch-consistent implementation.')
+    elif from_scratch:
+        parts.extend(
+            [
+                '## REFERENCE BASELINE (compatibility and score target only)',
+                f"```python\n{baseline_code}\n```",
+                (
+                    'Write a fresh solver from scratch. Use the reference baseline only to understand the compatibility contract, '
+                    'bundled-data expectations, and the current score target. Do NOT patch, wrap, subclass, or extend the baseline. '
+                    'Return a completely rewritten solver file that preserves the public entrypoints, stdout contract, dependency-free behavior, '
+                    'exact lookup first, and deterministic replay semantics.'
+                ),
+            ]
+        )
     else:
         parts.extend(
             [
@@ -1923,13 +1966,24 @@ def build_initial_codegen_prompt(
                 ),
             ]
         )
-    parts.extend(
-        [
-            '## IMPLEMENTATION RULES',
-            'Patch only the named edit targets unless another change is strictly required for correctness. Keep all search radii, window sizes, and pass counts bounded by constants.',
-            _strict_output_requirements(prefer_minimal_patch=baseline_code is not None),
-        ]
-    )
+    implementation_rules = [
+        '## IMPLEMENTATION RULES',
+        'Keep all search radii, window sizes, and pass counts bounded by constants.',
+    ]
+    if from_scratch:
+        implementation_rules.append(
+            'You may introduce new helper layers, data structures, and bounded rewrite passes if they remain deterministic, standard-library-only, and polynomial-time.'
+        )
+    else:
+        implementation_rules.append(
+            'Patch only the named edit targets unless another change is strictly required for correctness.'
+        )
+    if creative_score_search:
+        implementation_rules.append(
+            'Be creatively search-oriented within the bounded architecture: synthesize a small bank of deterministic candidate optimizers, evaluate them with a local score proxy, and keep only the best valid variant.'
+        )
+    implementation_rules.append(_strict_output_requirements(prefer_minimal_patch=(baseline_code is not None and not from_scratch)))
+    parts.extend(implementation_rules)
     return '\n\n'.join(parts)
 
 
@@ -1946,6 +2000,7 @@ def _build_fixer_prompt(
     max_report_chars: int,
     max_plan_chars: int,
 ) -> str:
+    from_scratch = _prompt_requests_from_scratch(user_prompt)
     parts = [
         "## USER TASK",
         user_prompt,
@@ -1967,19 +2022,25 @@ def _build_fixer_prompt(
     if baseline_code:
         parts.extend(
             [
-                "## KNOWN-GOOD BASELINE",
+                "## REFERENCE BASELINE" if from_scratch else "## KNOWN-GOOD BASELINE",
                 f"```python\n{_clip_middle(baseline_code, max_code_chars)}\n```",
             ]
         )
-    parts.extend(
+    repair_order = [
+        "## REPAIR ORDER",
+        "1. Preserve solve(vec), stdout JSON contract, and legal move names.",
+    ]
+    if from_scratch:
+        repair_order.append("2. You may rewrite a subsystem or regenerate the file from scratch if that is the safest route to a better valid solver.")
+    else:
+        repair_order.append("2. Fix the smallest possible region that explains the failure.")
+    repair_order.extend(
         [
-            "## REPAIR ORDER",
-            "1. Preserve solve(vec), stdout JSON contract, and legal move names.",
-            "2. Fix the smallest possible region that explains the failure.",
             "3. Do not introduce BFS/DFS/beam search or any instance-growing frontier.",
-            _strict_output_requirements(prefer_minimal_patch=True),
+            _strict_output_requirements(prefer_minimal_patch=not from_scratch),
         ]
     )
+    parts.extend(repair_order)
     return '\n\n'.join(parts)
 
 

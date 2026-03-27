@@ -3,6 +3,18 @@ https://www.kaggle.com/competitions/cayley-py-megaminx
 
 I need a Python module `solve_module.py` written FROM SCRATCH that improves on the bundled-data solving approach while preserving full compatibility with the official competition bundle.
 
+PROMPT MODE MARKERS
+- FROM_SCRATCH
+- NO_BASELINE_PATCH_BIAS
+- CREATIVE_SCORE_SEARCH
+
+CREATIVE SCORE SEARCH GOAL
+- Be creative in the solver architecture, but stay deterministic and contract-safe.
+- Synthesize the strongest design you can from scratch instead of mechanically mirroring any baseline.
+- Prefer original combinations of bounded exact-rewrite ideas if they plausibly improve bundled score.
+- Inside the solver, it is acceptable to compare a small fixed bank of deterministic optimization policies or candidate families and keep the best locally scored valid result.
+- Optimize for the lowest bundled move-count score you can achieve without breaking correctness.
+
 ABSOLUTE REQUIREMENTS
 - Write the code from scratch. Do NOT rely on, patch, wrap, or extend any baseline implementation.
 - The module must be fully self-contained and use only the Python standard library.

@@ -2,7 +2,7 @@
 
 Available prompt bundles:
 
-- `regular` — conservative baseline-improvement prompt using the working optimized solver as the baseline.
+- `regular` — from-scratch, score-seeking prompt bundle that treats any shown baseline as reference-only and encourages bounded creative search for a lower bundled move-count score.
 - `improved` — stronger optimization prompt focused on Megaminx-specific path compression.
 - `dataset_adapted` — competition-safe prompt bundle that explicitly steers the agents toward the fixed-depth word-table / multi-pass local-DP strategy adapted from the inspected Megaminx datasets.
 - `heuristic_boosted` — stronger prompt bundle focused on multi-order commuting normalization, per-row best-of-fixed-candidates selection, and bidirectional bounded local rewrites.
@@ -14,7 +14,8 @@ Examples:
 python pipeline_cli.py generate-solver \
   --competition cayley-py-megaminx \
   --out generated/solve_megaminx_regular.py \
-  --prompt-variant regular
+  --prompt-variant regular \
+  --keep-improving
 ```
 
 ```bash

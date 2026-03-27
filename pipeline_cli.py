@@ -1794,6 +1794,200 @@ def _run_agent_laboratory(
     subprocess.check_call(cmd, cwd=str(ROOT), env=env)
 
 
+def _submission_path_score(submission_csv: Path) -> int:
+    with submission_csv.open(newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        move_field = None
+        for candidate in ('path', 'moves', 'solution'):
+            if candidate in fieldnames:
+                move_field = candidate
+                break
+        if move_field is None:
+            for name in fieldnames:
+                if str(name).strip().lower() not in {'id', 'initial_state_id'}:
+                    move_field = name
+                    break
+        if move_field is None:
+            raise ValueError(f'Could not infer moves column in {submission_csv}')
+
+        total = 0
+        for row in reader:
+            value = str(row.get(move_field) or '').strip()
+            total += 0 if not value else len([part for part in value.split('.') if part])
+        return total
+
+
+def _score_solver_with_submission(
+    *,
+    spec: PipelineSpec,
+    solver_path: Path,
+    puzzles_csv: Path,
+    competition_format_slug: str,
+    vector_col_override: Optional[str] = None,
+    max_rows: Optional[int] = None,
+) -> int:
+    temp_csv = solver_path.parent / f'.score_{solver_path.stem}.csv'
+    _build_submission(
+        puzzles_csv=puzzles_csv,
+        out_csv=temp_csv,
+        competition_format_slug=competition_format_slug,
+        solver_path=solver_path,
+        spec=spec,
+        vector_col_override=vector_col_override,
+        max_rows=max_rows,
+        no_progress=True,
+    )
+    return _submission_path_score(temp_csv)
+
+
+def _generate_solver_with_optional_improvement(
+    *,
+    spec: PipelineSpec,
+    out_path: Path,
+    prompt_file: Path,
+    custom_prompts: Optional[Path],
+    llm: str,
+    agent_models: str | None,
+    planner_models: str | None,
+    coder_models: str | None,
+    fixer_models: str | None,
+    search_mode: str | None,
+    plan_beam_width: int | None,
+    frontier_width: int | None,
+    archive_size: int | None,
+    refine_rounds: int | None,
+    max_iters: int,
+    allow_baseline: bool,
+    g4f_recovery_rounds: int | None,
+    g4f_recovery_max_iters: int | None,
+    g4f_recovery_sleep: float | None,
+    worker_no_kill_process_group: bool,
+    print_generation: bool,
+    print_generation_max_chars: int | None,
+    g4f_async: Optional[bool],
+    max_response_chars: int | None,
+    g4f_request_timeout: float | None,
+    g4f_stop_at_python_fence: Optional[bool],
+    keep_improving: bool,
+    improvement_rounds: int,
+    puzzles_csv_for_score: Optional[Path],
+    competition_format_slug: str,
+    vector_col_override: Optional[str] = None,
+    max_rows: Optional[int] = None,
+) -> dict[str, Any]:
+    smoke_vectors = _resolve_smoke_vectors(spec)
+    scoring_enabled = bool(keep_improving and puzzles_csv_for_score is not None)
+    rounds = max(1, int(improvement_rounds) if keep_improving else 1)
+    baseline_for_round = spec.baseline_solver
+    best_score: Optional[int] = None
+    score_history: list[dict[str, Any]] = []
+
+    if scoring_enabled:
+        try:
+            best_score = _score_solver_with_submission(
+                spec=spec,
+                solver_path=spec.baseline_solver,
+                puzzles_csv=puzzles_csv_for_score,
+                competition_format_slug=competition_format_slug,
+                vector_col_override=vector_col_override,
+                max_rows=max_rows,
+            )
+            print(f'[improve] baseline local score = {best_score}', flush=True)
+        except Exception as e:
+            scoring_enabled = False
+            print(f'[improve] WARNING: could not score baseline locally; continuing without score-guided selection: {e}', flush=True)
+
+    best_candidate_path: Optional[Path] = None
+    best_round: Optional[int] = None
+
+    for round_idx in range(1, rounds + 1):
+        candidate_path = out_path if (not keep_improving and round_idx == 1) else out_path.parent / f'{out_path.stem}.round{round_idx}{out_path.suffix}'
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f'[improve] round {round_idx}/{rounds}: baseline={baseline_for_round} -> candidate={candidate_path}', flush=True)
+
+        _run_agent_laboratory(
+            prompt_file=prompt_file,
+            out_path=candidate_path,
+            validator=spec.validator,
+            baseline=baseline_for_round,
+            custom_prompts=custom_prompts,
+            llm=llm,
+            agent_models=agent_models,
+            planner_models=planner_models,
+            coder_models=coder_models,
+            fixer_models=fixer_models,
+            search_mode=search_mode,
+            plan_beam_width=plan_beam_width,
+            frontier_width=frontier_width,
+            archive_size=archive_size,
+            refine_rounds=refine_rounds,
+            max_iters=max_iters,
+            no_llm=False,
+            allow_baseline=allow_baseline,
+            g4f_recovery_rounds=g4f_recovery_rounds,
+            g4f_recovery_max_iters=g4f_recovery_max_iters,
+            g4f_recovery_sleep=g4f_recovery_sleep,
+            worker_no_kill_process_group=worker_no_kill_process_group,
+            print_generation=print_generation,
+            print_generation_max_chars=print_generation_max_chars,
+            g4f_async=g4f_async,
+            max_response_chars=max_response_chars,
+            g4f_request_timeout=g4f_request_timeout,
+            g4f_stop_at_python_fence=g4f_stop_at_python_fence,
+        )
+        _validate_solver(candidate_path, spec.validator, smoke_vectors)
+
+        candidate_score: Optional[int] = None
+        if scoring_enabled and puzzles_csv_for_score is not None:
+            candidate_score = _score_solver_with_submission(
+                spec=spec,
+                solver_path=candidate_path,
+                puzzles_csv=puzzles_csv_for_score,
+                competition_format_slug=competition_format_slug,
+                vector_col_override=vector_col_override,
+                max_rows=max_rows,
+            )
+            print(f'[improve] round {round_idx}: local score = {candidate_score}', flush=True)
+
+        accepted = False
+        if not keep_improving:
+            accepted = True
+        elif scoring_enabled:
+            accepted = best_score is None or (candidate_score is not None and candidate_score < best_score)
+        else:
+            accepted = True
+
+        score_history.append({'round': round_idx, 'score': candidate_score, 'accepted': accepted, 'path': str(candidate_path)})
+
+        if accepted:
+            if candidate_path != out_path:
+                shutil.copyfile(candidate_path, out_path)
+            baseline_for_round = out_path
+            best_candidate_path = out_path
+            best_round = round_idx
+            if scoring_enabled:
+                best_score = candidate_score
+                print(f'[improve] accepted round {round_idx} as new best local score.', flush=True)
+            elif keep_improving:
+                print(f'[improve] accepted round {round_idx} as the latest validated solver.', flush=True)
+        elif scoring_enabled:
+            print(f'[improve] round {round_idx} did not improve local score; keeping round {best_round} output.', flush=True)
+            break
+
+    if best_candidate_path is None:
+        shutil.copyfile(spec.baseline_solver, out_path)
+        best_candidate_path = out_path
+
+    return {
+        'best_score': best_score,
+        'best_round': best_round,
+        'scoring_enabled': scoring_enabled,
+        'history': score_history,
+        'rounds_requested': rounds,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1999,11 +2193,11 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
 
     _gpu_diag_hint(args.models)
 
-    _run_agent_laboratory(
-        prompt_file=prompt_file,
+    puzzles_for_score = _resolve_default_puzzles(spec) if args.keep_improving else None
+    result = _generate_solver_with_optional_improvement(
+        spec=spec,
         out_path=out_path,
-        validator=spec.validator,
-        baseline=spec.baseline_solver,
+        prompt_file=prompt_file,
         custom_prompts=custom_prompts,
         llm=args.models,
         agent_models=args.agent_models,
@@ -2016,7 +2210,6 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         archive_size=args.archive_size,
         refine_rounds=args.refine_rounds,
         max_iters=args.max_iters,
-        no_llm=False,
         allow_baseline=args.allow_baseline,
         g4f_recovery_rounds=args.g4f_recovery_rounds,
         g4f_recovery_max_iters=args.g4f_recovery_max_iters,
@@ -2028,9 +2221,13 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         max_response_chars=args.max_response_chars,
         g4f_request_timeout=args.g4f_request_timeout,
         g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
+        keep_improving=args.keep_improving,
+        improvement_rounds=args.improvement_rounds,
+        puzzles_csv_for_score=puzzles_for_score,
+        competition_format_slug=spec.format_slug,
     )
-
-    _validate_solver(out_path, spec.validator, _resolve_smoke_vectors(spec))
+    if args.keep_improving:
+        print(f"[improve] best_round={result.get('best_round')} best_score={result.get('best_score')}", flush=True)
 
 
 def cmd_build_submission(args: argparse.Namespace) -> None:
@@ -2276,6 +2473,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             "max_response_chars": args.max_response_chars,
             "g4f_request_timeout": args.g4f_request_timeout,
             "g4f_stop_at_python_fence": args.g4f_stop_at_python_fence,
+            "keep_improving": bool(args.keep_improving),
+            "improvement_rounds": args.improvement_rounds,
             "vector_col": args.vector_col,
             "max_rows": args.max_rows,
             "submit": bool(args.submit),
@@ -2300,11 +2499,10 @@ def cmd_run(args: argparse.Namespace) -> None:
         else:
             prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
 
-            _run_agent_laboratory(
-                prompt_file=prompt_file,
+            improvement_result = _generate_solver_with_optional_improvement(
+                spec=spec,
                 out_path=solver_path,
-                validator=spec.validator,
-                baseline=spec.baseline_solver,
+                prompt_file=prompt_file,
                 custom_prompts=custom_prompts,
                 llm=args.models,
                 agent_models=args.agent_models,
@@ -2317,7 +2515,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 archive_size=args.archive_size,
                 refine_rounds=args.refine_rounds,
                 max_iters=args.max_iters,
-                no_llm=False,
                 allow_baseline=args.allow_baseline,
                 g4f_recovery_rounds=args.g4f_recovery_rounds,
                 g4f_recovery_max_iters=args.g4f_recovery_max_iters,
@@ -2329,13 +2526,20 @@ def cmd_run(args: argparse.Namespace) -> None:
                 max_response_chars=args.max_response_chars,
                 g4f_request_timeout=args.g4f_request_timeout,
                 g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
+                keep_improving=args.keep_improving,
+                improvement_rounds=args.improvement_rounds,
+                puzzles_csv_for_score=puzzles_csv if args.keep_improving else None,
+                competition_format_slug=args.format or spec.format_slug,
+                vector_col_override=args.vector_col,
+                max_rows=args.max_rows,
             )
+            report['stages']['generate_solver']['improvement'] = improvement_result
 
         report["stages"]["generate_solver"]["end"] = time.time()
         report["stages"]["generate_solver"]["seconds"] = report["stages"]["generate_solver"]["end"] - report["stages"]["generate_solver"]["start"]
         _stage_done("generate solver", t0)
 
-        # Smoke validate
+        # Smoke validate (generation helper already validated in-loop; keep a final explicit check for the selected artifact)
         t1 = _stage("validate solver")
         report["stages"]["validate_solver"] = {"start": time.time()}
         _validate_solver(solver_path, spec.validator, _resolve_smoke_vectors(spec))
@@ -2577,6 +2781,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--g4f-stop-at-python-fence", dest="g4f_stop_at_python_fence", action="store_true", help="Trim g4f output after the first complete ```python``` fence.")
     sp.add_argument("--no-g4f-stop-at-python-fence", dest="g4f_stop_at_python_fence", action="store_false", help="Do not trim g4f output at the first python fence.")
     sp.set_defaults(g4f_async=None, g4f_stop_at_python_fence=None)
+    sp.add_argument("--keep-improving", action="store_true", help="Do not stop after the first validated solver; keep running additional locally scored improvement rounds.")
+    sp.add_argument("--improvement-rounds", type=int, default=3, help="How many validated generation rounds to run when --keep-improving is enabled.")
     sp.add_argument("--allow-baseline", action="store_true")
     sp.add_argument("--no-llm", action="store_true", help="Skip LLM: just copy baseline")
     sp.set_defaults(func=cmd_generate_solver)
@@ -2655,6 +2861,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--g4f-stop-at-python-fence", dest="g4f_stop_at_python_fence", action="store_true", help="Trim g4f output after the first complete ```python``` fence.")
     sp.add_argument("--no-g4f-stop-at-python-fence", dest="g4f_stop_at_python_fence", action="store_false", help="Do not trim g4f output at the first python fence.")
     sp.set_defaults(g4f_async=None, g4f_stop_at_python_fence=None)
+    sp.add_argument("--keep-improving", action="store_true", help="Do not stop after the first validated solver; keep running additional locally scored improvement rounds.")
+    sp.add_argument("--improvement-rounds", type=int, default=3, help="How many validated generation rounds to run when --keep-improving is enabled.")
     sp.add_argument("--allow-baseline", action="store_true")
     sp.add_argument("--no-llm", action="store_true")
     sp.add_argument("--format", default=None, help="Override llm-puzzles format slug")
