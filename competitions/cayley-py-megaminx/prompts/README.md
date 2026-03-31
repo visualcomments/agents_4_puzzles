@@ -59,3 +59,7 @@ python pipeline_cli.py run \
   --output competitions/cayley-py-megaminx/submissions/submission.csv \
   --prompt-variant master_hybrid
 ```
+
+## Output format contract
+
+All Megaminx prompt bundles now require the coder/fixer reply to use the shared `code_response.v2` JSON envelope instead of returning a raw ```python``` fenced block. This keeps the prompt bundles aligned with the repository-wide structured extraction path and reduces accidental leakage of prose into `solve_module.py`.

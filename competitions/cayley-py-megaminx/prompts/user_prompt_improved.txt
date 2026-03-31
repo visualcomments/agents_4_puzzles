@@ -440,7 +440,21 @@ if __name__ == '__main__':
     _main()
 ```
 
-Output requirements for your answer
-- Return the full improved `solve_module.py` in exactly one ```python ...``` block.
-- Do not include any text outside that code block.
+STRICT OUTPUT REQUIREMENTS:
+- Return exactly one JSON object and no prose outside JSON.
+- The JSON object must contain exactly these keys: version, artifact_type, language, filename, code.
+- Set version='code_response.v2', artifact_type='python_module', language='python', filename='solve_module.py'.
+- Put the entire Python file only inside the code string.
+- Do not wrap the code in markdown fences inside the JSON string.
+- Do not include explanations, bullet points, extra keys, or commentary before or after the JSON object.
+- Inside the code, omit comments and docstrings unless they are absolutely necessary.
+- Preserve the public solve(vec) entrypoint and the script-mode JSON stdout contract with keys moves and sorted_array.
+JSON EXAMPLE:
+{
+  "version": "code_response.v2",
+  "artifact_type": "python_module",
+  "language": "python",
+  "filename": "solve_module.py",
+  "code": "from __future__ import annotations\\n\\nimport json\\n\\n\\ndef solve(vec):\\n    return [], list(vec)\\n"
+}
 - The produced code must be self-contained and runnable.

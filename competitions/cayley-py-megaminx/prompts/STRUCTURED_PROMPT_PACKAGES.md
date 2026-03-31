@@ -114,3 +114,16 @@ The fixer now sees:
 8. `## REPAIR ORDER`
 
 This keeps the repair step close to the accepted architecture and reduces the chance of a full rewrite.
+
+
+## Code output envelope
+
+All Megaminx prompt variants now require the coder and fixer to return one machine-readable JSON object with the shared `code_response.v2` contract:
+
+- `version=code_response.v2`
+- `artifact_type=python_module`
+- `language=python`
+- `filename=solve_module.py`
+- `code=<full python file>`
+
+The full solver must live only inside the `code` string. No prose may appear before or after the JSON object. This matches the structured-first extraction logic in the pipeline while keeping the legacy fenced/raw parser only as fallback compatibility.
