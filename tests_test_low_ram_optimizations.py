@@ -62,6 +62,20 @@ def solve(vec):
     assert CallLLM._python_compiles(code) is True
 
 
+
+
+def test_callllm_extract_python_candidate_from_json_code_envelope():
+    text = json.dumps({
+        'version': 'code_response.v2',
+        'artifact_type': 'python_module',
+        'language': 'python',
+        'filename': 'solve_module.py',
+        'code': '#!/usr/bin/env python3\nfrom __future__ import annotations\n\nimport json\n\n\ndef solve(vec):\n    return [], list(vec)\n',
+    })
+    code = CallLLM._extract_python_candidate(text)
+    assert code.startswith('#!/usr/bin/env python3')
+    assert 'def solve' in code
+    assert CallLLM._python_compiles(code) is True
 def test_base_agent_spills_large_artifacts(tmp_path, monkeypatch):
     import types
     import sys as _sys

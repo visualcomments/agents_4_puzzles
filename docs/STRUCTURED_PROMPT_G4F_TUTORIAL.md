@@ -84,6 +84,12 @@ python AgentLaboratory/perm_pipeline/run_perm_pipeline.py \
   --print-generation
 ```
 
+## Output contract
+
+- Coder/fixer responses now use a strict JSON code envelope instead of relying on markdown python fences.
+- The canonical response shape is `{"version":"code_response.v2","artifact_type":"python_module","language":"python","filename":"solve_module.py","code":"..."}`.
+- The pipeline extracts code from that JSON envelope first and only falls back to legacy fenced/raw-code heuristics for backward compatibility.
+
 ## Notes
 
 - Bare model names are treated as **g4f** models.

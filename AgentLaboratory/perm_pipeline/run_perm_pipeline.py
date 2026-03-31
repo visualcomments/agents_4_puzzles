@@ -47,8 +47,11 @@ except Exception:  # pragma: no cover - optional runtime dependency
 # Import AgentLaboratory inference (patched to support g4f:)
 THIS_DIR = Path(__file__).resolve().parent
 AGENTLAB_ROOT = THIS_DIR.parent
+REPO_ROOT = AGENTLAB_ROOT.parent
 sys.path.insert(0, str(AGENTLAB_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
 from inference import query_model, MissingLLMCredentials, _best_effort_release_memory, _run_json_worker_subprocess  # type: ignore
+import llm_code_contract as code_contract
 
 RE_PY_BLOCK = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 RE_ANY_BLOCK = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\s*(.*?)```", re.DOTALL)
@@ -1320,33 +1323,10 @@ def _python_candidate_score(code: str, *, lang: str = '', fenced: bool = False) 
 
 
 def extract_python(resp: str) -> Optional[str]:
-    text = (resp or '').strip()
-    if not text:
-        return None
-
-    candidates: List[Tuple[int, int, str]] = []
-
-    for idx, match in enumerate(RE_FENCED_BLOCK.finditer(text)):
-        lang = (match.group('lang') or '').strip()
-        code = (match.group('code') or '').strip()
-        if not code:
-            continue
-        cleaned = _trim_candidate_edges(_strip_python_comments_and_docstrings(code) or code)
-        score = _python_candidate_score(cleaned, lang=lang, fenced=True)
-        if lang and lang.lower() not in {'python', 'py', 'python3'} and not _looks_like_python(code):
-            score -= 50
-        candidates.append((score, -idx, cleaned))
-
-    for raw_idx, raw_candidate in enumerate(_extract_raw_python_candidates(text), start=1):
-        cleaned = _trim_candidate_edges(_strip_python_comments_and_docstrings(raw_candidate) or raw_candidate)
-        if cleaned:
-            candidates.append((_python_candidate_score(cleaned, fenced=False), -10_000 - raw_idx, cleaned))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    code = candidates[0][2].strip()
+    code = code_contract.extract_python_candidate(
+        resp or '',
+        strip_comments_docstrings=True,
+    )
     return code or None
 
 
@@ -1710,8 +1690,10 @@ def validate_solver_suite(validator_path: Path, solver_path: Path, tests: Iterab
 
 def probe_model_for_codegen(model: str) -> Tuple[bool, str]:
     prompt = (
-        "Return only one ```python``` block that defines a function `solve(vec)` and returns the input unchanged. "
-        "Do not add any explanation."
+        "Return exactly one JSON object containing a minimal Python solver module. "
+        "Set the code field to a complete solve_module.py that defines solve(vec) and returns the input unchanged. "
+        "Do not add any explanation outside JSON.\n\n"
+        + code_contract.strict_code_response_requirements(prefer_minimal_patch=False, filename='solve_module.py')
     )
     system = "You are checking whether you can follow strict code-only output requirements."
     try:
@@ -1869,16 +1851,10 @@ def _make_iteration_progress(model: str, max_iters: int):
 
 
 def _strict_output_requirements(*, prefer_minimal_patch: bool) -> str:
-    lines = [
-        'STRICT OUTPUT REQUIREMENTS:',
-        '- Return exactly one complete Python file inside a single ```python``` block.',
-        '- Do not include explanations, markdown outside the code block, bullet points, or partial snippets.',
-        '- Inside the code, omit comments and docstrings unless they are absolutely necessary.',
-        '- Preserve the public solve(vec) entrypoint and the script-mode JSON stdout contract with keys moves and sorted_array.',
-    ]
-    if prefer_minimal_patch:
-        lines.append('- Prefer a minimal patch over a rewrite whenever possible.')
-    return '\n'.join(lines)
+    return code_contract.strict_code_response_requirements(
+        prefer_minimal_patch=prefer_minimal_patch,
+        filename='solve_module.py',
+    )
 
 
 _FROM_SCRATCH_MARKERS = (
@@ -2064,11 +2040,9 @@ def _query_code_block_with_rescue(
     if code:
         return code, None
 
-    rescue_prompt = (
-        f"{prompt}\n\n"
-        "CRITICAL OUTPUT FORMAT REPAIR:\n"
-        "Return exactly one complete Python file inside a single ```python``` block.\n"
-        "Do not include explanations, bullet points, markdown outside the code fence, or truncated snippets."
+    rescue_prompt = code_contract.repair_code_response_prompt(
+        prompt,
+        filename='solve_module.py',
     )
     try:
         resp = _query_model_stable(model, rescue_prompt, system_prompt, tries=1)

@@ -3,12 +3,21 @@ import importlib
 import io
 import json
 import os
+from pathlib import Path
 import queue
 import re
+import sys
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
+
+THIS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = THIS_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import llm_code_contract as code_contract
 
 try:
     import g4f
@@ -291,39 +300,11 @@ def _python_candidate_score(code: str, *, lang: str = "", fenced: bool = False) 
 
 
 def _extract_python_candidate(text: str) -> str:
-    s = (text or "").strip()
-    if not s:
-        return ""
-
-    candidates: List[tuple[int, int, str]] = []
-    for idx, match in enumerate(RE_FENCED_BLOCK.finditer(s)):
-        lang = (match.group("lang") or "").strip()
-        code = _trim_candidate_edges((match.group("code") or "").strip())
-        if not code:
-            continue
-        score = _python_candidate_score(code, lang=lang, fenced=True)
-        if lang and lang.lower() not in {"python", "py", "python3"} and not _looks_like_python(code):
-            score -= 50
-        candidates.append((score, -idx, code))
-
-    for idx, code in enumerate(_extract_raw_python_candidates(s), start=1):
-        score = _python_candidate_score(code, fenced=False)
-        candidates.append((score, -10_000 - idx, code))
-
-    if not candidates:
-        return ""
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return candidates[0][2].strip()
+    return code_contract.extract_python_candidate(text)
 
 
 def _python_compiles(code: str) -> bool:
-    if not code:
-        return False
-    try:
-        ast.parse(code)
-    except Exception:
-        return False
-    return True
+    return code_contract.python_compiles(code)
 
 
 def _model_score(model: str) -> int:
@@ -368,8 +349,10 @@ def quick_selfcheck(
 
     if mode == "code":
         prompt = (
-            "Return only one ```python``` block that defines a function `solve(vec)` and returns the input unchanged. "
-            "Do not add any explanation."
+            "Return exactly one JSON object containing a minimal Python solver module. "
+            "Set the code field to a complete solve_module.py that defines solve(vec) and returns the input unchanged. "
+            "Do not add any explanation outside JSON.\n\n"
+            + code_contract.strict_code_response_requirements(prefer_minimal_patch=False, filename='solve_module.py')
         )
 
     provider_name = os.getenv("G4F_PROVIDER", "").strip()

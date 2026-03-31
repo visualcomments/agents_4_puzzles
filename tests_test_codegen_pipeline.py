@@ -164,6 +164,34 @@ def test_print_generation_preview_respects_env(monkeypatch, capsys):
 
 
 
+
+
+def test_extract_python_from_json_code_envelope():
+    text = json.dumps({
+        'version': 'code_response.v2',
+        'artifact_type': 'python_module',
+        'language': 'python',
+        'filename': 'solve_module.py',
+        'code': 'import json\n\n\ndef solve(vec):\n    return [], list(vec)\n',
+    })
+    code = rpp.extract_python(text)
+    assert code is not None
+    assert 'def solve' in code
+    ok, reason = rpp.compile_python(code)
+    assert ok is True, reason
+
+
+def test_extract_python_from_fenced_json_code_envelope_with_prose():
+    text = """before
+```json
+{"version":"code_response.v2","artifact_type":"python_module","language":"python","filename":"solve_module.py","code":"#!/usr/bin/env python3\\nfrom __future__ import annotations\\n\\nimport json\\n\\n\\ndef solve(vec):\\n    return [], list(vec)\\n"}
+```
+after"""
+    code = rpp.extract_python(text)
+    assert code is not None
+    assert code.startswith('#!/usr/bin/env python3')
+    assert 'def solve' in code
+
 def test_extract_python_strips_comments_docstrings_and_explanations():
     text = '''[fixer] iteration 4 trying model: g4f:gpt-4
 [generation:fixer iteration 4] model=g4f:gpt-4
