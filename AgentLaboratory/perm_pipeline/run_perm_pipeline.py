@@ -1897,6 +1897,8 @@ def build_initial_codegen_prompt(
     from_scratch = _prompt_requests_from_scratch(user_prompt)
     creative_score_search = _prompt_requests_creative_score_search(user_prompt)
     parts = [
+        "## OUTPUT CONTRACT (HIGHEST PRIORITY)",
+        code_contract.concise_code_response_directive(filename='solve_module.py'),
         "## USER TASK",
         user_prompt,
     ]
@@ -1978,6 +1980,8 @@ def _build_fixer_prompt(
 ) -> str:
     from_scratch = _prompt_requests_from_scratch(user_prompt)
     parts = [
+        "## OUTPUT CONTRACT (HIGHEST PRIORITY)",
+        code_contract.concise_code_response_directive(filename='solve_module.py'),
         "## USER TASK",
         user_prompt,
     ]

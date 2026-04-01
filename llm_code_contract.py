@@ -78,6 +78,28 @@ def strict_code_response_requirements(*, prefer_minimal_patch: bool, filename: s
     return "\n".join(lines)
 
 
+def concise_code_response_directive(*, filename: str = DEFAULT_CODE_FILENAME) -> str:
+    return (
+        "Return JSON only. Use exactly one object with keys version, artifact_type, language, filename, code. "
+        f"Set version={CODE_RESPONSE_VERSION!r}, artifact_type={DEFAULT_CODE_ARTIFACT_TYPE!r}, "
+        f"language={DEFAULT_CODE_LANGUAGE!r}, filename={filename!r}. Put the entire Python file only in code."
+    )
+
+
+def prompt_requests_code_json_envelope(*texts: str) -> bool:
+    joined = "\n".join(str(text or "") for text in texts)
+    lowered = joined.lower()
+    markers = (
+        CODE_RESPONSE_VERSION.lower(),
+        'return exactly one json object and no prose outside json.',
+        'return json only.',
+        'the json object must contain exactly these keys: version, artifact_type, language, filename, code.',
+        'keys: version, artifact_type, language, filename, code',
+        'solve_module.py',
+    )
+    return all(token in lowered for token in ('json', 'code')) and any(marker in lowered for marker in markers)
+
+
 def repair_code_response_prompt(prompt: str, *, filename: str = DEFAULT_CODE_FILENAME) -> str:
     return (
         f"{prompt}\n\n"

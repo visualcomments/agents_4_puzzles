@@ -13,6 +13,7 @@ import tempfile
 import threading
 from pathlib import Path
 from collections import OrderedDict
+import llm_code_contract as code_contract
 
 try:
     import ctypes
@@ -470,6 +471,27 @@ def _parse_extra_body_json(env_name: str) -> dict | None:
     return payload
 
 
+def _structured_output_capable_model(model_id: str) -> bool:
+    lowered = str(model_id or '').strip().lower()
+    return any(token in lowered for token in ('gpt-4o', 'gpt4o')) or lowered.startswith('o4-')
+
+
+def _response_format_for_code_envelope(model_id: str, prompt: str, system_prompt: str):
+    if not code_contract.prompt_requests_code_json_envelope(prompt, system_prompt):
+        return None
+    schema = code_contract.code_response_schema()
+    if _structured_output_capable_model(model_id):
+        return {
+            'type': 'json_schema',
+            'json_schema': {
+                'name': 'code_response',
+                'strict': True,
+                'schema': schema,
+            },
+        }
+    return {'type': 'json_object'}
+
+
 def _query_openai_compatible_text(
     *,
     model_id: str,
@@ -502,10 +524,17 @@ def _query_openai_compatible_text(
     }
     if temp is not None:
         kwargs["temperature"] = temp
+    response_format = _response_format_for_code_envelope(model_id, prompt, system_prompt)
+    if response_format is not None:
+        kwargs["response_format"] = response_format
     if extra_body:
         kwargs["extra_body"] = extra_body
 
-    completion = client.chat.completions.create(**kwargs)
+    try:
+        completion = client.chat.completions.create(**kwargs)
+    except Exception:
+        kwargs.pop("response_format", None)
+        completion = client.chat.completions.create(**kwargs)
 
     choices = getattr(completion, "choices", None) or []
     if choices:
@@ -1533,25 +1562,30 @@ def query_model(
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}]
+                response_format = _response_format_for_code_envelope("gpt-4o-mini-2024-07-18", prompt, system_prompt)
                 if version == "0.28":
-                    if temp is None:
-                        completion = openai.ChatCompletion.create(
-                            model=f"{model_str}",  # engine = "deployment_name".
-                            messages=messages
-                        )
-                    else:
-                        completion = openai.ChatCompletion.create(
-                            model=f"{model_str}",  # engine = "deployment_name".
-                            messages=messages, temperature=temp
-                        )
+                    kwargs = {
+                        "model": f"{model_str}",
+                        "messages": messages,
+                    }
+                    if temp is not None:
+                        kwargs["temperature"] = temp
+                    completion = openai.ChatCompletion.create(**kwargs)
                 else:
                     client = OpenAI()
-                    if temp is None:
-                        completion = client.chat.completions.create(
-                            model="gpt-4o-mini-2024-07-18", messages=messages, )
-                    else:
-                        completion = client.chat.completions.create(
-                            model="gpt-4o-mini-2024-07-18", messages=messages, temperature=temp)
+                    kwargs = {
+                        "model": "gpt-4o-mini-2024-07-18",
+                        "messages": messages,
+                    }
+                    if temp is not None:
+                        kwargs["temperature"] = temp
+                    if response_format is not None:
+                        kwargs["response_format"] = response_format
+                    try:
+                        completion = client.chat.completions.create(**kwargs)
+                    except Exception:
+                        kwargs.pop("response_format", None)
+                        completion = client.chat.completions.create(**kwargs)
                 answer = completion.choices[0].message.content
 
             elif model_str == "gemini-2.0-pro":
@@ -1595,24 +1629,30 @@ def query_model(
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}]
+                response_format = _response_format_for_code_envelope("gpt-4o-2024-08-06", prompt, system_prompt)
                 if version == "0.28":
-                    if temp is None:
-                        completion = openai.ChatCompletion.create(
-                            model=f"{model_str}",  # engine = "deployment_name".
-                            messages=messages
-                        )
-                    else:
-                        completion = openai.ChatCompletion.create(
-                            model=f"{model_str}",  # engine = "deployment_name".
-                            messages=messages, temperature=temp)
+                    kwargs = {
+                        "model": f"{model_str}",
+                        "messages": messages,
+                    }
+                    if temp is not None:
+                        kwargs["temperature"] = temp
+                    completion = openai.ChatCompletion.create(**kwargs)
                 else:
                     client = OpenAI()
-                    if temp is None:
-                        completion = client.chat.completions.create(
-                            model="gpt-4o-2024-08-06", messages=messages, )
-                    else:
-                        completion = client.chat.completions.create(
-                            model="gpt-4o-2024-08-06", messages=messages, temperature=temp)
+                    kwargs = {
+                        "model": "gpt-4o-2024-08-06",
+                        "messages": messages,
+                    }
+                    if temp is not None:
+                        kwargs["temperature"] = temp
+                    if response_format is not None:
+                        kwargs["response_format"] = response_format
+                    try:
+                        completion = client.chat.completions.create(**kwargs)
+                    except Exception:
+                        kwargs.pop("response_format", None)
+                        completion = client.chat.completions.create(**kwargs)
                 answer = completion.choices[0].message.content
             elif model_str == "deepseek-chat":
                 model_str = "deepseek-chat"

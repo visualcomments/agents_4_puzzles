@@ -60,6 +60,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import re
 
 from pipeline_registry import PipelineSpec, get_pipeline, list_pipelines
+import llm_code_contract as code_contract
 
 
 ROOT = Path(__file__).resolve().parent
@@ -910,6 +911,13 @@ def _prompt_bundle_uses_baseline(prompt_file: Path, custom_prompts: Optional[Pat
 
 def _prompt_bundle_supports_ranked_reuse(prompt_file: Path, custom_prompts: Optional[Path] = None) -> bool:
     return _prompt_bundle_uses_baseline(prompt_file, custom_prompts) or _prompt_bundle_requests_from_scratch(prompt_file, custom_prompts)
+
+
+def _prompt_bundle_requires_json_code_envelope(prompt_file: Path, custom_prompts: Optional[Path] = None) -> bool:
+    return code_contract.prompt_requests_code_json_envelope(
+        _safe_read_text(prompt_file),
+        _safe_read_text(custom_prompts),
+    )
 
 
 def _adaptive_baseline_bundle_slug(prompt_file: Path, custom_prompts: Optional[Path] = None) -> str:
@@ -2028,6 +2036,9 @@ def _run_agent_laboratory(
     if g4f_stop_at_python_fence is not None:
         env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = "1" if g4f_stop_at_python_fence else "0"
         effective_codegen_env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"]
+    elif _prompt_bundle_requires_json_code_envelope(prompt_file, custom_prompts):
+        env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = "0"
+        effective_codegen_env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = "0"
     print("[agentlab] " + " ".join(cmd))
     if effective_codegen_env:
         print("[agentlab] low-RAM env: " + ", ".join(f"{k}={effective_codegen_env[k]}" for k in sorted(effective_codegen_env.keys())))
