@@ -8,7 +8,10 @@ import sys
 from pathlib import Path
 
 THIS_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(THIS_DIR))
+REPO_ROOT = THIS_DIR.parent
+for _path in (str(THIS_DIR), str(REPO_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from inference import MissingLLMCredentials, query_model  # type: ignore
 

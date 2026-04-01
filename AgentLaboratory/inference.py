@@ -13,6 +13,13 @@ import tempfile
 import threading
 from pathlib import Path
 from collections import OrderedDict
+
+_THIS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _THIS_DIR.parent
+for _path in (str(_THIS_DIR), str(_REPO_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import llm_code_contract as code_contract
 
 try:
