@@ -214,6 +214,23 @@ def solve(vec):
     assert '# inline comment' not in code
 
 
+
+
+def test_extract_python_preserves_valid_docstring_only_class_body_when_stripping():
+    text = '''```python
+class SolverError(Exception):
+    """Raised when the solver contract is violated."""
+
+
+def solve(vec):
+    return [], list(vec)
+```'''
+    code = rpp.extract_python(text)
+    assert code is not None
+    assert 'class SolverError' in code
+    assert '"""Raised when the solver contract is violated."""' in code
+    ok, reason = rpp.compile_python(code)
+    assert ok is True, reason
 def test_extract_python_handles_prose_wrapped_raw_python_module():
     text = '''Content of solve_module.py
 - This is a complete, self-contained module ready to drop into your repository.

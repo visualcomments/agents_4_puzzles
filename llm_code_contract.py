@@ -493,6 +493,21 @@ def _python_candidate_score(code: str, *, lang: str = "", fenced: bool = False) 
     return score
 
 
+def _best_effort_strip_candidate(code: str, *, strip_comments_docstrings: bool) -> str:
+    original = _trim_candidate_edges(code)
+    if not strip_comments_docstrings:
+        return original
+    stripped = _trim_candidate_edges(strip_python_comments_and_docstrings(original) or original)
+    if not stripped:
+        return original
+    try:
+        ast.parse(stripped)
+        return stripped
+    except Exception:
+        return original
+
+
+
 def extract_python_candidate(text: str, *, strip_comments_docstrings: bool = False) -> str:
     source = str(text or "").strip()
     if not source:
@@ -500,26 +515,23 @@ def extract_python_candidate(text: str, *, strip_comments_docstrings: bool = Fal
 
     envelope = extract_code_envelope(source)
     if envelope is not None:
-        code = envelope.code
-        if strip_comments_docstrings:
-            code = strip_python_comments_and_docstrings(code) or code
+        code = _best_effort_strip_candidate(envelope.code, strip_comments_docstrings=strip_comments_docstrings)
         return _trim_candidate_edges(code)
 
     candidates: List[Tuple[int, int, str]] = []
     for idx, match in enumerate(RE_FENCED_BLOCK.finditer(source)):
         lang = (match.group("lang") or "").strip()
-        code = _trim_candidate_edges((match.group("code") or "").strip())
-        if not code:
+        raw_code = _trim_candidate_edges((match.group("code") or "").strip())
+        if not raw_code:
             continue
-        if strip_comments_docstrings:
-            code = _trim_candidate_edges(strip_python_comments_and_docstrings(code) or code)
+        code = _best_effort_strip_candidate(raw_code, strip_comments_docstrings=strip_comments_docstrings)
         score = _python_candidate_score(code, lang=lang, fenced=True)
         if lang and lang.lower() not in {"python", "py", "python3"} and not _looks_like_python(code):
             score -= 50
         candidates.append((score, -idx, code))
 
     for idx, code in enumerate(_extract_raw_python_candidates(source), start=1):
-        cleaned = _trim_candidate_edges(strip_python_comments_and_docstrings(code) if strip_comments_docstrings else code)
+        cleaned = _best_effort_strip_candidate(code, strip_comments_docstrings=strip_comments_docstrings)
         score = _python_candidate_score(cleaned, fenced=False)
         candidates.append((score, -10_000 - idx, cleaned))
 

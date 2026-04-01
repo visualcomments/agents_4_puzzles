@@ -64,6 +64,22 @@ def solve(vec):
 
 
 
+
+
+def test_callllm_extract_python_candidate_preserves_docstring_only_class_body():
+    text = '''```python
+class SolverError(Exception):
+    """Raised when the solver contract is violated."""
+
+
+def solve(vec):
+    return [], list(vec)
+```'''
+    code = CallLLM._extract_python_candidate(text)
+    assert 'class SolverError' in code
+    assert '"""Raised when the solver contract is violated."""' in code
+    assert CallLLM._python_compiles(code) is True
+
 def test_callllm_extract_python_candidate_from_json_code_envelope():
     text = json.dumps({
         'version': 'code_response.v2',
