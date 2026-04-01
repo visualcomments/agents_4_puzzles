@@ -218,3 +218,140 @@ def test_megaminx_optimized_lookup_beats_sample_for_known_row():
     assert len(moves) == optimized_len
     assert optimized_len < sample_len
     assert out_vec == list(range(120))
+
+
+def _make_cmd_run_args(tmp_path):
+    args = type('Args', (), {})()
+    args.competition = 'cayley-py-megaminx'
+    args.puzzles = None
+    args.output = str(tmp_path / 'submission.csv')
+    args.run_log = str(tmp_path / 'run_log.json')
+    args.no_llm = False
+    args.prompt_file = None
+    args.custom_prompts = None
+    args.models = 'gpt-4o-mini'
+    args.agent_models = None
+    args.planner_models = None
+    args.coder_models = None
+    args.fixer_models = None
+    args.search_mode = 'hybrid'
+    args.plan_beam_width = 3
+    args.frontier_width = 6
+    args.archive_size = 6
+    args.refine_rounds = 1
+    args.max_iters = 3
+    args.allow_baseline = True
+    args.g4f_recovery_rounds = None
+    args.g4f_recovery_max_iters = None
+    args.g4f_recovery_sleep = None
+    args.worker_no_kill_process_group = False
+    args.print_generation = False
+    args.print_generation_max_chars = None
+    args.g4f_async = None
+    args.max_response_chars = None
+    args.g4f_request_timeout = None
+    args.g4f_stop_at_python_fence = False
+    args.keep_improving = False
+    args.improvement_rounds = 1
+    args.format = None
+    args.vector_col = None
+    args.max_rows = None
+    args.no_progress = True
+    args.submit = True
+    args.message = 'test submit'
+    args.kaggle_json = None
+    args.kaggle_config_dir = None
+    args.submit_via = 'auto'
+    args.submit_competition = None
+    args.schema_check = False
+    args.no_schema_check = False
+    args.no_schema_check_ids = False
+    args.no_run_log = True
+    return args
+
+
+def test_cmd_run_skips_submit_when_credentials_missing(monkeypatch, tmp_path):
+    called = {'submit': 0}
+
+    def fake_run_agent_laboratory(**kwargs):
+        Path(kwargs['out_path']).write_text('ROUND0', encoding='utf-8')
+
+    def fake_validate_solver(*args, **kwargs):
+        return None
+
+    def fake_build_submission(**kwargs):
+        marker = Path(kwargs['solver_path']).read_text(encoding='utf-8').strip()
+        Path(kwargs['out_csv']).write_text(f'initial_state_id,path\n0,{marker}\n', encoding='utf-8')
+
+    def fake_kaggle_submit(**kwargs):
+        called['submit'] += 1
+        raise AssertionError('kaggle submit should not be called when credentials are unavailable')
+
+    monkeypatch.setattr(pipeline_cli, '_run_agent_laboratory', fake_run_agent_laboratory)
+    monkeypatch.setattr(pipeline_cli, '_validate_solver', fake_validate_solver)
+    monkeypatch.setattr(pipeline_cli, '_build_submission', fake_build_submission)
+    monkeypatch.setattr(pipeline_cli, '_load_allowed_moves_from_validator', lambda _p: None)
+    monkeypatch.setattr(pipeline_cli, '_validate_submission_schema', lambda **_: {'header_ok': True, 'row_count_ok': True})
+    monkeypatch.setattr(pipeline_cli, '_gpu_diag_hint', lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        pipeline_cli,
+        '_resolve_kaggle_submit_availability',
+        lambda **_: {
+            'enabled': False,
+            'source': 'missing_credentials',
+            'credentials_path': None,
+            'reason': 'No Kaggle credentials were found. Live submission will be skipped.',
+            'nonfatal': True,
+        },
+    )
+    monkeypatch.setattr(pipeline_cli, '_kaggle_submit', fake_kaggle_submit)
+
+    args = _make_cmd_run_args(tmp_path)
+    pipeline_cli.cmd_run(args)
+
+    assert called['submit'] == 0
+    assert Path(args.output).read_text(encoding='utf-8') == 'initial_state_id,path\n0,ROUND0\n'
+
+
+def test_cmd_run_keep_improving_preserves_validated_solver_on_round_submit_systemexit(monkeypatch, tmp_path):
+    def fake_run_agent_laboratory(**kwargs):
+        Path(kwargs['out_path']).write_text('ROUND1', encoding='utf-8')
+
+    def fake_validate_solver(*args, **kwargs):
+        return None
+
+    def fake_build_submission(**kwargs):
+        marker = Path(kwargs['solver_path']).read_text(encoding='utf-8').strip()
+        Path(kwargs['out_csv']).write_text(f'initial_state_id,path\n0,{marker}\n', encoding='utf-8')
+
+    def fake_score_solver_with_submission(**kwargs):
+        text = Path(kwargs['solver_path']).read_text(encoding='utf-8')
+        return 90 if text == 'ROUND1' else 100
+
+    def fake_kaggle_submit(**kwargs):
+        raise SystemExit('Kaggle submission failed: /root/.kaggle/kaggle.json')
+
+    monkeypatch.setattr(pipeline_cli, '_run_agent_laboratory', fake_run_agent_laboratory)
+    monkeypatch.setattr(pipeline_cli, '_validate_solver', fake_validate_solver)
+    monkeypatch.setattr(pipeline_cli, '_build_submission', fake_build_submission)
+    monkeypatch.setattr(pipeline_cli, '_score_solver_with_submission', fake_score_solver_with_submission)
+    monkeypatch.setattr(pipeline_cli, '_load_allowed_moves_from_validator', lambda _p: None)
+    monkeypatch.setattr(pipeline_cli, '_validate_submission_schema', lambda **_: {'header_ok': True, 'row_count_ok': True})
+    monkeypatch.setattr(pipeline_cli, '_gpu_diag_hint', lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        pipeline_cli,
+        '_resolve_kaggle_submit_availability',
+        lambda **_: {
+            'enabled': True,
+            'source': 'environment',
+            'credentials_path': None,
+        },
+    )
+    monkeypatch.setattr(pipeline_cli, '_kaggle_submit', fake_kaggle_submit)
+
+    args = _make_cmd_run_args(tmp_path)
+    args.keep_improving = True
+    args.improvement_rounds = 1
+    pipeline_cli.cmd_run(args)
+
+    assert Path(args.output).read_text(encoding='utf-8') == 'initial_state_id,path\n0,ROUND1\n'

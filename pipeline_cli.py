@@ -1492,6 +1492,84 @@ def _print_kaggle_preflight_report(report: dict[str, Any]) -> None:
 
 
 
+def _has_kaggle_env_credentials(env: Optional[dict[str, str]] = None) -> bool:
+    source = env or os.environ
+    if source.get('KAGGLE_API_TOKEN') or source.get('KAGGLE_TOKEN'):
+        return True
+    return bool(source.get('KAGGLE_USERNAME') and source.get('KAGGLE_KEY'))
+
+
+
+def _resolve_kaggle_submit_availability(
+    *,
+    kaggle_json: str | None,
+    kaggle_config_dir: str | None,
+) -> dict[str, Any]:
+    explicit_path = str(Path(kaggle_json).expanduser().resolve()) if kaggle_json else None
+    if kaggle_json:
+        explicit_exists = Path(kaggle_json).expanduser().exists()
+        if explicit_exists:
+            return {
+                'enabled': True,
+                'source': 'explicit_file',
+                'credentials_path': explicit_path,
+            }
+        return {
+            'enabled': False,
+            'source': 'explicit_file_missing',
+            'credentials_path': explicit_path,
+            'reason': f'Kaggle credentials file was not found: {explicit_path}',
+            'nonfatal': False,
+        }
+
+    if _has_kaggle_env_credentials():
+        return {
+            'enabled': True,
+            'source': 'environment',
+            'credentials_path': None,
+        }
+
+    try:
+        _ensure_llm_puzzles_on_path()
+        from src.kaggle_utils import _discover_default_credentials_path  # type: ignore
+
+        discovered = _discover_default_credentials_path(kaggle_config_dir)
+    except Exception:
+        discovered = None
+
+    if discovered:
+        return {
+            'enabled': True,
+            'source': 'default_file',
+            'credentials_path': str(Path(discovered).expanduser().resolve()),
+        }
+
+    return {
+        'enabled': False,
+        'source': 'missing_credentials',
+        'credentials_path': None,
+        'reason': (
+            'No Kaggle credentials were found. Live submission will be skipped. '
+            'Pass --kaggle-json /path/to/kaggle.json (or ~/.kaggle/access_token), '
+            'set KAGGLE_USERNAME/KAGGLE_KEY or KAGGLE_API_TOKEN, or place credentials under ~/.kaggle/.'
+        ),
+        'nonfatal': True,
+    }
+
+
+
+def _nonfatal_kaggle_submit_report(exc: BaseException, competition: str) -> dict[str, Any]:
+    return {
+        'mode': 'error',
+        'submitted': False,
+        'competition': competition,
+        'error_type': type(exc).__name__,
+        'error': _format_kaggle_submit_error(exc, competition),
+        'nonfatal': True,
+    }
+
+
+
 def _kaggle_submit(
     *,
     competition: str,
@@ -2836,8 +2914,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             "max_response_chars": args.max_response_chars,
             "g4f_request_timeout": args.g4f_request_timeout,
             "g4f_stop_at_python_fence": args.g4f_stop_at_python_fence,
-            "keep_improving": bool(args.keep_improving),
-            "improvement_rounds": args.improvement_rounds,
+            "keep_improving": bool(getattr(args, 'keep_improving', False)),
+            "improvement_rounds": getattr(args, 'improvement_rounds', 1),
             "vector_col": args.vector_col,
             "max_rows": args.max_rows,
             "submit": bool(args.submit),
@@ -2856,6 +2934,28 @@ def cmd_run(args: argparse.Namespace) -> None:
     if args.submit and not args.message:
         raise SystemExit("--submit requires --message")
 
+    submit_availability = {
+        'enabled': False,
+        'source': 'submit_disabled',
+        'credentials_path': None,
+    }
+    if args.submit:
+        submit_availability = _resolve_kaggle_submit_availability(
+            kaggle_json=args.kaggle_json,
+            kaggle_config_dir=args.kaggle_config_dir,
+        )
+        if submit_availability.get('enabled'):
+            source = submit_availability.get('source')
+            cred_path = submit_availability.get('credentials_path')
+            suffix = f" ({cred_path})" if cred_path else ''
+            print(f"[kaggle] live submit enabled via {source}{suffix}", flush=True)
+        else:
+            reason = str(submit_availability.get('reason') or 'Kaggle live submit is unavailable.')
+            if submit_availability.get('nonfatal'):
+                print(f"[kaggle] WARNING: {reason}", flush=True)
+            else:
+                raise SystemExit(reason)
+
     improvement_result: dict[str, Any] | None = None
     per_round_submit_reports: list[dict[str, Any]] = []
     do_schema_check = (args.submit or args.schema_check) and (not args.no_schema_check)
@@ -2867,7 +2967,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             schema_sample = _resolve_sample_submission(spec)
         except Exception:
             schema_sample = None
-    submit_during_improvement = bool(args.submit and args.keep_improving and not args.no_llm)
+    submit_during_improvement = bool(args.submit and submit_availability.get('enabled') and getattr(args, 'keep_improving', False) and not args.no_llm)
     callback_state = {'schema_warning_emitted': False}
     prompt_file: Path | None = None
     custom_prompts: Path | None = None
@@ -2955,18 +3055,29 @@ def cmd_run(args: argparse.Namespace) -> None:
 
         if submit_during_improvement:
             submit_comp = args.submit_competition or spec.competition
-            round_message = args.message if max(1, int(args.improvement_rounds)) <= 1 else f"{args.message} [round {round_idx}/{max(1, int(args.improvement_rounds))}]"
+            _improvement_rounds = max(1, int(getattr(args, 'improvement_rounds', 1)))
+            round_message = args.message if _improvement_rounds <= 1 else f"{args.message} [round {round_idx}/{_improvement_rounds}]"
             print(f"[improve] round {round_idx}: submit to Kaggle before next iteration", flush=True)
-            round_result['kaggle_submit'] = _kaggle_submit(
-                competition=submit_comp,
-                submission_csv=round_submission_csv,
-                message=round_message,
-                kaggle_json=args.kaggle_json,
-                submit_via=args.submit_via,
-                kaggle_config_dir=args.kaggle_config_dir,
-            )
-            round_result['submitted'] = True
-            per_round_submit_reports.append(round_result)
+            try:
+                round_result['kaggle_submit'] = _kaggle_submit(
+                    competition=submit_comp,
+                    submission_csv=round_submission_csv,
+                    message=round_message,
+                    kaggle_json=args.kaggle_json,
+                    submit_via=args.submit_via,
+                    kaggle_config_dir=args.kaggle_config_dir,
+                )
+                round_result['submitted'] = bool(round_result['kaggle_submit'].get('status') or round_result['kaggle_submit'].get('submitted', True))
+                if round_result['submitted']:
+                    per_round_submit_reports.append(round_result)
+            except KeyboardInterrupt:
+                raise
+            except SystemExit as submit_exc:
+                round_result['kaggle_submit'] = _nonfatal_kaggle_submit_report(submit_exc, submit_comp)
+                print(f"[kaggle] WARNING: round {round_idx} live submit failed; keeping validated solver and continuing: {submit_exc}", flush=True)
+            except Exception as submit_exc:
+                round_result['kaggle_submit'] = _nonfatal_kaggle_submit_report(submit_exc, submit_comp)
+                print(f"[kaggle] WARNING: round {round_idx} live submit failed; keeping validated solver and continuing: {type(submit_exc).__name__}: {submit_exc}", flush=True)
 
         return round_result
 
@@ -3005,9 +3116,9 @@ def cmd_run(args: argparse.Namespace) -> None:
                 max_response_chars=args.max_response_chars,
                 g4f_request_timeout=args.g4f_request_timeout,
                 g4f_stop_at_python_fence=args.g4f_stop_at_python_fence,
-                keep_improving=args.keep_improving,
-                improvement_rounds=args.improvement_rounds,
-                puzzles_csv_for_score=puzzles_csv if args.keep_improving else None,
+                keep_improving=getattr(args, 'keep_improving', False),
+                improvement_rounds=getattr(args, 'improvement_rounds', 1),
+                puzzles_csv_for_score=puzzles_csv if getattr(args, 'keep_improving', False) else None,
                 competition_format_slug=args.format or spec.format_slug,
                 vector_col_override=args.vector_col,
                 max_rows=args.max_rows,
@@ -3090,7 +3201,14 @@ def cmd_run(args: argparse.Namespace) -> None:
 
         # Optionally submit to Kaggle
         if args.submit:
-            if submit_during_improvement and improvement_result is not None and improvement_result.get('selected_round_already_submitted'):
+            if not submit_availability.get('enabled'):
+                report["kaggle_submit"] = {
+                    "mode": "skipped",
+                    "submitted": False,
+                    **submit_availability,
+                }
+                print(f"[kaggle] skipping final live submit: {submit_availability.get('reason')}", flush=True)
+            elif submit_during_improvement and improvement_result is not None and improvement_result.get('selected_round_already_submitted'):
                 report["kaggle_submit"] = {
                     "mode": "already_submitted_in_round",
                     "selected_round": improvement_result.get('best_round'),
@@ -3104,14 +3222,23 @@ def cmd_run(args: argparse.Namespace) -> None:
                 t3 = _stage("submit to Kaggle")
                 report["stages"]["submit_kaggle"] = {"start": time.time()}
                 submit_comp = args.submit_competition or spec.competition
-                kaggle_submit_report = _kaggle_submit(
-                    competition=submit_comp,
-                    submission_csv=out_csv,
-                    message=args.message,
-                    kaggle_json=args.kaggle_json,
-                    submit_via=args.submit_via,
-                    kaggle_config_dir=args.kaggle_config_dir,
-                )
+                try:
+                    kaggle_submit_report = _kaggle_submit(
+                        competition=submit_comp,
+                        submission_csv=out_csv,
+                        message=args.message,
+                        kaggle_json=args.kaggle_json,
+                        submit_via=args.submit_via,
+                        kaggle_config_dir=args.kaggle_config_dir,
+                    )
+                except KeyboardInterrupt:
+                    raise
+                except SystemExit as submit_exc:
+                    kaggle_submit_report = _nonfatal_kaggle_submit_report(submit_exc, submit_comp)
+                    print(f"[kaggle] WARNING: final live submit failed non-fatally: {submit_exc}", flush=True)
+                except Exception as submit_exc:
+                    kaggle_submit_report = _nonfatal_kaggle_submit_report(submit_exc, submit_comp)
+                    print(f"[kaggle] WARNING: final live submit failed non-fatally: {type(submit_exc).__name__}: {submit_exc}", flush=True)
                 report["kaggle_submit"] = kaggle_submit_report
                 report["stages"]["submit_kaggle"]["end"] = time.time()
                 report["stages"]["submit_kaggle"]["seconds"] = report["stages"]["submit_kaggle"]["end"] - report["stages"]["submit_kaggle"]["start"]

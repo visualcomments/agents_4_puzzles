@@ -1,0 +1,26 @@
+{
+  "competition": "cayley-py-megaminx",
+  "competition_slug": "cayley-py-megaminx",
+  "prompt_bundle": "user_prompt__custom_prompts_template",
+  "updated_at": "2026-04-01T17:38:45.946523",
+  "solver_path": "/mnt/data/repo_fix5/agents_4_puzzles-main/competitions/cayley-py-megaminx/generated/adaptive_baselines/user_prompt__custom_prompts_template.py",
+  "source_solver_path": "/mnt/data/repo_fix5/agents_4_puzzles-main/generated/solve_cayley-py-megaminx_20260401_173845.round1.py",
+  "round": 1,
+  "local_score": 90,
+  "selection_metric": {
+    "source": "local_score",
+    "value": 90.0
+  },
+  "kaggle": {
+    "submission_id": null,
+    "status": null,
+    "public_score": null,
+    "private_score": null,
+    "leaderboard_score": null,
+    "leaderboard_score_source": null,
+    "error_description": null
+  },
+  "prompt_file": "/mnt/data/repo_fix5/agents_4_puzzles-main/competitions/cayley-py-megaminx/prompts/user_prompt.txt",
+  "custom_prompts": "/mnt/data/repo_fix5/agents_4_puzzles-main/competitions/cayley-py-megaminx/prompts/custom_prompts_template.json",
+  "default_baseline": "/mnt/data/repo_fix5/agents_4_puzzles-main/competitions/cayley-py-megaminx/solve_module.py"
+}

@@ -309,6 +309,15 @@ def test_cmd_run_skips_duplicate_final_submit_when_best_round_was_already_submit
     monkeypatch.setattr(pipeline_cli, '_build_submission', fake_build_submission)
     monkeypatch.setattr(pipeline_cli, '_finalize_submission_output', lambda src, dst: Path(dst).write_text(Path(src).read_text(encoding='utf-8'), encoding='utf-8'))
     monkeypatch.setattr(pipeline_cli, '_kaggle_submit', fake_kaggle_submit)
+    monkeypatch.setattr(
+        pipeline_cli,
+        '_resolve_kaggle_submit_availability',
+        lambda **_: {
+            'enabled': True,
+            'source': 'environment',
+            'credentials_path': None,
+        },
+    )
     monkeypatch.setattr(pipeline_cli, '_attach_io_stats', lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline_cli, '_append_run_log', lambda *_args, **_kwargs: None)
 
