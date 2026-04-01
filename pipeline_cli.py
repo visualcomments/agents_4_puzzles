@@ -1500,6 +1500,101 @@ def _has_kaggle_env_credentials(env: Optional[dict[str, str]] = None) -> bool:
 
 
 
+def _autodiscover_kaggle_credentials_file(*, explicit_path: str | None = None) -> Optional[dict[str, str]]:
+    """Best-effort recovery for notebook/Colab uploads with arbitrary filenames.
+
+    Common failure mode: the user uploads `kaggle_something.json`, but the notebook
+    later hardcodes `~/.kaggle/kaggle.json` or `--kaggle-json ~/.kaggle/kaggle.json`.
+    We only auto-recover when we can identify a *single* valid credentials file.
+    """
+    try:
+        _ensure_llm_puzzles_on_path()
+        from src.kaggle_utils import _load_kaggle_credentials  # type: ignore
+    except Exception:
+        return None
+
+    resolved_explicit = str(Path(explicit_path).expanduser().resolve()) if explicit_path else None
+    search_roots: list[Path] = []
+    for root in [Path.cwd(), ROOT, Path('/content')]:
+        try:
+            rr = root.expanduser().resolve()
+        except Exception:
+            continue
+        if rr.exists() and rr not in search_roots:
+            search_roots.append(rr)
+
+    patterns = [
+        'kaggle.json',
+        'kaggle*.json',
+        '*kaggle*.json',
+        'access_token',
+        '*access_token*',
+        '*.json',
+        '*.token',
+        '*.txt',
+    ]
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in search_roots:
+        for pattern in patterns:
+            try:
+                paths = sorted(root.glob(pattern))
+            except Exception:
+                continue
+            for path in paths:
+                try:
+                    resolved = str(path.resolve())
+                except Exception:
+                    continue
+                if resolved in seen or resolved == resolved_explicit:
+                    continue
+                seen.add(resolved)
+                if not path.is_file():
+                    continue
+                try:
+                    stat = path.stat()
+                except Exception:
+                    continue
+                if stat.st_size <= 0 or stat.st_size > 128 * 1024:
+                    continue
+                try:
+                    creds = _load_kaggle_credentials(resolved)
+                except Exception:
+                    continue
+                name = path.name.lower()
+                score = 0
+                if root == Path.cwd().resolve():
+                    score += 20
+                if name == 'kaggle.json':
+                    score += 10
+                if 'kaggle' in name:
+                    score += 5
+                candidates.append({
+                    'path': resolved,
+                    'score': score,
+                    'kind': str(creds.get('kind') or ''),
+                    'name': path.name,
+                })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (-int(item['score']), str(item['name']), str(item['path'])))
+    top_score = int(candidates[0]['score'])
+    top = [c for c in candidates if int(c['score']) == top_score]
+    if len(top) != 1:
+        return None
+
+    winner = top[0]
+    return {
+        'credentials_path': str(winner['path']),
+        'kind': str(winner['kind']),
+        'source': 'autodiscovered_file',
+    }
+
+
+
 def _resolve_kaggle_submit_availability(
     *,
     kaggle_json: str | None,
@@ -1513,6 +1608,14 @@ def _resolve_kaggle_submit_availability(
                 'enabled': True,
                 'source': 'explicit_file',
                 'credentials_path': explicit_path,
+            }
+        recovered = _autodiscover_kaggle_credentials_file(explicit_path=explicit_path)
+        if recovered is not None:
+            return {
+                'enabled': True,
+                'source': str(recovered.get('source') or 'autodiscovered_file'),
+                'credentials_path': str(recovered['credentials_path']),
+                'recovered_from_missing_explicit': explicit_path,
             }
         return {
             'enabled': False,
@@ -1542,6 +1645,14 @@ def _resolve_kaggle_submit_availability(
             'enabled': True,
             'source': 'default_file',
             'credentials_path': str(Path(discovered).expanduser().resolve()),
+        }
+
+    recovered = _autodiscover_kaggle_credentials_file(explicit_path=None)
+    if recovered is not None:
+        return {
+            'enabled': True,
+            'source': str(recovered.get('source') or 'autodiscovered_file'),
+            'credentials_path': str(recovered['credentials_path']),
         }
 
     return {
@@ -2948,13 +3059,24 @@ def cmd_run(args: argparse.Namespace) -> None:
             source = submit_availability.get('source')
             cred_path = submit_availability.get('credentials_path')
             suffix = f" ({cred_path})" if cred_path else ''
+            recovered_from = submit_availability.get('recovered_from_missing_explicit')
             print(f"[kaggle] live submit enabled via {source}{suffix}", flush=True)
+            if recovered_from:
+                print(
+                    f"[kaggle] recovered missing credentials path {recovered_from} using {cred_path}",
+                    flush=True,
+                )
         else:
             reason = str(submit_availability.get('reason') or 'Kaggle live submit is unavailable.')
             if submit_availability.get('nonfatal'):
                 print(f"[kaggle] WARNING: {reason}", flush=True)
             else:
                 raise SystemExit(reason)
+    effective_kaggle_json = (
+        str(submit_availability.get('credentials_path'))
+        if submit_availability.get('enabled') and submit_availability.get('credentials_path')
+        else args.kaggle_json
+    )
 
     improvement_result: dict[str, Any] | None = None
     per_round_submit_reports: list[dict[str, Any]] = []
@@ -3063,7 +3185,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                     competition=submit_comp,
                     submission_csv=round_submission_csv,
                     message=round_message,
-                    kaggle_json=args.kaggle_json,
+                    kaggle_json=effective_kaggle_json,
                     submit_via=args.submit_via,
                     kaggle_config_dir=args.kaggle_config_dir,
                 )
@@ -3227,7 +3349,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                         competition=submit_comp,
                         submission_csv=out_csv,
                         message=args.message,
-                        kaggle_json=args.kaggle_json,
+                        kaggle_json=effective_kaggle_json,
                         submit_via=args.submit_via,
                         kaggle_config_dir=args.kaggle_config_dir,
                     )

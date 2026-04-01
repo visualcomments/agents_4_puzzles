@@ -355,3 +355,72 @@ def test_cmd_run_keep_improving_preserves_validated_solver_on_round_submit_syste
     pipeline_cli.cmd_run(args)
 
     assert Path(args.output).read_text(encoding='utf-8') == 'initial_state_id,path\n0,ROUND1\n'
+
+
+def test_resolve_kaggle_submit_availability_recovers_uploaded_credentials_when_explicit_default_missing(monkeypatch, tmp_path):
+    creds = tmp_path / 'kaggle_zuruck.json'
+    creds.write_text('{"username": "demo-user", "key": "demo-key"}', encoding='utf-8')
+    missing = tmp_path / '.kaggle' / 'kaggle.json'
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv('KAGGLE_USERNAME', raising=False)
+    monkeypatch.delenv('KAGGLE_KEY', raising=False)
+    monkeypatch.delenv('KAGGLE_API_TOKEN', raising=False)
+    monkeypatch.delenv('KAGGLE_TOKEN', raising=False)
+    monkeypatch.delenv('KAGGLE_CONFIG_DIR', raising=False)
+
+    report = pipeline_cli._resolve_kaggle_submit_availability(
+        kaggle_json=str(missing),
+        kaggle_config_dir=None,
+    )
+
+    assert report['enabled'] is True
+    assert report['source'] == 'autodiscovered_file'
+    assert report['credentials_path'] == str(creds.resolve())
+    assert report['recovered_from_missing_explicit'] == str(missing.resolve())
+
+
+def test_cmd_run_uses_recovered_kaggle_credentials_path_for_submit(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_agent_laboratory(**kwargs):
+        Path(kwargs['out_path']).write_text('ROUND0', encoding='utf-8')
+
+    def fake_validate_solver(*args, **kwargs):
+        return None
+
+    def fake_build_submission(**kwargs):
+        marker = Path(kwargs['solver_path']).read_text(encoding='utf-8').strip()
+        Path(kwargs['out_csv']).write_text(f'initial_state_id,path\n0,{marker}\n', encoding='utf-8')
+
+    def fake_kaggle_submit(**kwargs):
+        captured.update(kwargs)
+        return {'mode': 'api', 'submitted': True, 'status': {'publicScore': '1'}}
+
+    recovered = tmp_path / 'kaggle_zuruck.json'
+    recovered.write_text('{"username": "demo-user", "key": "demo-key"}', encoding='utf-8')
+
+    monkeypatch.setattr(pipeline_cli, '_run_agent_laboratory', fake_run_agent_laboratory)
+    monkeypatch.setattr(pipeline_cli, '_validate_solver', fake_validate_solver)
+    monkeypatch.setattr(pipeline_cli, '_build_submission', fake_build_submission)
+    monkeypatch.setattr(pipeline_cli, '_load_allowed_moves_from_validator', lambda _p: None)
+    monkeypatch.setattr(pipeline_cli, '_validate_submission_schema', lambda **_: {'header_ok': True, 'row_count_ok': True})
+    monkeypatch.setattr(pipeline_cli, '_gpu_diag_hint', lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        pipeline_cli,
+        '_resolve_kaggle_submit_availability',
+        lambda **_: {
+            'enabled': True,
+            'source': 'autodiscovered_file',
+            'credentials_path': str(recovered.resolve()),
+            'recovered_from_missing_explicit': str((tmp_path / '.kaggle' / 'kaggle.json').resolve()),
+        },
+    )
+    monkeypatch.setattr(pipeline_cli, '_kaggle_submit', fake_kaggle_submit)
+
+    args = _make_cmd_run_args(tmp_path)
+    args.keep_improving = False
+    args.kaggle_json = str(tmp_path / '.kaggle' / 'kaggle.json')
+    pipeline_cli.cmd_run(args)
+
+    assert captured['kaggle_json'] == str(recovered.resolve())
