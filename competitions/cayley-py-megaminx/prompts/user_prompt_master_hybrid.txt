@@ -7,7 +7,7 @@ PRIMARY GOAL
 Produce the best bundled-data score you can while keeping the solver fully deterministic, standard-library only, and competition-contract safe.
 
 ABSOLUTE REQUIREMENTS
-- Start from the exact working bundled baseline and patch it rather than replacing it.
+- Start from the exact best-tested bundled Megaminx baseline and patch it rather than replacing it.
 - Preserve `solve(vec) -> (moves, sorted_array)`.
 - Preserve script mode:
   `python solve_module.py "[1,2,3]"`

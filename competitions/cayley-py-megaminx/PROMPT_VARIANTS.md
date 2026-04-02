@@ -1,8 +1,8 @@
 # Megaminx prompt variants
 
-This competition now supports multiple prompt bundles that all start from the working bundled-data Megaminx solver:
+This competition now supports multiple prompt bundles. Baseline-backed variants start from `megaminx_best_tested_solver.py`; the `regular` bundle is from-scratch and does not receive baseline code in the prompt.
 
-- `regular` — safer/conservative improvement prompt.
+- `regular` — from-scratch prompt with no injected baseline code.
 - `improved` — more aggressive Megaminx-specific optimization prompt.
 - `dataset_adapted` — a stronger prompt bundle aligned with the inspected Megaminx datasets and tuned for fixed-depth local word optimization.
 - `structured` — structured planner/coder/fixer prompt package with bounded JSON planning.

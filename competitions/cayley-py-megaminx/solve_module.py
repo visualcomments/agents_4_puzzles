@@ -4,7 +4,7 @@ import csv
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Sequence, Tuple, Union
 
 MoveOut = Union[List[str], str]
 
@@ -74,6 +74,56 @@ def _find_comp_dir() -> Path:
     raise FileNotFoundError(f'Could not locate cayley-py-megaminx competition directory. Searched:\n{searched}')
 
 
+def load_puzzle_bundle() -> tuple[list[int], Dict[str, List[int]]]:
+    data_dir = _find_data_dir()
+    puzzle = json.loads((data_dir / 'puzzle_info.json').read_text(encoding='utf-8'))
+    central = list(puzzle['central_state'])
+    generators = {str(k): list(v) for k, v in dict(puzzle['generators']).items()}
+    return central, generators
+
+
+def move_names(generators: Dict[str, List[int]]) -> list[str]:
+    return list(generators)
+
+
+def forward_faces(generators: Dict[str, List[int]]) -> list[str]:
+    return [name for name in generators if not name.startswith('-')]
+
+
+def inverse_move_map(generators: Dict[str, List[int]]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for name in generators:
+        out[name] = name[1:] if name.startswith('-') else '-' + name
+    return out
+
+
+def path_to_moves(path: Union[str, Sequence[str], None]) -> list[str]:
+    if path is None:
+        return []
+    if isinstance(path, str):
+        text = path.strip()
+        if not text:
+            return []
+        return [part for part in text.split('.') if part]
+    return [str(part) for part in path if str(part)]
+
+
+def moves_to_path(moves: Sequence[str]) -> str:
+    return '.'.join(moves)
+
+
+def state_to_key(state: Sequence[int]) -> str:
+    return ','.join(str(int(x)) for x in state)
+
+
+def state_to_bytes(state: Sequence[int]) -> bytes:
+    return bytes(int(x) for x in state)
+
+
+def bytes_to_state(state: bytes) -> list[int]:
+    return list(state)
+
+
 def _load_submission_lookup(test_csv: Path, submission_csv: Path) -> Dict[str, str]:
     lookup: Dict[str, str] = {}
     with test_csv.open(newline='', encoding='utf-8') as tf, submission_csv.open(newline='', encoding='utf-8') as sf:
@@ -137,8 +187,8 @@ def _short_word_data(
 
     perms_bytes = {name: bytes(perm) for name, perm in generators.items()}
     identity = bytes(range(len(next(iter(generators.values())))))
-    inverse = {name: (name[1:] if name.startswith('-') else '-' + name) for name in generators}
-    move_names = list(generators)
+    inverse = inverse_move_map(generators)
+    move_names_local = list(generators)
 
     table: dict[bytes, tuple[str, ...]] = {identity: ()}
     frontier: list[tuple[bytes, str | None]] = [(identity, None)]
@@ -146,7 +196,7 @@ def _short_word_data(
         new_frontier: list[tuple[bytes, str | None]] = []
         for state, last in frontier:
             base = table[state]
-            for move in move_names:
+            for move in move_names_local:
                 if last is not None and move == inverse[last]:
                     continue
                 nxt = _compose_perm_bytes(state, perms_bytes[move])
@@ -245,6 +295,10 @@ def _optimize_word(moves: Sequence[str], generators: Dict[str, List[int]]) -> li
     return current
 
 
+def optimize_moves(moves: Sequence[str], generators: Dict[str, List[int]]) -> list[str]:
+    return _optimize_word(moves, generators)
+
+
 def _build_optimized_lookup(test_csv: Path, sample_csv: Path, generators: Dict[str, List[int]]) -> Dict[str, str]:
     lookup: Dict[str, str] = {}
     with test_csv.open(newline='', encoding='utf-8') as tf, sample_csv.open(newline='', encoding='utf-8') as sf:
@@ -257,9 +311,9 @@ def _build_optimized_lookup(test_csv: Path, sample_csv: Path, generators: Dict[s
         path = (sample_rows[idx].get('path') or '').strip()
         if not state_key:
             continue
-        moves = [] if not path else path.split('.')
+        moves = path_to_moves(path)
         optimized = _optimize_word(moves, generators)
-        lookup[state_key] = '.'.join(optimized)
+        lookup[state_key] = moves_to_path(optimized)
     return lookup
 
 
@@ -270,9 +324,7 @@ def _load_bundle() -> tuple[list[int], Dict[str, List[int]], Dict[str, str]]:
 
     data_dir = _find_data_dir()
     comp_dir = _find_comp_dir()
-    puzzle = json.loads((data_dir / 'puzzle_info.json').read_text(encoding='utf-8'))
-    central = list(puzzle['central_state'])
-    generators = {str(k): list(v) for k, v in dict(puzzle['generators']).items()}
+    central, generators = load_puzzle_bundle()
 
     optimized_lookup_json = data_dir / 'optimized_lookup.json'
     lookup: Dict[str, str] = {}
@@ -299,7 +351,7 @@ def _apply_perm(state: List[int], perm: List[int]) -> List[int]:
     return [state[j] for j in perm]
 
 
-def _apply_moves(vec: Sequence[int], moves: Sequence[str], generators: Dict[str, List[int]]) -> List[int]:
+def apply_moves(vec: Sequence[int], moves: Sequence[str], generators: Dict[str, List[int]]) -> List[int]:
     state = list(vec)
     for move in moves:
         perm = generators.get(move)
@@ -309,16 +361,41 @@ def _apply_moves(vec: Sequence[int], moves: Sequence[str], generators: Dict[str,
     return state
 
 
+def trajectory_states(vec: Sequence[int], moves: Sequence[str], generators: Dict[str, List[int]]) -> list[list[int]]:
+    states: list[list[int]] = [list(vec)]
+    state = list(vec)
+    for move in moves:
+        perm = generators.get(move)
+        if perm is None:
+            raise KeyError(move)
+        state = _apply_perm(state, perm)
+        states.append(list(state))
+    return states
+
+
+def validate_solution(vec: Sequence[int], moves: Sequence[str], central: Sequence[int], generators: Dict[str, List[int]]) -> bool:
+    try:
+        final_state = apply_moves(vec, moves, generators)
+    except KeyError:
+        return False
+    return list(final_state) == list(central)
+
+
+def solution_payload(vec: Sequence[int], moves: Sequence[str], central: Sequence[int], generators: Dict[str, List[int]]) -> dict[str, Any]:
+    final_state = apply_moves(vec, moves, generators)
+    return {'moves': list(moves), 'sorted_array': final_state, 'solved': list(final_state) == list(central)}
+
+
 def solve(vec: Sequence[int]) -> Tuple[MoveOut, List[int]]:
     central, generators, lookup = _load_bundle()
     state = list(vec)
     if state == central:
         return [], list(state)
-    state_key = ','.join(str(int(x)) for x in state)
+    state_key = state_to_key(state)
     path = lookup.get(state_key)
     if path is not None:
-        moves = [] if not path else path.split('.')
-        return moves, _apply_moves(state, moves, generators)
+        moves = path_to_moves(path)
+        return moves, apply_moves(state, moves, generators)
     return 'UNSOLVED', list(state)
 
 

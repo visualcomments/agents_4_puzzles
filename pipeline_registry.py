@@ -220,7 +220,7 @@ PipelineSpec(
         key="cayley-py-megaminx",
         competition="cayley-py-megaminx",
         format_slug="cayley-py-megaminx",
-        baseline_solver=_p("competitions", "cayley-py-megaminx", "solve_module.py"),
+        baseline_solver=_p("competitions", "cayley-py-megaminx", "megaminx_best_tested_solver.py"),
         validator=_p("competitions", "cayley-py-megaminx", "validate_solve_output.py"),
         prompt_file=_p("competitions", "cayley-py-megaminx", "prompts", "user_prompt.txt"),
         custom_prompts_file=_p(

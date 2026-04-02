@@ -4,7 +4,7 @@ https://www.kaggle.com/competitions/cayley-py-megaminx
 I need a Python module `solve_module.py` that takes an already working Megaminx baseline and improves it aggressively for lower Kaggle score while keeping full correctness on the official bundled dataset.
 
 ABSOLUTE REQUIREMENTS
-- Start from the exact baseline code below.
+- Start from the exact best-tested Megaminx baseline code below.
 - Preserve the public API `solve(vec) -> (moves, sorted_array)`.
 - `vec` is a Python list[int].
 - `moves` must be a list[str] of legal move names from `puzzle_info.json`.

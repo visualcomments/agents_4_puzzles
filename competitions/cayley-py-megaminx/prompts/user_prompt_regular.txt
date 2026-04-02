@@ -2,6 +2,7 @@ We are solving the Kaggle competition "CayleyPy Megaminx Solve Optimally":
 https://www.kaggle.com/competitions/cayley-py-megaminx
 
 Write the code from scratch.
+No reference baseline will be provided to the model for this prompt variant.
 I need a Python module `solve_module.py` that keeps exact bundled-state solving and safely improves bundled move count.
 
 PROMPT MODE MARKERS

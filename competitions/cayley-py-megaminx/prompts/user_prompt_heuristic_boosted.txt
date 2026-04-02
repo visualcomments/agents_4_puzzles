@@ -7,7 +7,7 @@ PRIMARY GOAL
 Produce the best bundled-data score you can while keeping the solver fully deterministic, standard-library only, and competition-contract safe.
 
 ABSOLUTE REQUIREMENTS
-- Start from the exact baseline code below.
+- Start from the exact best-tested Megaminx baseline code below.
 - Preserve `solve(vec) -> (moves, sorted_array)`.
 - `vec` is a Python list[int].
 - `moves` must be a list[str] of legal move names from `puzzle_info.json`.

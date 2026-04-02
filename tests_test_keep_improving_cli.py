@@ -149,7 +149,8 @@ def test_megaminx_regular_prompt_bundle_is_from_scratch_and_creative():
     assert 'NO_BASELINE_PATCH_BIAS' in prompt_text
     assert 'CREATIVE_SCORE_SEARCH' in prompt_text
     assert 'Write the code from scratch' in prompt_text
-    assert 'baseline, if shown, is only a compatibility and score reference' in custom_text
+    assert 'No reference baseline will be shown for this prompt variant' in custom_text
+    assert 'Do not expect any baseline section' in custom_text
 
 
 
@@ -763,3 +764,17 @@ def test_generate_solver_with_optional_improvement_prefers_kaggle_metric_for_reg
     assert result['best_round'] == 2
     assert result['best_metric']['source'] == 'kaggle_public_score'
     assert result['best_metric']['value'] == 450.0
+
+
+def test_build_initial_codegen_prompt_omits_baseline_section_when_from_scratch_and_no_baseline_code():
+    prompt = 'Write the code FROM SCRATCH. NO_BASELINE_PATCH_BIAS.'
+    out = rpp.build_initial_codegen_prompt(prompt, 'planner summary', baseline_code=None)
+    assert '## REFERENCE BASELINE' not in out
+    assert '## KNOWN-GOOD BASELINE SOLVER' not in out
+    assert 'Now write the solver file from scratch as a fully self-contained implementation.' in out
+
+
+def test_megaminx_pipeline_uses_best_tested_solver_as_default_baseline():
+    spec = get_pipeline('cayley-py-megaminx')
+    assert spec is not None
+    assert spec.baseline_solver.name == 'megaminx_best_tested_solver.py'

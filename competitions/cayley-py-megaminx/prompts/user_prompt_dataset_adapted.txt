@@ -7,7 +7,7 @@ PRIMARY GOAL
 Produce the best bundled-data score you can while keeping the solver fully deterministic, standard-library only, and competition-contract safe.
 
 ABSOLUTE REQUIREMENTS
-- Start from the working bundled-data baseline rather than replacing it with a risky generic solver.
+- Start from the exact best-tested bundled-data baseline code below and improve it rather than replacing it with a risky generic solver.
 - Preserve `solve(vec) -> (moves, sorted_array)`.
 - Preserve script mode:
   `python solve_module.py "[1,2,3]"`

@@ -1918,7 +1918,10 @@ def build_initial_codegen_prompt(
         ]
     )
     if baseline_code is None:
-        parts.append('Now write the solver file as a bounded patch-consistent implementation.')
+        if from_scratch:
+            parts.append('Now write the solver file from scratch as a fully self-contained implementation.')
+        else:
+            parts.append('Now write the solver file as a bounded patch-consistent implementation.')
     elif from_scratch:
         parts.extend(
             [
@@ -2112,7 +2115,7 @@ def _run_fixer_loop(
                 plan=plan,
                 current_code=current_code,
                 last_report=last_report,
-                baseline_code=baseline_code,
+                baseline_code=prompt_baseline_code,
                 plan_payload=plan_payload,
                 strategy_package=strategy_package,
                 max_code_chars=max_code_chars,
@@ -2597,6 +2600,10 @@ def main() -> None:
     else:
         baseline_code = make_baseline_stub()
 
+    prompt_baseline_code = None if _prompt_requests_from_scratch(user_prompt) else baseline_code
+    if prompt_baseline_code is None:
+        log_status('[prompt] from-scratch bundle detected: omitting baseline code from planner/coder/fixer prompts.')
+
     if any(_use_remote_subprocess_isolation(model) for model in set(planner_models + coder_models + fixer_models)):
         log_status('[memory] Remote LLM queries run in isolated subprocesses to keep notebook RAM stable.')
         if os.getenv('AGENTLAB_WORKER_KILL_PROCESS_GROUP', '1').strip().lower() in {'0', 'false', 'no', 'off'}:
@@ -2670,7 +2677,7 @@ def main() -> None:
             validator_path=validator_path,
             tests=tests,
             max_iters=args.max_iters,
-            baseline_code=baseline_code,
+            baseline_code=prompt_baseline_code,
             plan_beam_width=plan_beam_width,
             frontier_width=frontier_width,
             archive_size=archive_size,
@@ -2691,7 +2698,7 @@ def main() -> None:
                 planner_models,
                 user_prompt,
                 prompts["planner"],
-                baseline_code=baseline_code,
+                baseline_code=prompt_baseline_code,
             )
             if not plan:
                 plan = "(planner failed; proceeding without planner notes)"
@@ -2726,7 +2733,7 @@ def main() -> None:
                 validator_path=validator_path,
                 tests=tests,
                 max_iters=args.max_iters,
-                baseline_code=baseline_code,
+                baseline_code=prompt_baseline_code,
                 plan_payload=plan_payload,
                 strategy_package=strategy_package,
             )
@@ -2756,7 +2763,7 @@ def main() -> None:
         plan_for_codegen = _augment_plan_with_archive_context(plan, archive)
 
     baseline_patch_models = resolve_agent_models("baseline-patcher", fixer_models or coder_models, agent_model_overrides)
-    if baseline_code.strip() and baseline_patch_models:
+    if prompt_baseline_code and prompt_baseline_code.strip() and baseline_patch_models:
         patch_iters = max(1, min(args.max_iters, _env_int("AGENTLAB_BASELINE_PATCH_MAX_ITERS", 2)))
         log_status(
             "[baseline-patcher] attempting a minimal validated patch of the known-good baseline before offline fallback."
@@ -2773,7 +2780,7 @@ def main() -> None:
                 validator_path=validator_path,
                 tests=tests,
                 max_iters=patch_iters,
-                baseline_code=baseline_code,
+                baseline_code=prompt_baseline_code,
                 stage_label="baseline-patcher",
                 plan_payload=plan_payload,
                 strategy_package=strategy_package,
@@ -2805,7 +2812,7 @@ def main() -> None:
         validator_path=validator_path,
         tests=tests,
         max_iters=args.max_iters,
-        baseline_code=baseline_code,
+        baseline_code=prompt_baseline_code,
         generation_reports=generation_reports,
     )
     if recovered:

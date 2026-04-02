@@ -12,7 +12,7 @@ The highest-leverage edits are now concentrated in these functions:
 2. `build_initial_codegen_prompt`
    - coder receives a sectioned prompt with strategy package, planner JSON, planner summary, and the known-good baseline
 3. `try_generate_with_model`
-   - baseline code is passed on the first coder attempt, not only in the recovery path
+   - baseline code is passed on the first coder attempt for baseline-backed bundles; the `regular` from-scratch bundle omits the baseline section entirely
    - planner payload is forwarded into the fixer loop
 4. `_run_fixer_loop`
    - fixer receives planner JSON, planner summary, baseline code, current code, and the failure report in a sectioned repair prompt

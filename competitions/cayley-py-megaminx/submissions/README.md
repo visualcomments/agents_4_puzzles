@@ -2,30 +2,29 @@
 
 Recommended location for generated submissions.
 
-Prebuilt optimized Megaminx submission:
+Bundled best-known Megaminx submission in this repo:
 
     competitions/cayley-py-megaminx/submissions/optimized_submission.csv
 
-Current bundled optimized score:
+Current bundled score in this repo:
 
-    415075
+    414305
 
-Rebuild optimized assets offline:
+Rebuild deterministic assets offline:
 
     cd competitions/cayley-py-megaminx
     python build_optimized_assets.py
 
+Run the v3 offline post-optimizer on the longest rows:
+
+    cd competitions/cayley-py-megaminx
+    python search_improver_v3.py --submission submissions/optimized_submission.csv --out submissions/submission_search_improved_v3.csv --top-k 150
+
+Rebuild deterministic assets and then chain v3 in one command:
+
+    cd competitions/cayley-py-megaminx
+    python build_optimized_assets.py --search-version v3 --search-top-k 150
+
 Build via the repo pipeline (offline):
 
     python ../../pipeline_cli.py run --competition cayley-py-megaminx --output submissions/submission.csv --no-llm
-
-Submit to Kaggle (optional):
-
-    python ../../pipeline_cli.py run --competition cayley-py-megaminx --output submissions/submission.csv --no-llm --submit --message optimized --kaggle-json /path/to/kaggle.json --submit-via api
-
-Generate solver with prompt variants:
-
-    python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_regular.py --prompt-variant regular
-    python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_improved.py --prompt-variant improved
-    python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_dataset_adapted.py --prompt-variant dataset_adapted
-    python ../../pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_heuristic_boosted.py --prompt-variant heuristic_boosted

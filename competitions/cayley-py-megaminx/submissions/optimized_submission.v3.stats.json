@@ -1,0 +1,11 @@
+{
+  "top_k": 5,
+  "baseline_score": 414305,
+  "final_score": 414305,
+  "score_delta": 0,
+  "rows_improved": 0,
+  "total_saved_moves": 0,
+  "elapsed_ms_total": 9417.915,
+  "cayleypy_enabled": false,
+  "backend_preference": "internal"
+}
