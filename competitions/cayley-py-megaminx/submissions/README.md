@@ -1,5 +1,7 @@
 # Submissions
 
+Full Megaminx pipeline runbook: `competitions/cayley-py-megaminx/MEGAMINX_PIPELINES_RUNBOOK.md`
+
 Recommended location for generated submissions.
 
 Bundled best-known Megaminx submission in this repo:

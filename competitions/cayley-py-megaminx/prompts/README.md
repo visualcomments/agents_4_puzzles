@@ -1,5 +1,7 @@
 # Prompt variants for CayleyPy Megaminx
 
+Подробный пошаговый runbook со всеми основными сценариями запуска находится в `competitions/cayley-py-megaminx/MEGAMINX_PIPELINES_RUNBOOK.md`.
+
 Available prompt bundles:
 
 Baseline-backed variants inject `competitions/cayley-py-megaminx/megaminx_best_tested_solver.py` as the baseline code. The `regular` variant is true from-scratch mode and does not include any baseline section in the model prompt.
