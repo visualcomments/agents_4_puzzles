@@ -579,10 +579,3 @@ python pipeline_cli.py generate-solver \
 cd competitions/cayley-py-megaminx
 python build_optimized_assets.py --search-version v3 --search-top-k 150
 ```
-
-
-## GUI
-
-- Локальный Gradio GUI: `python megaminx_gui_app.py`
-- Colab/Jupyter GUI notebook: `colab/agents_4_puzzles_megaminx_gui.ipynb`
-- GUI поддерживает выбор пайплайнов, probe всех/выбранных g4f-моделей, выбор single/selected/working model mode и Kaggle submit.

@@ -2115,7 +2115,7 @@ def _run_fixer_loop(
                 plan=plan,
                 current_code=current_code,
                 last_report=last_report,
-                baseline_code=prompt_baseline_code,
+                baseline_code=baseline_code,
                 plan_payload=plan_payload,
                 strategy_package=strategy_package,
                 max_code_chars=max_code_chars,
