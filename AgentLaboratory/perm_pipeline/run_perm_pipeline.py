@@ -1858,9 +1858,11 @@ def _strict_output_requirements(*, prefer_minimal_patch: bool) -> str:
 
 
 _FROM_SCRATCH_MARKERS = (
-    'from scratch',
     'no_baseline_patch_bias',
+    'no reference baseline will be shown',
+    'do not expect any baseline section',
     'write the code from scratch',
+    'fresh solver from scratch',
     'do not rely on, patch, wrap, or extend any baseline implementation',
 )
 

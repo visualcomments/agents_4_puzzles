@@ -153,6 +153,16 @@ def test_megaminx_regular_prompt_bundle_is_from_scratch_and_creative():
     assert 'Do not expect any baseline section' in custom_text
 
 
+def test_megaminx_structured_prompt_bundle_is_not_from_scratch():
+    spec = get_pipeline('cayley-py-megaminx')
+    assert spec is not None
+    args = argparse.Namespace(prompt_variant='structured', prompt_file=None, custom_prompts=None)
+    prompt_file, custom_prompts = pipeline_cli._resolve_prompt_bundle(spec, args)
+
+    assert pipeline_cli._prompt_bundle_requests_from_scratch(prompt_file, custom_prompts) is False
+    assert pipeline_cli._prompt_bundle_uses_baseline(prompt_file, custom_prompts) is True
+
+
 
 def test_generate_solver_with_optional_improvement_runs_submission_hook_before_next_round(tmp_path, monkeypatch):
     baseline = tmp_path / 'baseline.py'

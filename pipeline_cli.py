@@ -893,14 +893,25 @@ def _safe_read_text(path: Optional[Path]) -> str:
 
 def _prompt_bundle_requests_from_scratch(prompt_file: Path, custom_prompts: Optional[Path] = None) -> bool:
     text = ("\n".join([_safe_read_text(prompt_file), _safe_read_text(custom_prompts)])).lower()
-    markers = [
-        'from scratch',
+    strong_markers = [
         'no_baseline_patch_bias',
+        'no reference baseline will be shown',
+        'do not expect any baseline section',
         'do not rely on, patch, wrap, or extend any baseline',
+        'do not rely on, patch, wrap, or extend any baseline implementation',
         'write the code from scratch',
         'fresh solver from scratch',
     ]
-    return any(marker in text for marker in markers)
+    if any(marker in text for marker in strong_markers):
+        return True
+
+    stems = [prompt_file.stem.lower()]
+    if custom_prompts is not None:
+        stems.append(custom_prompts.stem.lower())
+    if any(stem.endswith('_regular') or stem == 'regular' for stem in stems):
+        return True
+
+    return False
 
 
 def _prompt_bundle_uses_baseline(prompt_file: Path, custom_prompts: Optional[Path] = None) -> bool:
