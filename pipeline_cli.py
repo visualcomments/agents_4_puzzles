@@ -45,6 +45,7 @@ import itertools
 import importlib
 import importlib.util
 import json
+import py_compile
 import os
 import shutil
 import zipfile
@@ -1057,7 +1058,19 @@ def _resolve_effective_baseline(spec: PipelineSpec, prompt_file: Path, custom_pr
     paths = _adaptive_baseline_paths(spec, prompt_file, custom_prompts)
     meta = _read_json_file(paths['meta'])
     adaptive_solver = paths['solver']
-    effective_baseline = adaptive_solver if supports_ranked_reuse and adaptive_solver.exists() else spec.baseline_solver
+    effective_baseline = spec.baseline_solver
+    adaptive_valid: Optional[bool] = None
+    adaptive_invalid_reason: Optional[str] = None
+
+    if supports_ranked_reuse and adaptive_solver.exists():
+        adaptive_valid, adaptive_invalid_reason = _probe_solver_validation_failure(
+            adaptive_solver,
+            spec.validator,
+            _resolve_smoke_vectors(spec),
+        )
+        if adaptive_valid:
+            effective_baseline = adaptive_solver
+
     mode = 'baseline_patch' if uses_baseline else ('reference_only' if from_scratch else 'disabled')
     info = {
         'enabled': supports_ranked_reuse,
@@ -1070,6 +1083,8 @@ def _resolve_effective_baseline(spec: PipelineSpec, prompt_file: Path, custom_pr
         'adaptive_solver': str(adaptive_solver),
         'adaptive_meta': str(paths['meta']),
         'adaptive_exists': adaptive_solver.exists(),
+        'adaptive_valid': adaptive_valid,
+        'adaptive_invalid_reason': adaptive_invalid_reason,
         'selection_metric': meta.get('selection_metric') if isinstance(meta, dict) else None,
     }
     return effective_baseline, info
@@ -1906,6 +1921,43 @@ def _normalize_smoke_vectors(smoke_vector: Sequence[int] | Sequence[Sequence[int
     return [[int(x) for x in smoke_vector]]  # type: ignore[arg-type]
 
 
+def _probe_solver_validation_failure(
+    solver_path: Path,
+    validator_path: Path,
+    smoke_vector: Sequence[int] | Sequence[Sequence[int]],
+) -> tuple[bool, Optional[str]]:
+    if not solver_path.exists():
+        return False, f'missing solver file: {solver_path}'
+    try:
+        py_compile.compile(str(solver_path), doraise=True)
+    except Exception as exc:
+        return False, f'py_compile failed: {type(exc).__name__}: {exc}'
+
+    smoke_vectors = _normalize_smoke_vectors(smoke_vector)
+    if not smoke_vectors:
+        return True, None
+
+    timeout_s = _solver_validation_timeout_s()
+    for one_vec in smoke_vectors:
+        cmd = [
+            PYTHON,
+            str(validator_path),
+            '--solver',
+            str(solver_path),
+            '--vector',
+            json.dumps(list(one_vec)),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            return False, f'validator timeout after {timeout_s:g}s: {type(exc).__name__}'
+        if proc.returncode != 0:
+            details = '\n'.join(part.strip() for part in [proc.stdout or '', proc.stderr or ''] if part.strip())
+            details = details[:1200]
+            return False, details or f'validator exited with status {proc.returncode}'
+    return True, None
+
+
 def _validate_solver(solver_path: Path, validator_path: Path, smoke_vector: Sequence[int] | Sequence[Sequence[int]]) -> None:
     smoke_vectors = _normalize_smoke_vectors(smoke_vector)
     total = len(smoke_vectors)
@@ -2715,6 +2767,12 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         effective_baseline, adaptive_baseline_info = _resolve_effective_baseline(spec, prompt_file, custom_prompts)
 
         if adaptive_baseline_info.get('enabled'):
+            if adaptive_baseline_info.get('adaptive_exists') and adaptive_baseline_info.get('adaptive_valid') is False:
+                print(
+                    f"[adaptive-baseline] ignoring invalid saved baseline {adaptive_baseline_info.get('adaptive_solver')}: "
+                    f"{adaptive_baseline_info.get('adaptive_invalid_reason')}",
+                    flush=True,
+                )
             print(
                 f"[adaptive-baseline] using {adaptive_baseline_info.get('effective_baseline')} "
                 f"for bundle={adaptive_baseline_info.get('bundle_slug')}",

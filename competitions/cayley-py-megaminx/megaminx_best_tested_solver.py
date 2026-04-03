@@ -19,6 +19,12 @@ def _candidate_repo_roots() -> list[Path]:
         HERE / 'repo_work' / 'agents_4_puzzles-main',
         HERE / 'agents_4_puzzles-main',
         HERE,
+        HERE.parent,
+        HERE.parent.parent,
+        HERE.parent.parent.parent,
+        Path.cwd(),
+        Path.cwd().parent,
+        Path.cwd().parent.parent,
     ]
     out: list[Path] = []
     seen: set[Path] = set()
@@ -143,33 +149,33 @@ def solve_state(vec: Sequence[int]) -> dict[str, Any]:
                 'solved': list(final_state) == list(_CENTRAL),
                 'source': 'fallback:solve_module',
             }
-        optimized = SM.optimize_moves(moves, _GENERATORS)
-        final_state = SM.apply_moves(state, optimized, _GENERATORS)
+        final_state = SM.apply_moves(state, moves, _GENERATORS)
         return {
-            'moves': optimized,
-            'path': SM.moves_to_path(optimized),
+            'moves': list(moves),
+            'path': SM.moves_to_path(moves),
             'sorted_array': list(final_state),
             'solved': list(final_state) == list(_CENTRAL),
-            'source': 'fallback:solve_module+optimize',
+            'source': 'fallback:solve_module',
         }
 
     moves = SM.path_to_moves(path)
-    optimized = SM.optimize_moves(moves, _GENERATORS)
-    if len(optimized) <= len(moves) and SM.validate_solution(state, optimized, _CENTRAL, _GENERATORS):
-        chosen = optimized
-        stage = 'lookup+preopt'
-    else:
-        chosen = moves
-        stage = 'lookup'
-    final_state = SM.apply_moves(state, chosen, _GENERATORS)
+    final_state = SM.apply_moves(state, moves, _GENERATORS)
     return {
-        'moves': chosen,
-        'path': SM.moves_to_path(chosen),
+        'moves': moves,
+        'path': path,
         'sorted_array': list(final_state),
         'solved': list(final_state) == list(_CENTRAL),
-        'source': f'{stage}:{source}',
+        'source': f'lookup:{source}',
     }
 
+
+
+def solve(vec: Sequence[int]) -> tuple[list[str] | str, list[int]]:
+    result = solve_state(vec)
+    moves = result['moves']
+    if isinstance(moves, list):
+        return list(moves), list(result['sorted_array'])
+    return str(moves), list(result['sorted_array'])
 
 def build_submission(out_csv: Path) -> dict[str, Any]:
     test_rows = _load_test_rows()
@@ -204,7 +210,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description='Best tested Megaminx solver: best submission lookup + deterministic pre-opt fallback.'
     )
-    group = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument(
+        'vector',
+        nargs='?',
+        help='Compatibility mode for validators: puzzle state as JSON list or comma-separated integers.',
+    )
+    group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--state-json', help='State as JSON list, e.g. "[0,1,2,...]"')
     group.add_argument('--state-csv', help='State as comma-separated integers')
     group.add_argument('--build-submission', help='Write a full submission CSV to this path')
@@ -226,10 +237,23 @@ def main() -> None:
         print(json.dumps(payload, ensure_ascii=False))
         return
 
-    text = args.state_json if args.state_json is not None else args.state_csv
-    state = state_from_text(str(text))
+    vector_arg = args.vector
+    if vector_arg is None:
+        vector_arg = args.state_json if args.state_json is not None else args.state_csv
+
+    if vector_arg is None:
+        parser.error('provide either a positional VECTOR, --state-json, --state-csv, --build-submission, or --print-source')
+
+    state = state_from_text(str(vector_arg))
     result = solve_state(state)
-    print(json.dumps(result, ensure_ascii=False))
+    payload = {
+        'moves': result['moves'],
+        'sorted_array': result['sorted_array'],
+        'path': result['path'],
+        'solved': result['solved'],
+        'source': result['source'],
+    }
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 if __name__ == '__main__':

@@ -86,6 +86,42 @@ def test_megaminx_copied_baseline_solver_can_still_find_data():
     assert payload["moves"] == []
     assert payload["sorted_array"] == list(range(120))
 
+
+
+def test_megaminx_best_tested_solver_passes_validator_contract():
+    import csv
+    import json as _json
+    import subprocess
+
+    solver = ROOT / "competitions" / "cayley-py-megaminx" / "megaminx_best_tested_solver.py"
+    validator = ROOT / "competitions" / "cayley-py-megaminx" / "validate_solve_output.py"
+    with (ROOT / "competitions" / "cayley-py-megaminx" / "data" / "test.csv").open(newline="", encoding="utf-8") as f:
+        row = next(csv.DictReader(f))
+    vec = [int(x) for x in row["initial_state"].split(",")]
+    proc = subprocess.run(
+        [sys.executable, str(validator), "--solver", str(solver), "--vector", _json.dumps(vec)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+
+
+def test_megaminx_adaptive_template_baseline_is_valid_python_and_passes_validator():
+    import csv
+    import json as _json
+    import subprocess
+
+    solver = ROOT / "competitions" / "cayley-py-megaminx" / "generated" / "adaptive_baselines" / "user_prompt__custom_prompts_template.py"
+    validator = ROOT / "competitions" / "cayley-py-megaminx" / "validate_solve_output.py"
+    with (ROOT / "competitions" / "cayley-py-megaminx" / "data" / "test.csv").open(newline="", encoding="utf-8") as f:
+        row = next(csv.DictReader(f))
+    vec = [int(x) for x in row["initial_state"].split(",")]
+    proc = subprocess.run(
+        [sys.executable, str(validator), "--solver", str(solver), "--vector", _json.dumps(vec)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
 def test_cmd_run_forwards_print_generation_flags_to_agent_lab(monkeypatch, tmp_path):
     captured = {}
 

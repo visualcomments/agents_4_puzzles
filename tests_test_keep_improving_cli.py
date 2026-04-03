@@ -512,15 +512,16 @@ def test_resolve_effective_baseline_prefers_saved_adaptive_baseline_for_patch_pr
         state_columns=['vector'],
         smoke_vector=[1, 2, 3],
     )
-    spec.baseline_solver.write_text('baseline', encoding='utf-8')
-    spec.validator.write_text('# validator', encoding='utf-8')
+    spec.baseline_solver.write_text('def solve(vec):\n    return [], list(vec)\n', encoding='utf-8')
+    spec.validator.write_text('import argparse, json, subprocess, sys\nfrom pathlib import Path\n\n\ndef main():\n    ap = argparse.ArgumentParser()\n    ap.add_argument("--solver", required=True)\n    ap.add_argument("--vector", required=True)\n    args = ap.parse_args()\n    proc = subprocess.run([sys.executable, args.solver, args.vector], capture_output=True, text=True)\n    if proc.returncode != 0:\n        raise SystemExit(proc.returncode)\n    data = json.loads(proc.stdout)\n    if sorted(data) != ["moves", "sorted_array"]:\n        raise SystemExit(1)\n    print("ok")\n\n\nif __name__ == "__main__":\n    main()\n', encoding='utf-8')
     spec.prompt_file.write_text('Start from the exact baseline code below.', encoding='utf-8')
 
     adaptive_paths = pipeline_cli._adaptive_baseline_paths(spec, spec.prompt_file, None)
     adaptive_paths['root'].mkdir(parents=True, exist_ok=True)
-    adaptive_paths['solver'].write_text('adaptive', encoding='utf-8')
+    adaptive_paths['solver'].write_text('def solve(vec):\n    return [], list(vec)\n', encoding='utf-8')
     adaptive_paths['meta'].write_text('{"selection_metric": {"source": "local_score", "value": 77}}', encoding='utf-8')
 
+    monkeypatch.setattr(pipeline_cli, '_probe_solver_validation_failure', lambda *args, **kwargs: (True, None))
     effective, info = pipeline_cli._resolve_effective_baseline(spec, spec.prompt_file, None)
 
     assert effective == adaptive_paths['solver']
@@ -545,8 +546,8 @@ def test_persist_adaptive_baseline_writes_local_score_manifest(tmp_path, monkeyp
         state_columns=['vector'],
         smoke_vector=[1, 2, 3],
     )
-    spec.baseline_solver.write_text('baseline', encoding='utf-8')
-    spec.validator.write_text('# validator', encoding='utf-8')
+    spec.baseline_solver.write_text('def solve(vec):\n    return [], list(vec)\n', encoding='utf-8')
+    spec.validator.write_text('import argparse, json, subprocess, sys\nfrom pathlib import Path\n\n\ndef main():\n    ap = argparse.ArgumentParser()\n    ap.add_argument("--solver", required=True)\n    ap.add_argument("--vector", required=True)\n    args = ap.parse_args()\n    proc = subprocess.run([sys.executable, args.solver, args.vector], capture_output=True, text=True)\n    if proc.returncode != 0:\n        raise SystemExit(proc.returncode)\n    data = json.loads(proc.stdout)\n    if sorted(data) != ["moves", "sorted_array"]:\n        raise SystemExit(1)\n    print("ok")\n\n\nif __name__ == "__main__":\n    main()\n', encoding='utf-8')
     spec.prompt_file.write_text('Start from the exact baseline code below.', encoding='utf-8')
     candidate = tmp_path / 'candidate.py'
     candidate.write_text('candidate-v1', encoding='utf-8')
@@ -597,8 +598,8 @@ def test_persist_adaptive_baseline_prefers_kaggle_score_when_available(tmp_path,
         state_columns=['vector'],
         smoke_vector=[1, 2, 3],
     )
-    spec.baseline_solver.write_text('baseline', encoding='utf-8')
-    spec.validator.write_text('# validator', encoding='utf-8')
+    spec.baseline_solver.write_text('def solve(vec):\n    return [], list(vec)\n', encoding='utf-8')
+    spec.validator.write_text('import argparse, json, subprocess, sys\nfrom pathlib import Path\n\n\ndef main():\n    ap = argparse.ArgumentParser()\n    ap.add_argument("--solver", required=True)\n    ap.add_argument("--vector", required=True)\n    args = ap.parse_args()\n    proc = subprocess.run([sys.executable, args.solver, args.vector], capture_output=True, text=True)\n    if proc.returncode != 0:\n        raise SystemExit(proc.returncode)\n    data = json.loads(proc.stdout)\n    if sorted(data) != ["moves", "sorted_array"]:\n        raise SystemExit(1)\n    print("ok")\n\n\nif __name__ == "__main__":\n    main()\n', encoding='utf-8')
     spec.prompt_file.write_text('Start from the exact baseline code below.', encoding='utf-8')
 
     paths = pipeline_cli._adaptive_baseline_paths(spec, spec.prompt_file, None)
@@ -638,6 +639,39 @@ def test_persist_adaptive_baseline_prefers_kaggle_score_when_available(tmp_path,
     assert Path(manifest['solver_path']).read_text(encoding='utf-8') == 'new-best'
 
 
+def test_resolve_effective_baseline_falls_back_when_saved_adaptive_baseline_is_invalid(tmp_path, monkeypatch):
+    old_root = pipeline_cli.ROOT
+    monkeypatch.setattr(pipeline_cli, 'ROOT', tmp_path)
+
+    spec = PipelineSpec(
+        key='demo-invalid-adaptive',
+        competition='demo-invalid-adaptive',
+        format_slug='format/moves-dot',
+        baseline_solver=tmp_path / 'baseline.py',
+        validator=tmp_path / 'validator.py',
+        prompt_file=tmp_path / 'prompt.txt',
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+    spec.baseline_solver.write_text('def solve(vec):\n    return [], list(vec)\n', encoding='utf-8')
+    spec.validator.write_text('import argparse, json, subprocess, sys\n\n\ndef main():\n    ap = argparse.ArgumentParser()\n    ap.add_argument("--solver", required=True)\n    ap.add_argument("--vector", required=True)\n    args = ap.parse_args()\n    proc = subprocess.run([sys.executable, args.solver, args.vector], capture_output=True, text=True)\n    if proc.returncode != 0:\n        raise SystemExit(proc.returncode)\n    data = json.loads(proc.stdout)\n    if sorted(data) != ["moves", "sorted_array"]:\n        raise SystemExit(1)\n    print("ok")\n\n\nif __name__ == "__main__":\n    main()\n', encoding='utf-8')
+    spec.prompt_file.write_text('Start from the exact baseline code below.', encoding='utf-8')
+
+    adaptive_paths = pipeline_cli._adaptive_baseline_paths(spec, spec.prompt_file, None)
+    adaptive_paths['root'].mkdir(parents=True, exist_ok=True)
+    adaptive_paths['solver'].write_text('ROUND1', encoding='utf-8')
+    adaptive_paths['meta'].write_text('{"selection_metric": {"source": "local_score", "value": 1}}', encoding='utf-8')
+
+    effective, info = pipeline_cli._resolve_effective_baseline(spec, spec.prompt_file, None)
+
+    assert effective == spec.baseline_solver
+    assert info['adaptive_exists'] is True
+    assert info['adaptive_valid'] is False
+    assert 'py_compile failed' in str(info['adaptive_invalid_reason'])
+    monkeypatch.setattr(pipeline_cli, 'ROOT', old_root)
+
+
 def test_resolve_effective_baseline_enables_reference_only_ranked_reuse_for_regular_prompt(tmp_path, monkeypatch):
     old_root = pipeline_cli.ROOT
     monkeypatch.setattr(pipeline_cli, 'ROOT', tmp_path)
@@ -653,16 +687,17 @@ def test_resolve_effective_baseline_enables_reference_only_ranked_reuse_for_regu
         state_columns=['vector'],
         smoke_vector=[1, 2, 3],
     )
-    spec.baseline_solver.write_text('baseline', encoding='utf-8')
-    spec.validator.write_text('# validator', encoding='utf-8')
+    spec.baseline_solver.write_text('def solve(vec):\n    return [], list(vec)\n', encoding='utf-8')
+    spec.validator.write_text('import argparse, json, subprocess, sys\nfrom pathlib import Path\n\n\ndef main():\n    ap = argparse.ArgumentParser()\n    ap.add_argument("--solver", required=True)\n    ap.add_argument("--vector", required=True)\n    args = ap.parse_args()\n    proc = subprocess.run([sys.executable, args.solver, args.vector], capture_output=True, text=True)\n    if proc.returncode != 0:\n        raise SystemExit(proc.returncode)\n    data = json.loads(proc.stdout)\n    if sorted(data) != ["moves", "sorted_array"]:\n        raise SystemExit(1)\n    print("ok")\n\n\nif __name__ == "__main__":\n    main()\n', encoding='utf-8')
     spec.prompt_file.write_text('Write the code from scratch. NO_BASELINE_PATCH_BIAS', encoding='utf-8')
     spec.custom_prompts_file.write_text('baseline, if shown, is only a compatibility and score reference', encoding='utf-8')
 
     adaptive_paths = pipeline_cli._adaptive_baseline_paths(spec, spec.prompt_file, spec.custom_prompts_file)
     adaptive_paths['root'].mkdir(parents=True, exist_ok=True)
-    adaptive_paths['solver'].write_text('reference-best', encoding='utf-8')
+    adaptive_paths['solver'].write_text('def solve(vec):\n    return [], list(vec)\n', encoding='utf-8')
     adaptive_paths['meta'].write_text('{"selection_metric": {"source": "kaggle_public_score", "value": 70.0}}', encoding='utf-8')
 
+    monkeypatch.setattr(pipeline_cli, '_probe_solver_validation_failure', lambda *args, **kwargs: (True, None))
     effective, info = pipeline_cli._resolve_effective_baseline(spec, spec.prompt_file, spec.custom_prompts_file)
 
     assert effective == adaptive_paths['solver']
