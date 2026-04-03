@@ -2689,19 +2689,37 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
             "Unknown --competition. Run `python pipeline_cli.py list-pipelines` to see supported pipelines."
         )
 
+    explicit_baseline = Path(args.baseline).resolve() if getattr(args, 'baseline', None) else None
+    if explicit_baseline is not None and not explicit_baseline.exists():
+        raise SystemExit(f"Explicit --baseline file does not exist: {explicit_baseline}")
+
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Select prompt bundle (can be overridden, or switched via --prompt-variant)
     prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
-    effective_baseline, adaptive_baseline_info = _resolve_effective_baseline(spec, prompt_file, custom_prompts)
+    if explicit_baseline is not None:
+        effective_baseline = explicit_baseline
+        adaptive_baseline_info = {
+            'enabled': False,
+            'uses_baseline': True,
+            'from_scratch': _prompt_bundle_requests_from_scratch(prompt_file, custom_prompts),
+            'supports_ranked_reuse': False,
+            'bundle_slug': _adaptive_baseline_bundle_slug(prompt_file, custom_prompts),
+            'effective_baseline': str(explicit_baseline),
+            'default_baseline': str(spec.baseline_solver),
+            'source': 'explicit_override',
+        }
+        print(f"[baseline] using explicit override: {explicit_baseline}", flush=True)
+    else:
+        effective_baseline, adaptive_baseline_info = _resolve_effective_baseline(spec, prompt_file, custom_prompts)
 
-    if adaptive_baseline_info.get('enabled'):
-        print(
-            f"[adaptive-baseline] using {adaptive_baseline_info.get('effective_baseline')} "
-            f"for bundle={adaptive_baseline_info.get('bundle_slug')}",
-            flush=True,
-        )
+        if adaptive_baseline_info.get('enabled'):
+            print(
+                f"[adaptive-baseline] using {adaptive_baseline_info.get('effective_baseline')} "
+                f"for bundle={adaptive_baseline_info.get('bundle_slug')}",
+                flush=True,
+            )
 
     if args.no_llm:
         shutil.copyfile(effective_baseline, out_path)
@@ -2983,6 +3001,10 @@ def cmd_run(args: argparse.Namespace) -> None:
             f"Unknown competition/pipeline '{args.competition}'. Run `python pipeline_cli.py list-pipelines`."
         )
 
+    explicit_baseline = Path(args.baseline).resolve() if getattr(args, 'baseline', None) else None
+    if explicit_baseline is not None and not explicit_baseline.exists():
+        raise SystemExit(f"Explicit --baseline file does not exist: {explicit_baseline}")
+
     generated_dir = ROOT / "generated"
     generated_dir.mkdir(exist_ok=True)
 
@@ -3093,20 +3115,33 @@ def cmd_run(args: argparse.Namespace) -> None:
     callback_state = {'schema_warning_emitted': False}
     prompt_file: Path | None = None
     custom_prompts: Path | None = None
-    effective_baseline = spec.baseline_solver
+    effective_baseline = explicit_baseline or spec.baseline_solver
     adaptive_baseline_info: dict[str, Any] = {'enabled': False}
     adaptive_updates: list[dict[str, Any]] = []
 
     if not args.no_llm:
         prompt_file, custom_prompts = _resolve_prompt_bundle(spec, args)
-        effective_baseline, adaptive_baseline_info = _resolve_effective_baseline(spec, prompt_file, custom_prompts)
+        if explicit_baseline is not None:
+            adaptive_baseline_info = {
+                'enabled': False,
+                'uses_baseline': True,
+                'from_scratch': _prompt_bundle_requests_from_scratch(prompt_file, custom_prompts),
+                'supports_ranked_reuse': False,
+                'bundle_slug': _adaptive_baseline_bundle_slug(prompt_file, custom_prompts),
+                'effective_baseline': str(explicit_baseline),
+                'default_baseline': str(spec.baseline_solver),
+                'source': 'explicit_override',
+            }
+            print(f"[baseline] using explicit override: {explicit_baseline}", flush=True)
+        else:
+            effective_baseline, adaptive_baseline_info = _resolve_effective_baseline(spec, prompt_file, custom_prompts)
+            if adaptive_baseline_info.get('enabled'):
+                print(
+                    f"[adaptive-baseline] using {adaptive_baseline_info.get('effective_baseline')} "
+                    f"for bundle={adaptive_baseline_info.get('bundle_slug')}",
+                    flush=True,
+                )
         report['adaptive_baseline'] = adaptive_baseline_info
-        if adaptive_baseline_info.get('enabled'):
-            print(
-                f"[adaptive-baseline] using {adaptive_baseline_info.get('effective_baseline')} "
-                f"for bundle={adaptive_baseline_info.get('bundle_slug')}",
-                flush=True,
-            )
 
     def _candidate_round_hook(payload: dict[str, Any]) -> None:
         if not adaptive_baseline_info.get('enabled') or prompt_file is None:
@@ -3207,7 +3242,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         t0 = _stage("generate solver")
         report["stages"]["generate_solver"] = {"start": time.time()}
         if args.no_llm:
-            shutil.copyfile(spec.baseline_solver, solver_path)
+            shutil.copyfile(effective_baseline, solver_path)
             print(f"[run] --no-llm: copied baseline solver -> {solver_path}")
         else:
             assert prompt_file is not None
@@ -3525,6 +3560,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--keep-improving", action="store_true", help="Do not stop after the first validated solver; keep running additional locally scored improvement rounds.")
     sp.add_argument("--improvement-rounds", type=int, default=3, help="How many validated generation rounds to run when --keep-improving is enabled.")
     sp.add_argument("--allow-baseline", action="store_true")
+    sp.add_argument("--baseline", default=None, help="Optional explicit baseline solve_module.py override used for prompt grounding, fallback, and --no-llm.")
     sp.add_argument("--no-llm", action="store_true", help="Skip LLM: just copy baseline")
     sp.set_defaults(func=cmd_generate_solver)
 
@@ -3605,6 +3641,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--keep-improving", action="store_true", help="Do not stop after the first validated solver; keep running additional locally scored improvement rounds.")
     sp.add_argument("--improvement-rounds", type=int, default=3, help="How many validated generation rounds to run when --keep-improving is enabled.")
     sp.add_argument("--allow-baseline", action="store_true")
+    sp.add_argument("--baseline", default=None, help="Optional explicit baseline solve_module.py override used for prompt grounding, fallback, and --no-llm.")
     sp.add_argument("--no-llm", action="store_true")
     sp.add_argument("--format", default=None, help="Override llm-puzzles format slug")
     sp.add_argument("--vector-col", default=None, help="Override state column")

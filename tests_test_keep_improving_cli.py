@@ -778,3 +778,108 @@ def test_megaminx_pipeline_uses_best_tested_solver_as_default_baseline():
     spec = get_pipeline('cayley-py-megaminx')
     assert spec is not None
     assert spec.baseline_solver.name == 'megaminx_best_tested_solver.py'
+
+
+def test_build_parser_accepts_explicit_baseline_for_generate_and_run():
+    parser = pipeline_cli.build_parser()
+
+    gen_args = parser.parse_args([
+        'generate-solver',
+        '--competition', 'cayley-py-megaminx',
+        '--out', 'generated/solve.py',
+        '--baseline', 'custom_baseline.py',
+    ])
+    assert gen_args.baseline == 'custom_baseline.py'
+
+    run_args = parser.parse_args([
+        'run',
+        '--competition', 'cayley-py-megaminx',
+        '--output', 'submissions/submission.csv',
+        '--baseline', 'custom_baseline.py',
+    ])
+    assert run_args.baseline == 'custom_baseline.py'
+
+
+
+def test_cmd_generate_solver_no_llm_uses_explicit_baseline_override(tmp_path, monkeypatch):
+    parser = pipeline_cli.build_parser()
+    args = parser.parse_args([
+        'generate-solver',
+        '--competition', 'demo-competition',
+        '--out', str(tmp_path / 'generated_solver.py'),
+        '--baseline', str(tmp_path / 'custom_baseline.py'),
+        '--no-llm',
+    ])
+
+    default_baseline = tmp_path / 'default_baseline.py'
+    default_baseline.write_text('default baseline', encoding='utf-8')
+    custom_baseline = tmp_path / 'custom_baseline.py'
+    custom_baseline.write_text('custom baseline', encoding='utf-8')
+    validator = tmp_path / 'validator.py'
+    validator.write_text('# validator', encoding='utf-8')
+    prompt_file = tmp_path / 'prompt.txt'
+    prompt_file.write_text('Use the baseline code.', encoding='utf-8')
+
+    spec = PipelineSpec(
+        key='demo-competition',
+        competition='demo-competition',
+        format_slug='format/moves-dot',
+        baseline_solver=default_baseline,
+        validator=validator,
+        prompt_file=prompt_file,
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+
+    monkeypatch.setattr(pipeline_cli, 'get_pipeline', lambda _competition: spec)
+    monkeypatch.setattr(pipeline_cli, '_validate_solver', lambda *_args, **_kwargs: None)
+
+    pipeline_cli.cmd_generate_solver(args)
+
+    assert Path(args.out).read_text(encoding='utf-8') == 'custom baseline'
+
+
+
+def test_cmd_generate_solver_prefers_explicit_baseline_over_adaptive_lookup(tmp_path, monkeypatch):
+    parser = pipeline_cli.build_parser()
+    args = parser.parse_args([
+        'generate-solver',
+        '--competition', 'demo-competition',
+        '--out', str(tmp_path / 'generated_solver.py'),
+        '--baseline', str(tmp_path / 'custom_baseline.py'),
+        '--no-llm',
+    ])
+
+    default_baseline = tmp_path / 'default_baseline.py'
+    default_baseline.write_text('default baseline', encoding='utf-8')
+    custom_baseline = tmp_path / 'custom_baseline.py'
+    custom_baseline.write_text('custom baseline', encoding='utf-8')
+    validator = tmp_path / 'validator.py'
+    validator.write_text('# validator', encoding='utf-8')
+    prompt_file = tmp_path / 'prompt.txt'
+    prompt_file.write_text('Use the baseline code.', encoding='utf-8')
+
+    spec = PipelineSpec(
+        key='demo-competition',
+        competition='demo-competition',
+        format_slug='format/moves-dot',
+        baseline_solver=default_baseline,
+        validator=validator,
+        prompt_file=prompt_file,
+        custom_prompts_file=None,
+        state_columns=['vector'],
+        smoke_vector=[1, 2, 3],
+    )
+
+    monkeypatch.setattr(pipeline_cli, 'get_pipeline', lambda _competition: spec)
+    monkeypatch.setattr(pipeline_cli, '_validate_solver', lambda *_args, **_kwargs: None)
+
+    def fail_resolve(*_args, **_kwargs):
+        raise AssertionError('adaptive baseline resolution should be skipped when --baseline is provided')
+
+    monkeypatch.setattr(pipeline_cli, '_resolve_effective_baseline', fail_resolve)
+
+    pipeline_cli.cmd_generate_solver(args)
+
+    assert Path(args.out).read_text(encoding='utf-8') == 'custom baseline'
