@@ -8,12 +8,31 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
 import sys
+import importlib.util
 
 _HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+_REPO_ROOT = _HERE.parent.parent
+for _path in [
+    _REPO_ROOT / 'third_party' / 'cayleypy-main' / 'cayleypy',
+    _REPO_ROOT / 'third_party' / 'cayleypy-main',
+    _HERE,
+]:
+    if _path.exists() and str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
-import solve_module as sm
+
+def _load_local_module(name: str, filename: str):
+    module_path = _HERE / filename
+    spec = importlib.util.spec_from_file_location(name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f'Could not load {filename} from {module_path}')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+sm = _load_local_module('megaminx_adapter_solve_module', 'solve_module.py')
 
 try:  # optional dependency
     import cayleypy  # type: ignore
@@ -31,6 +50,15 @@ class SearchOutcome:
 
 
 class MegaminxSearchAdapter:
+    """Hybrid adapter with cayleypy-first search and deterministic fallback.
+
+    The adapter exposes one stable API used by `search_improver_v3` and other runners.
+    When cayleypy is available it prefers:
+    1) exact short-path recovery via a BFS neighborhood around the target state;
+    2) beam search on a CayleyGraph whose central state is the requested target;
+    3) internal lightweight beam/MITM fallback.
+    """
+
     def __init__(self, central: Sequence[int], generators: Dict[str, List[int]], *, prefer_cayleypy: bool = True) -> None:
         self.central = list(int(x) for x in central)
         self.generators = {str(k): [int(v) for v in vals] for k, vals in generators.items()}
@@ -41,6 +69,9 @@ class MegaminxSearchAdapter:
         self.prefer_cayleypy = prefer_cayleypy and cayleypy is not None and BeamSearchAlgorithm is not None
         self._graph = None
         self._beam = None
+        self._graph_cache: dict[bytes, Any] = {}
+        self._beam_cache: dict[bytes, Any] = {}
+        self._bfs_cache: dict[tuple[bytes, int], Any] = {}
 
     def backend_name(self) -> str:
         return 'cayleypy' if self.prefer_cayleypy else 'internal'
@@ -73,25 +104,103 @@ class MegaminxSearchAdapter:
         profile['mitm_depth'] = depth
         return seen
 
+    def _build_graph(self, target_state: Sequence[int]) -> Any:
+        if not self.prefer_cayleypy:
+            return None
+        target_key = sm.state_to_bytes(target_state)
+        graph = self._graph_cache.get(target_key)
+        if graph is not None:
+            return graph
+        try:  # pragma: no cover - depends on optional dependency
+            definition = cayleypy.CayleyGraphDef.create(
+                generators=[self.generators[name] for name in self.move_names],
+                generator_names=self.move_names,
+                central_state=list(int(x) for x in target_state),
+                name='megaminx_custom_v4',
+            )
+            graph = cayleypy.CayleyGraph(definition)
+            self._graph_cache[target_key] = graph
+            self._beam_cache[target_key] = BeamSearchAlgorithm(graph)
+            return graph
+        except Exception:
+            self.prefer_cayleypy = False
+            self._graph_cache.clear()
+            self._beam_cache.clear()
+            self._bfs_cache.clear()
+            self._graph = None
+            self._beam = None
+            return None
+
     def _ensure_cayleypy(self) -> None:
         if not self.prefer_cayleypy:
             return
-        if self._beam is not None:
+        if self._beam is not None and self._graph is not None:
             return
-        # Best effort adapter: if graph creation fails, fall back to internal search.
-        try:  # pragma: no cover - exercised only when cayleypy is installed
-            definition = cayleypy.CayleyGraphDef(
-                generators_type='permutations',
-                generators=[self.generators[name] for name in self.move_names],
-                central_state=self.central,
-                name='megaminx_custom_v3',
+        graph = self._build_graph(self.central)
+        if graph is None:
+            return
+        self._graph = graph
+        self._beam = self._beam_cache.get(sm.state_to_bytes(self.central))
+
+    def _get_beam(self, target_state: Sequence[int]) -> tuple[Any | None, Any | None]:
+        graph = self._build_graph(target_state)
+        if graph is None:
+            return None, None
+        key = sm.state_to_bytes(target_state)
+        return graph, self._beam_cache.get(key)
+
+    def _target_bfs(self, target_state: Sequence[int], depth: int) -> Any | None:
+        if not self.prefer_cayleypy or depth <= 0:
+            return None
+        key = (sm.state_to_bytes(target_state), int(depth))
+        if key in self._bfs_cache:
+            return self._bfs_cache[key]
+        graph = self._build_graph(target_state)
+        if graph is None:
+            return None
+        try:  # pragma: no cover - depends on optional dependency
+            bfs_result = graph.bfs(
+                max_layer_size_to_store=0,
+                max_layer_size_to_explore=10**7,
+                max_diameter=int(depth),
+                return_all_hashes=True,
             )
-            self._graph = cayleypy.CayleyGraph(definition)
-            self._beam = BeamSearchAlgorithm(self._graph)
+            self._bfs_cache[key] = bfs_result
+            return bfs_result
         except Exception:
-            self.prefer_cayleypy = False
-            self._graph = None
-            self._beam = None
+            return None
+
+    def _exact_path_cayleypy(
+        self,
+        *,
+        start_state: Sequence[int],
+        target_state: Sequence[int],
+        mitm_depth: int,
+        max_total_path_len: int | None,
+        profile: dict[str, Any],
+    ) -> list[str] | None:
+        if not self.prefer_cayleypy or mitm_depth <= 0:
+            return None
+        graph = self._build_graph(target_state)
+        bfs_result = self._target_bfs(target_state, mitm_depth)
+        if graph is None or bfs_result is None:
+            return None
+        try:  # pragma: no cover - depends on optional dependency
+            path_ids = graph.find_path_from(list(int(x) for x in start_state), bfs_result)
+            if path_ids is None:
+                profile['cayleypy_exact_hit'] = False
+                return None
+            path = [self.move_names[int(idx)] for idx in list(path_ids)]
+            if max_total_path_len is not None and len(path) > max_total_path_len:
+                profile['cayleypy_exact_hit'] = False
+                profile['cayleypy_exact_len'] = len(path)
+                return None
+            profile['cayleypy_exact_hit'] = True
+            profile['cayleypy_exact_len'] = len(path)
+            return path
+        except Exception as exc:
+            profile['cayleypy_exact_error'] = f'{type(exc).__name__}: {exc}'
+            return None
 
     def _search_cayleypy(
         self,
@@ -109,25 +218,50 @@ class MegaminxSearchAdapter:
         profile: dict[str, Any],
     ) -> SearchOutcome | None:
         self._ensure_cayleypy()
-        if not self.prefer_cayleypy or self._beam is None:
+        if not self.prefer_cayleypy:
+            return None
+
+        dest = self.central if target_state is None else list(int(x) for x in target_state)
+        exact_path = self._exact_path_cayleypy(
+            start_state=start_state,
+            target_state=dest,
+            mitm_depth=mitm_depth,
+            max_total_path_len=max_total_path_len,
+            profile=profile,
+        )
+        if exact_path is not None:
+            profile.update({
+                'cayleypy_path_found': True,
+                'cayleypy_path_length': len(exact_path),
+                'cayleypy_method': 'exact_bfs_mitm',
+            })
+            return SearchOutcome(path=exact_path, profile=profile, backend='cayleypy')
+
+        graph, beam = self._get_beam(dest)
+        if graph is None or beam is None:
             return None
         try:  # pragma: no cover - optional backend
             kwargs: dict[str, Any] = {
                 'start_state': list(int(x) for x in start_state),
-                'beam_mode': beam_mode,
                 'beam_width': beam_width,
                 'max_steps': max_steps,
-                'history_depth': history_depth,
                 'return_path': return_path,
                 'verbose': verbose,
             }
-            if target_state is not None:
-                kwargs['destination_state'] = list(int(x) for x in target_state)
-            if mitm_depth > 0 and target_state is None and hasattr(cayleypy.algo, 'bfs_numpy'):
-                # Keep this light. For huge graphs full BFS is not realistic; user may later replace
-                # this with a graph-specific precomputed neighborhood.
-                kwargs['bfs_result_for_mitm'] = None
-            result = self._beam.search(**kwargs)
+            bfs_result_for_mitm = self._target_bfs(dest, mitm_depth)
+            if target_state is None:
+                kwargs['beam_mode'] = beam_mode
+                kwargs['history_depth'] = history_depth
+                if bfs_result_for_mitm is not None:
+                    kwargs['bfs_result_for_mitm'] = bfs_result_for_mitm
+            else:
+                # For a custom target, we search on a graph where that target is the central state.
+                kwargs['beam_mode'] = 'simple'
+                if bfs_result_for_mitm is not None:
+                    kwargs['bfs_result_for_mitm'] = bfs_result_for_mitm
+                profile['requested_beam_mode'] = beam_mode
+                profile['effective_beam_mode'] = 'simple(target-centered)'
+            result = beam.search(**kwargs)
             path = None
             if getattr(result, 'path_found', False) and getattr(result, 'path', None) is not None:
                 path = [self.move_names[int(idx)] for idx in list(result.path)]
@@ -136,6 +270,7 @@ class MegaminxSearchAdapter:
             profile.update({
                 'cayleypy_path_found': bool(path),
                 'cayleypy_path_length': (len(path) if path is not None else None),
+                'cayleypy_method': 'beam_search',
             })
             return SearchOutcome(path=path, profile=profile, backend='cayleypy')
         except Exception as exc:

@@ -9,12 +9,25 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import sys
+import importlib.util
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-import solve_module as sm
+
+def _load_local_module(name: str, filename: str):
+    module_path = _HERE / filename
+    spec = importlib.util.spec_from_file_location(name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f'Could not load {filename} from {module_path}')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+sm = _load_local_module(f'{__name__}_solve_module', 'solve_module.py')
 from cayley_adapter import MegaminxSearchAdapter
 from search_policy_v3 import PolicyConfig, RowFeatures, classify_row, tier_params
 

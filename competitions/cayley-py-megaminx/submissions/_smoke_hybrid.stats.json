@@ -1,0 +1,40 @@
+{
+  "competition": "cayley-py-megaminx",
+  "elapsed_seconds": 2.597,
+  "candidates": [
+    {
+      "name": "best_tested_lookup",
+      "path": "/tmp/megaminx_hybrid_p49wc5ca/submission_best_tested_lookup.csv",
+      "score": 414305,
+      "generated": true,
+      "validated_rows": 0,
+      "invalid_rows": 0
+    },
+    {
+      "name": "optimized_submission",
+      "path": "/mnt/data/work/repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/submissions/optimized_submission.csv",
+      "score": 414305,
+      "generated": false,
+      "validated_rows": 0,
+      "invalid_rows": 0
+    }
+  ],
+  "fusion": {
+    "score": 414305,
+    "winner_counts": {
+      "best_tested_lookup": 1001
+    },
+    "invalid_counts": {}
+  },
+  "post_refine": {},
+  "final_validation": {
+    "rows": 1001,
+    "valid_rows": 1001,
+    "invalid_rows": 0,
+    "invalid_examples": [],
+    "score": 414305
+  },
+  "output": "competitions/cayley-py-megaminx/submissions/_smoke_hybrid.csv",
+  "uses_cayleypy": true,
+  "llm_enabled": false
+}
