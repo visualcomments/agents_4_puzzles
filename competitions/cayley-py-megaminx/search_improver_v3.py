@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
+import importlib.util
 import json
-import math
+import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
-
-import sys
-import importlib.util
+from typing import Any, Dict, List, Sequence
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -106,6 +105,47 @@ def _choose_better_candidate(
     return optimized
 
 
+def _compact_search_profile(profile: dict[str, Any], mode: str) -> dict[str, Any] | None:
+    if mode == 'none':
+        return None
+    if mode == 'full':
+        return profile
+    compact = {k: v for k, v in profile.items() if k != 'hits'}
+    hits = profile.get('hits') or []
+    if hits:
+        first = dict(hits[0])
+        if 'search_profile' in first and isinstance(first['search_profile'], dict):
+            first['search_profile'] = {
+                k: v for k, v in first['search_profile'].items() if k not in {'path', 'hits'}
+            }
+        compact['top_hit'] = first
+    return compact
+
+
+def _compact_row_profile(row_profile: dict[str, Any], mode: str) -> dict[str, Any] | None:
+    if mode == 'none':
+        return None
+    base = {
+        'initial_state_id': row_profile.get('initial_state_id'),
+        'row_index': row_profile.get('row_index'),
+        'row_rank': row_profile.get('row_rank'),
+        'baseline_len': row_profile.get('baseline_len'),
+        'preopt_len': row_profile.get('preopt_len'),
+        'preopt_saved': row_profile.get('preopt_saved'),
+        'final_len': row_profile.get('final_len'),
+        'saved_moves': row_profile.get('saved_moves'),
+        'tier': row_profile.get('tier'),
+        'stage': row_profile.get('stage'),
+        'elapsed_ms': row_profile.get('elapsed_ms'),
+        'backend_preference': row_profile.get('backend_preference'),
+    }
+    search_profile = row_profile.get('search_profile')
+    compact_search = _compact_search_profile(search_profile, mode) if isinstance(search_profile, dict) else None
+    if compact_search is not None:
+        base['search_profile'] = compact_search
+    return base
+
+
 def _attempt_segment_rewrites(
     *,
     start_state: Sequence[int],
@@ -117,6 +157,7 @@ def _attempt_segment_rewrites(
     cfg: Dict[str, Any],
     min_improvement: int,
     row_profile: dict[str, Any],
+    profile_mode: str,
 ) -> tuple[list[str], list[list[int]], dict[str, Any]]:
     profile = {
         'segments_considered': 0,
@@ -131,7 +172,7 @@ def _attempt_segment_rewrites(
     profile['segments_considered'] = len(segments)
     detailed_hits: list[dict[str, Any]] = []
 
-    for seg_idx, (start, end) in enumerate(segments):
+    for start, end in segments:
         elapsed = time.perf_counter() - started
         remaining = time_budget_s - elapsed
         if remaining <= 0:
@@ -171,22 +212,26 @@ def _attempt_segment_rewrites(
         if better is None:
             continue
         profile['segments_improved'] += 1
-        detailed_hits.append({
-            'start': start,
-            'end': end,
-            'baseline_segment_len': baseline_segment_len,
-            'replacement_len': len(outcome.path),
-            'saved_moves': len(current_best) - len(better),
-            'backend': outcome.backend,
-            'search_profile': outcome.profile,
-        })
+        if profile_mode == 'full':
+            detailed_hits.append({
+                'start': start,
+                'end': end,
+                'baseline_segment_len': baseline_segment_len,
+                'replacement_len': len(outcome.path),
+                'saved_moves': len(current_best) - len(better),
+                'backend': outcome.backend,
+                'search_profile': outcome.profile,
+            })
         current_best = better
         states = sm.trajectory_states(start_state, current_best, generators)
         if len(current_best) <= min_improvement:
             break
 
-    profile['hits'] = detailed_hits[:25]
-    row_profile['search_profile'] = profile
+    if profile_mode == 'full':
+        profile['hits'] = detailed_hits[:25]
+    compact_profile = _compact_search_profile(profile, profile_mode)
+    if compact_profile is not None:
+        row_profile['search_profile'] = compact_profile
     return current_best, states, row_profile
 
 
@@ -199,15 +244,17 @@ def improve_submission_rows(
     args: argparse.Namespace,
 ) -> tuple[List[Dict[str, str]], dict[str, Any], list[dict[str, Any]]]:
     rows = [dict(row) for row in submission_rows]
+    improved_rows = [dict(row) for row in rows]
     indexed_lengths = sorted(((idx, _row_len(row)) for idx, row in enumerate(rows)), key=lambda item: item[1], reverse=True)
     top_k = min(int(args.top_k), len(indexed_lengths)) if int(args.top_k) > 0 else len(indexed_lengths)
-    target_indices = {idx for idx, _length in indexed_lengths[:top_k]}
     adapter = MegaminxSearchAdapter(central, generators, prefer_cayleypy=not bool(args.disable_cayleypy))
     profiles: list[dict[str, Any]] = []
-    improved_rows = [dict(row) for row in rows]
     total_saved = 0
     row_improved_count = 0
     start_run = time.perf_counter()
+    profile_mode = str(getattr(args, 'profile_mode', 'full'))
+    gc_every = max(0, int(getattr(args, 'gc_every', 0)))
+    trim_every = max(0, int(getattr(args, 'trim_adapter_cache_every', 1)))
     policy_cfg = PolicyConfig(
         light_min_path_len=int(args.light_min_path_len),
         aggressive_min_path_len=int(args.aggressive_min_path_len),
@@ -215,7 +262,9 @@ def improve_submission_rows(
         min_improvement_to_skip=int(args.min_improvement),
     )
 
-    for rank, (row_idx, baseline_len) in enumerate(indexed_lengths[:top_k]):
+    for rank, (row_idx, _baseline_len) in enumerate(indexed_lengths[:top_k]):
+        if row_idx >= len(test_rows):
+            raise IndexError(f'test_rows is shorter than submission_rows at row {row_idx}')
         row = improved_rows[row_idx]
         test_row = test_rows[row_idx]
         start_state = [int(x) for x in str(test_row.get('initial_state') or '').split(',') if x != '']
@@ -260,28 +309,45 @@ def improve_submission_rows(
                 cfg=cfg,
                 min_improvement=int(args.min_improvement),
                 row_profile=row_profile,
+                profile_mode=profile_mode,
             )
 
         if len(current_best) < len(baseline_moves):
-            row_profile['stage'] = 'search' if row_profile.get('search_profile', {}).get('segments_improved', 0) > 0 else 'pre-opt'
+            search_profile = row_profile.get('search_profile', {}) if isinstance(row_profile.get('search_profile'), dict) else {}
+            row_profile['stage'] = 'search' if search_profile.get('segments_improved', 0) > 0 else 'pre-opt'
             total_saved += len(baseline_moves) - len(current_best)
             row_improved_count += 1
         row_profile['final_len'] = len(current_best)
         row_profile['saved_moves'] = len(baseline_moves) - len(current_best)
         row_profile['elapsed_ms'] = round((time.perf_counter() - t0) * 1000.0, 3)
         improved_rows[row_idx]['path'] = sm.moves_to_path(current_best)
-        profiles.append(row_profile)
 
+        compact_profile = _compact_row_profile(row_profile, profile_mode)
+        if compact_profile is not None:
+            profiles.append(compact_profile)
+
+        if trim_every and ((rank + 1) % trim_every == 0):
+            adapter.clear_caches(keep_central=True)
+        if gc_every and ((rank + 1) % gc_every == 0):
+            gc.collect()
+
+        del states, current_best, preopt_moves, baseline_moves, start_state, test_row, row, row_profile
+
+    adapter.clear_caches(keep_central=False)
+    gc.collect()
+    baseline_score = _score_rows(rows)
+    final_score = _score_rows(improved_rows)
     stats = {
         'top_k': top_k,
-        'baseline_score': _score_rows(rows),
-        'final_score': _score_rows(improved_rows),
-        'score_delta': _score_rows(rows) - _score_rows(improved_rows),
+        'baseline_score': baseline_score,
+        'final_score': final_score,
+        'score_delta': baseline_score - final_score,
         'rows_improved': row_improved_count,
         'total_saved_moves': total_saved,
         'elapsed_ms_total': round((time.perf_counter() - start_run) * 1000.0, 3),
         'cayleypy_enabled': adapter.prefer_cayleypy,
         'backend_preference': adapter.backend_name(),
+        'profile_mode': profile_mode,
     }
     return improved_rows, stats, profiles
 
@@ -289,12 +355,16 @@ def improve_submission_rows(
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Megaminx offline search improver v3')
     parser.add_argument('--submission', type=Path, default=_HERE / 'submissions' / 'optimized_submission.csv')
+    parser.add_argument('--test-csv', type=Path, default=_HERE / 'data' / 'test.csv')
     parser.add_argument('--out', type=Path, default=_HERE / 'submissions' / 'submission_search_improved_v3.csv')
     parser.add_argument('--stats-out', type=Path, default=_HERE / 'submissions' / 'submission_search_improved_v3.stats.json')
     parser.add_argument('--profile-out', type=Path, default=_HERE / 'submissions' / 'submission_search_improved_v3.profiles.json')
     parser.add_argument('--top-k', type=int, default=150)
     parser.add_argument('--min-improvement', type=int, default=2)
     parser.add_argument('--disable-cayleypy', action='store_true')
+    parser.add_argument('--profile-mode', choices=['none', 'lite', 'full'], default='full')
+    parser.add_argument('--gc-every', type=int, default=0)
+    parser.add_argument('--trim-adapter-cache-every', type=int, default=1)
 
     parser.add_argument('--light-min-path-len', type=int, default=560)
     parser.add_argument('--aggressive-min-path-len', type=int, default=700)
@@ -330,8 +400,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     central, generators = sm.load_puzzle_bundle()
-    data_dir = sm._find_data_dir()
-    test_rows = _load_rows(data_dir / 'test.csv')
+    test_rows = _load_rows(args.test_csv)
     submission_rows = _load_rows(args.submission)
 
     improved_rows, stats, profiles = improve_submission_rows(

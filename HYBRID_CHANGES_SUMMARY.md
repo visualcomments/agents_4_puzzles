@@ -7,7 +7,7 @@
   - объединяет deterministic candidates, search_v3 и optional LLM submissions;
   - делает row-wise fusion и финальный post-refine.
 - `competitions/cayley-py-megaminx/MEGAMINX_CAYLEYPY_LLM_HYBRID_RUNBOOK.md`
-- `third_party/cayleypy-main/`
+- `tp/cp/`
   - локально вендоренная копия CayleyPy;
   - добавлен stub `kagglehub.py` для offline import.
 

@@ -15,6 +15,7 @@ import yaml
 os.environ.setdefault("AGENTLAB_HEAVY_IMPORTS", "0")
 
 from agents import *
+from agent_runtime import ProgressLedger, PhaseSupervisor, PhaseTraceLogger, extract_agent_command
 
 GLOBAL_AGENTRXIV = None
 
@@ -73,6 +74,8 @@ class LaboratoryWorkflow:
         self.memory_root = Path(self.lab_dir) / "memory" if self.lab_dir else Path("state_saves/json_memory")
         os.environ["AGENTLAB_RUN_ID"] = self.run_id
         os.environ["AGENTLAB_MEMORY_DIR"] = str(self.memory_root)
+        self.workflow_root = self.memory_root / self.run_id / "workflow"
+        _ensure_dir(self.workflow_root)
 
         self.print_cost = True
         self.review_override = True # should review be overridden?
@@ -165,6 +168,9 @@ class LaboratoryWorkflow:
             memory_dir=self.memory_root,
             run_id=self.run_id,
         )
+        self.trace = PhaseTraceLogger(self.workflow_root)
+        self.ledger = ProgressLedger(self.workflow_root)
+        self.ledger.set_artifact("research_topic", self.research_topic)
 
 
     def set_model(self, model):
@@ -203,6 +209,20 @@ class LaboratoryWorkflow:
         self.professor.reset()
         self.ml_engineer.reset()
         self.sw_engineer.reset()
+
+    def _make_supervisor(self, phase, allowed_commands):
+        return PhaseSupervisor(
+            phase,
+            trace=self.trace,
+            ledger=self.ledger,
+            allowed_commands=allowed_commands,
+        )
+
+    def _record_artifact(self, name, value):
+        try:
+            self.ledger.set_artifact(name, value)
+        except Exception:
+            pass
 
     def perform_research(self):
         """
@@ -302,6 +322,7 @@ class LaboratoryWorkflow:
                 return False
             elif response == "y":
                 self.set_agent_attr("reviewer_response", f"Provided are reviews from a set of three reviewers: {reviews}.")
+                self._record_artifact("reviewer_response", reviews)
                 return True
             else: raise Exception("Model did not respond")
 
@@ -333,6 +354,7 @@ class LaboratoryWorkflow:
             retry = self.human_in_loop("report writing", report)
             if retry: return retry
         self.set_agent_attr("report", report)
+        self._record_artifact("report", report)
         readme = self.professor.generate_readme()
         save_to_file(f"./{self.lab_dir}", "readme.md", readme)
         save_to_file(f"./{self.lab_dir}", "report.txt", report)
@@ -346,35 +368,41 @@ class LaboratoryWorkflow:
         """
         max_tries = self.max_steps
         dialogue = str()
-        # iterate until max num tries to complete task is exhausted
+        supervisor = self._make_supervisor("results interpretation", ["DIALOGUE", "INTERPRETATION"])
         for _i in range(max_tries):
             print(f"@@ Lab #{self.lab_index} Paper #{self.paper_index} @@")
             resp = self.postdoc.inference(self.research_topic, "results interpretation", feedback=dialogue, step=_i)
-            if self.verbose: print("Postdoc: ", resp, "\n~~~~~~~~~~~")
+            if self.verbose:
+                print("Postdoc: ", resp, "\n~~~~~~~~~~~")
+            cmd = supervisor.record_reply("postdoc", _i, resp)
             dialogue = str()
-            if "```DIALOGUE" in resp:
-                dialogue = extract_prompt(resp, "DIALOGUE")
-                dialogue = f"The following is dialogue produced by the postdoctoral researcher: {dialogue}"
-                if self.verbose: print("#"*40, "\n", "Postdoc Dialogue:", dialogue, "\n", "#"*40)
-            if "```INTERPRETATION" in resp:
-                interpretation = extract_prompt(resp, "INTERPRETATION")
+            if cmd and cmd.command == "DIALOGUE":
+                dialogue = f"The following is dialogue produced by the postdoctoral researcher: {cmd.content}"
+                if self.verbose:
+                    print("#" * 40, "\n", "Postdoc Dialogue:", dialogue, "\n", "#" * 40)
+            if cmd and cmd.command == "INTERPRETATION":
+                interpretation = cmd.content
                 if self.human_in_loop_flag["results interpretation"]:
                     retry = self.human_in_loop("results interpretation", interpretation)
-                    if retry: return retry
+                    if retry:
+                        return retry
                 self.set_agent_attr("interpretation", interpretation)
-                # reset agent state
+                self._record_artifact("interpretation", interpretation)
                 self.reset_agents()
                 self.statistics_per_phase["results interpretation"]["steps"] = _i
+                supervisor.complete(interpretation)
                 return False
-            resp = self.phd.inference(self.research_topic, "results interpretation", feedback=dialogue, step=_i)
-            if self.verbose: print("PhD Student: ", resp, "\n~~~~~~~~~~~")
-            dialogue = str()
-            if "```DIALOGUE" in resp:
-                dialogue = extract_prompt(resp, "DIALOGUE")
-                dialogue = f"The following is dialogue produced by the PhD student: {dialogue}"
-                if self.verbose: print("#"*40, "\n", "PhD Dialogue:", dialogue, "#"*40, "\n")
-        raise Exception("Max tries during phase: Results Interpretation")
 
+            resp = self.phd.inference(self.research_topic, "results interpretation", feedback=dialogue, step=_i)
+            if self.verbose:
+                print("PhD Student: ", resp, "\n~~~~~~~~~~~")
+            cmd = supervisor.record_reply("phd", _i, resp)
+            dialogue = str()
+            if cmd and cmd.command == "DIALOGUE":
+                dialogue = f"The following is dialogue produced by the PhD student: {cmd.content}"
+                if self.verbose:
+                    print("#" * 40, "\n", "PhD Dialogue:", dialogue, "#" * 40, "\n")
+        raise Exception("Max tries during phase: Results Interpretation")
     def running_experiments(self):
         """
         Perform running experiments phase
@@ -417,6 +445,8 @@ class LaboratoryWorkflow:
         save_to_file(f"./{self.lab_dir}/src", "experiment_output.log", exp_results)
         self.set_agent_attr("results_code", code)
         self.set_agent_attr("exp_results", exp_results)
+        self._record_artifact("results_code", code)
+        self._record_artifact("exp_results", exp_results)
         # reset agent state
         self.reset_agents()
         return False
@@ -431,68 +461,91 @@ class LaboratoryWorkflow:
         ml_dialogue = str()
         swe_feedback = str()
         ml_command = str()
-        # Avoid repeated TF-IDF index rebuilds (RAM spikes)
         hf_engine = get_hf_data_search()
-        # iterate until max num tries to complete task is exhausted
+        supervisor = self._make_supervisor("data preparation", ["DIALOGUE", "SUBMIT_CODE", "PYTHON", "SEARCH_HF"])
         for _i in range(max_tries):
             print(f"@@ Lab #{self.lab_index} Paper #{self.paper_index} @@")
-            if ml_feedback != "":
-                ml_feedback_in = "Feedback provided to the ML agent: " + ml_feedback
-            else: ml_feedback_in = ""
-            resp = self.sw_engineer.inference(self.research_topic, "data preparation", feedback=f"{ml_dialogue}\nFeedback from previous command: {swe_feedback}\n{ml_command}{ml_feedback_in}", step=_i)
+            ml_feedback_in = "Feedback provided to the ML agent: " + ml_feedback if ml_feedback != "" else ""
+            resp = self.sw_engineer.inference(
+                self.research_topic,
+                "data preparation",
+                feedback=f"{ml_dialogue}\nFeedback from previous command: {swe_feedback}\n{ml_command}{ml_feedback_in}",
+                step=_i,
+            )
             swe_feedback = str()
             swe_dialogue = str()
-            if "```DIALOGUE" in resp:
-                dialogue = extract_prompt(resp, "DIALOGUE")
-                swe_dialogue = f"\nThe following is dialogue produced by the SW Engineer: {dialogue}\n"
-                if self.verbose: print("#"*40, f"\nThe following is dialogue produced by the SW Engineer: {dialogue}", "\n", "#"*40)
-            if "```SUBMIT_CODE" in resp:
-                final_code = extract_prompt(resp, "SUBMIT_CODE")
+            cmd = supervisor.record_reply("sw_engineer", _i, resp)
+            if cmd and cmd.command == "DIALOGUE":
+                swe_dialogue = f"\nThe following is dialogue produced by the SW Engineer: {cmd.content}\n"
+                if self.verbose:
+                    print("#" * 40, swe_dialogue, "#" * 40)
+            if cmd and cmd.command == "SUBMIT_CODE":
+                final_code = cmd.content
                 code_resp = execute_code(final_code, timeout=60)
-                if self.verbose: print("!"*100, "\n", f"CODE RESPONSE: {code_resp}")
+                supervisor.record_tool(
+                    "sw_engineer",
+                    _i,
+                    "execute_submit_code",
+                    {"preview": truncate_middle(final_code, 300), "result": truncate_middle(code_resp, 500)},
+                )
+                if self.verbose:
+                    print("!" * 100, "\n", f"CODE RESPONSE: {code_resp}")
                 swe_feedback += f"\nCode Response: {code_resp}\n"
                 if "[CODE EXECUTION ERROR]" in code_resp:
                     swe_feedback += "\nERROR: Final code had an error and could not be submitted! You must address and fix this error.\n"
                 else:
                     if self.human_in_loop_flag["data preparation"]:
                         retry = self.human_in_loop("data preparation", final_code)
-                        if retry: return retry
+                        if retry:
+                            return retry
                     save_to_file(f"./{self.lab_dir}/src", "load_data.py", final_code)
                     self.set_agent_attr("dataset_code", final_code)
-                    # reset agent state
+                    self._record_artifact("dataset_code", final_code)
                     self.reset_agents()
                     self.statistics_per_phase["data preparation"]["steps"] = _i
+                    supervisor.complete(final_code)
                     return False
 
-            if ml_feedback != "":
-                ml_feedback_in = "Feedback from previous command: " + ml_feedback
-            else:
-                ml_feedback_in = ""
+            ml_feedback_in = "Feedback from previous command: " + ml_feedback if ml_feedback != "" else ""
             resp = self.ml_engineer.inference(
-                self.research_topic, "data preparation",
-                feedback=f"{swe_dialogue}\n{ml_feedback_in}", step=_i)
-            #if self.verbose: print("ML Engineer: ", resp, "\n~~~~~~~~~~~")
+                self.research_topic,
+                "data preparation",
+                feedback=f"{swe_dialogue}\n{ml_feedback_in}",
+                step=_i,
+            )
             ml_feedback = str()
             ml_dialogue = str()
             ml_command = str()
-            if "```DIALOGUE" in resp:
-                dialogue = extract_prompt(resp, "DIALOGUE")
-                ml_dialogue = f"\nThe following is dialogue produced by the ML Engineer: {dialogue}\n"
-                if self.verbose: print("#" * 40, f"\nThe following is dialogue produced by the ML Engineer: {dialogue}", "#" * 40, "\n")
-            if "```python" in resp:
-                code = extract_prompt(resp, "python")
-                code = self.ml_engineer.dataset_code + "\n" + code
+            cmd = supervisor.record_reply("ml_engineer", _i, resp)
+            if cmd and cmd.command == "DIALOGUE":
+                ml_dialogue = f"\nThe following is dialogue produced by the ML Engineer: {cmd.content}\n"
+                if self.verbose:
+                    print("#" * 40, ml_dialogue, "#" * 40, "\n")
+            if cmd and cmd.command == "PYTHON":
+                code = self.ml_engineer.dataset_code + "\n" + cmd.content
                 code_resp = execute_code(code, timeout=120)
+                supervisor.record_tool(
+                    "ml_engineer",
+                    _i,
+                    "execute_python",
+                    {"preview": truncate_middle(code, 300), "result": truncate_middle(code_resp, 500)},
+                )
                 ml_command = f"Code produced by the ML agent:\n{code}"
                 ml_feedback += f"\nCode Response: {code_resp}\n"
-                if self.verbose: print("!"*100, "\n", f"CODE RESPONSE: {code_resp}")
-            if "```SEARCH_HF" in resp:
-                hf_query = extract_prompt(resp, "SEARCH_HF")
+                if self.verbose:
+                    print("!" * 100, "\n", f"CODE RESPONSE: {code_resp}")
+            if cmd and cmd.command == "SEARCH_HF":
+                hf_query = cmd.content
                 hf_res = "\n".join(hf_engine.results_str(hf_engine.retrieve_ds(hf_query)))
+                supervisor.record_tool(
+                    "ml_engineer",
+                    _i,
+                    "search_hf",
+                    {"query": truncate_middle(hf_query, 300), "result_preview": truncate_middle(hf_res, 500)},
+                )
                 ml_command = f"HF search command produced by the ML agent:\n{hf_query}"
                 ml_feedback += f"Huggingface results: {hf_res}\n"
         raise Exception("Max tries during phase: Data Preparation")
-
     def plan_formulation(self):
         """
         Perform plan formulation phase
@@ -500,132 +553,125 @@ class LaboratoryWorkflow:
         """
         max_tries = self.max_steps
         dialogue = str()
-        # iterate until max num tries to complete task is exhausted
+        supervisor = self._make_supervisor("plan formulation", ["DIALOGUE", "PLAN"])
         for _i in range(max_tries):
             print(f"@@ Lab #{self.lab_index} Paper #{self.paper_index} @@")
-            # inference postdoc to
             resp = self.postdoc.inference(self.research_topic, "plan formulation", feedback=dialogue, step=_i)
-            if self.verbose: print("Postdoc: ", resp, "\n~~~~~~~~~~~")
+            if self.verbose:
+                print("Postdoc: ", resp, "\n~~~~~~~~~~~")
+            cmd = supervisor.record_reply("postdoc", _i, resp)
             dialogue = str()
-
-            if "```DIALOGUE" in resp:
-                dialogue = extract_prompt(resp, "DIALOGUE")
-                dialogue = f"The following is dialogue produced by the postdoctoral researcher: {dialogue}"
-                if self.verbose: print("#"*40, "\n", "Postdoc Dialogue:", dialogue, "\n", "#"*40)
-
-            if "```PLAN" in resp:
-                plan = extract_prompt(resp, "PLAN")
+            if cmd and cmd.command == "DIALOGUE":
+                dialogue = f"The following is dialogue produced by the postdoctoral researcher: {cmd.content}"
+                if self.verbose:
+                    print("#" * 40, "\n", "Postdoc Dialogue:", dialogue, "\n", "#" * 40)
+            if cmd and cmd.command == "PLAN":
+                plan = cmd.content
                 if self.human_in_loop_flag["plan formulation"]:
                     retry = self.human_in_loop("plan formulation", plan)
-                    if retry: return retry
+                    if retry:
+                        return retry
                 self.set_agent_attr("plan", plan)
-                # reset agent state
+                self._record_artifact("plan", plan)
                 self.reset_agents()
                 self.statistics_per_phase["plan formulation"]["steps"] = _i
+                supervisor.complete(plan)
                 return False
 
             resp = self.phd.inference(self.research_topic, "plan formulation", feedback=dialogue, step=_i)
-            if self.verbose: print("PhD Student: ", resp, "\n~~~~~~~~~~~")
-
+            if self.verbose:
+                print("PhD Student: ", resp, "\n~~~~~~~~~~~")
+            cmd = supervisor.record_reply("phd", _i, resp)
             dialogue = str()
-            if "```DIALOGUE" in resp:
-                dialogue = extract_prompt(resp, "DIALOGUE")
-                dialogue = f"The following is dialogue produced by the PhD student: {dialogue}"
-                if self.verbose: print("#"*40, "\n", "PhD Dialogue:", dialogue, "#"*40, "\n")
+            if cmd and cmd.command == "DIALOGUE":
+                dialogue = f"The following is dialogue produced by the PhD student: {cmd.content}"
+                if self.verbose:
+                    print("#" * 40, "\n", "PhD Dialogue:", dialogue, "#" * 40, "\n")
         if self.except_if_fail:
             raise Exception("Max tries during phase: Plan Formulation")
-        else:
-            plan = "No plan specified."
-            if self.human_in_loop_flag["plan formulation"]:
-                retry = self.human_in_loop("plan formulation", plan)
-                if retry: return retry
-            self.set_agent_attr("plan", plan)
-            # reset agent state
-            self.reset_agents()
-            return False
-
+        plan = "No plan specified."
+        if self.human_in_loop_flag["plan formulation"]:
+            retry = self.human_in_loop("plan formulation", plan)
+            if retry:
+                return retry
+        self.set_agent_attr("plan", plan)
+        self._record_artifact("plan", plan)
+        self.reset_agents()
+        supervisor.complete(plan)
+        return False
     def literature_review(self):
         """
         Perform literature review phase
         @return: (bool) whether to repeat the phase
         """
         arx_eng = ArxivSearch()
-        max_tries = self.max_steps # lit review often requires extra steps
-        # get initial response from PhD agent
+        max_tries = self.max_steps
+        supervisor = self._make_supervisor("literature review", ["SUMMARY", "FULL_TEXT", "ADD_PAPER"])
         resp = self.phd.inference(self.research_topic, "literature review", step=0, temp=0.4)
-        if self.verbose: print(resp, "\n~~~~~~~~~~~")
-        # iterate until max num tries to complete task is exhausted
+        if self.verbose:
+            print(resp, "\n~~~~~~~~~~~")
         for _i in range(max_tries):
             print(f"@@ Lab #{self.lab_index} Paper #{self.paper_index} @@")
             feedback = str()
-            # grab summary of papers from arxiv
-            if "```SUMMARY" in resp:
-                query = extract_prompt(resp, "SUMMARY")
+            cmd = supervisor.record_reply("phd", _i, resp)
+            if cmd and cmd.command == "SUMMARY":
+                query = cmd.content
                 papers = arx_eng.find_papers_by_str(query, N=self.arxiv_num_summaries)
-                if self.agentRxiv:
-                    if GLOBAL_AGENTRXIV.num_papers() > 0:
-                        papers += GLOBAL_AGENTRXIV.search_agentrxiv(query, self.num_agentrxiv_papers,)
+                supervisor.record_tool("phd", _i, "arxiv_summary_search", {"query": truncate_middle(query, 300)})
+                if self.agentRxiv and GLOBAL_AGENTRXIV.num_papers() > 0:
+                    papers += GLOBAL_AGENTRXIV.search_agentrxiv(query, self.num_agentrxiv_papers)
                 feedback = f"You requested arXiv papers related to the query {query}, here was the response\n{papers}"
-
-            # grab full text from arxiv ID
-            elif "```FULL_TEXT" in resp:
-                query = extract_prompt(resp, "FULL_TEXT")
-                if self.agentRxiv and "AgentRxiv" in query: full_text = GLOBAL_AGENTRXIV.retrieve_full_text(query,)
-                else: full_text = arx_eng.retrieve_full_paper_text(query)
-                # expiration timer so that paper does not remain in context too long
-                arxiv_paper = f"```EXPIRATION {self.arxiv_paper_exp_time}\n" + full_text + "```"
-                feedback = arxiv_paper
-
-            # if add paper, extract and add to lit review, provide feedback
-            elif "```ADD_PAPER" in resp:
-                query = extract_prompt(resp, "ADD_PAPER")
-                if self.agentRxiv and "AgentRxiv" in query: feedback, text = self.phd.add_review(query, arx_eng, agentrxiv=True, GLOBAL_AGENTRXIV=GLOBAL_AGENTRXIV)
-                else: feedback, text = self.phd.add_review(query, arx_eng)
+            elif cmd and cmd.command == "FULL_TEXT":
+                query = cmd.content
+                supervisor.record_tool("phd", _i, "arxiv_full_text", {"query": truncate_middle(query, 300)})
+                full_text = GLOBAL_AGENTRXIV.retrieve_full_text(query) if self.agentRxiv and "AgentRxiv" in query else arx_eng.retrieve_full_paper_text(query)
+                feedback = f"```EXPIRATION {self.arxiv_paper_exp_time}\n" + full_text + "```"
+            elif cmd and cmd.command == "ADD_PAPER":
+                query = cmd.content
+                supervisor.record_tool("phd", _i, "add_paper", {"preview": truncate_middle(query, 300)})
+                if self.agentRxiv and "AgentRxiv" in query:
+                    feedback, full_text = self.phd.add_review(query, arx_eng, agentrxiv=True, GLOBAL_AGENTRXIV=GLOBAL_AGENTRXIV)
+                else:
+                    feedback, full_text = self.phd.add_review(query, arx_eng)
                 if len(self.reference_papers) < self.num_ref_papers:
-                    self.reference_papers.append(text)
+                    self.reference_papers.append(full_text)
 
-            # completion condition
             if len(self.phd.lit_review) >= self.num_papers_lit_review:
-                # generate formal review
                 lit_review_sum = self.phd.format_review()
-                # if human in loop -> check if human is happy with the produced review
                 if self.human_in_loop_flag["literature review"]:
                     retry = self.human_in_loop("literature review", lit_review_sum)
-                    # if not happy, repeat the process with human feedback
                     if retry:
                         self.phd.lit_review = []
                         return retry
-                # otherwise, return lit review and move on to next stage
-                if self.verbose: print(self.phd.lit_review_sum)
-                # set agent
+                if self.verbose:
+                    print(self.phd.lit_review_sum)
                 self.set_agent_attr("lit_review_sum", lit_review_sum)
-                # reset agent state
+                self._record_artifact("lit_review", lit_review_sum)
                 self.reset_agents()
                 self.statistics_per_phase["literature review"]["steps"] = _i
+                supervisor.complete(lit_review_sum)
                 return False
             resp = self.phd.inference(self.research_topic, "literature review", feedback=feedback, step=_i + 1, temp=0.4)
-            if self.verbose: print(resp, "\n~~~~~~~~~~~")
-        if self.except_if_fail: raise Exception("Max tries during phase: Literature Review")
-        else:
-            if len(self.phd.lit_review) >= self.num_papers_lit_review:
-                # generate formal review
-                lit_review_sum = self.phd.format_review()
-                # if human in loop -> check if human is happy with the produced review
-                if self.human_in_loop_flag["literature review"]:
-                    retry = self.human_in_loop("literature review", lit_review_sum)
-                    # if not happy, repeat the process with human feedback
-                    if retry:
-                        self.phd.lit_review = []
-                        return retry
-                # otherwise, return lit review and move on to next stage
-                if self.verbose: print(self.phd.lit_review_sum)
-                # set agent
-                self.set_agent_attr("lit_review_sum", lit_review_sum)
-                # reset agent state
-                self.reset_agents()
-                self.statistics_per_phase["literature review"]["steps"] = _i
-                return False
-
+            if self.verbose:
+                print(resp, "\n~~~~~~~~~~~")
+        if self.except_if_fail:
+            raise Exception("Max tries during phase: Literature Review")
+        if len(self.phd.lit_review) >= self.num_papers_lit_review:
+            lit_review_sum = self.phd.format_review()
+            if self.human_in_loop_flag["literature review"]:
+                retry = self.human_in_loop("literature review", lit_review_sum)
+                if retry:
+                    self.phd.lit_review = []
+                    return retry
+            if self.verbose:
+                print(self.phd.lit_review_sum)
+            self.set_agent_attr("lit_review_sum", lit_review_sum)
+            self._record_artifact("lit_review", lit_review_sum)
+            self.reset_agents()
+            self.statistics_per_phase["literature review"]["steps"] = _i
+            supervisor.complete(lit_review_sum)
+            return False
+        supervisor.complete("literature review incomplete")
     def human_in_loop(self, phase, phase_prod):
         """
         Get human feedback for phase output

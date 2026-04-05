@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime
 
 from persistence import JsonStateStore, truncate_middle, ensure_dir
+from agent_runtime import strict_command_requirements
 import time
 import uuid
 
@@ -374,6 +375,14 @@ class BaseAgent:
     def set_model_backbone(self, model):
         self.model = model
 
+    def allowed_commands(self, phase):
+        mapping = getattr(self, "ALLOWED_COMMANDS_BY_PHASE", {})
+        if isinstance(mapping, dict):
+            cmds = mapping.get(phase, [])
+            if isinstance(cmds, (list, tuple)):
+                return [str(cmd).strip().upper() for cmd in cmds if str(cmd).strip()]
+        return []
+
     @staticmethod
     def clean_text(text):
         """
@@ -447,6 +456,7 @@ class BaseAgent:
 
 
 class ProfessorAgent(BaseAgent):
+    ALLOWED_COMMANDS_BY_PHASE = {"report writing": ["DIALOGUE", "LATEX"]}
     def __init__(
         self,
         model="gpt4omini",
@@ -530,6 +540,7 @@ class ProfessorAgent(BaseAgent):
 
 
 class PostdocAgent(BaseAgent):
+    ALLOWED_COMMANDS_BY_PHASE = {"plan formulation": ["DIALOGUE", "PLAN"], "results interpretation": ["DIALOGUE", "INTERPRETATION"]}
     def __init__(
         self,
         model="gpt4omini",
@@ -623,6 +634,7 @@ class PostdocAgent(BaseAgent):
 
 
 class MLEngineerAgent(BaseAgent):
+    ALLOWED_COMMANDS_BY_PHASE = {"data preparation": ["python", "DIALOGUE", "SEARCH_HF"]}
     def __init__(
         self,
         model="gpt4omini",
@@ -706,6 +718,7 @@ class MLEngineerAgent(BaseAgent):
 
 
 class SWEngineerAgent(BaseAgent):
+    ALLOWED_COMMANDS_BY_PHASE = {"data preparation": ["DIALOGUE", "SUBMIT_CODE"]}
     def __init__(
         self,
         model="gpt4omini",
@@ -779,6 +792,12 @@ class SWEngineerAgent(BaseAgent):
 
 
 class PhDStudentAgent(BaseAgent):
+    ALLOWED_COMMANDS_BY_PHASE = {
+        "literature review": ["SUMMARY", "FULL_TEXT", "ADD_PAPER"],
+        "plan formulation": ["DIALOGUE"],
+        "results interpretation": ["DIALOGUE"],
+        "report refinement": ["DIALOGUE", "y", "n"],
+    }
     def __init__(
         self,
         model="gpt4omini",

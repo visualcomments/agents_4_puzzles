@@ -31,7 +31,7 @@ competitions/cayley-py-megaminx/megaminx_cayleypy_llm_hybrid_solver.py
 В архив репозитория добавлена локальная копия библиотеки:
 
 ```text
-third_party/cayleypy-main/
+tp/cp/
 ```
 
 Это позволяет запускать гибридный режим даже без отдельного `pip install cayleypy`, если зависимости окружения уже есть.

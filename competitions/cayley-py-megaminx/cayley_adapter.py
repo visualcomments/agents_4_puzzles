@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import heapq
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
@@ -69,9 +69,57 @@ class MegaminxSearchAdapter:
         self.prefer_cayleypy = prefer_cayleypy and cayleypy is not None and BeamSearchAlgorithm is not None
         self._graph = None
         self._beam = None
-        self._graph_cache: dict[bytes, Any] = {}
-        self._beam_cache: dict[bytes, Any] = {}
-        self._bfs_cache: dict[tuple[bytes, int], Any] = {}
+        self._central_key = sm.state_to_bytes(self.central)
+        self._max_cached_target_graphs = max(0, int(__import__('os').environ.get('MEGAMINX_MAX_CACHED_TARGET_GRAPHS', '1')))
+        self._max_cached_bfs_entries = max(0, int(__import__('os').environ.get('MEGAMINX_MAX_CACHED_BFS_ENTRIES', '2')))
+        self._graph_cache: 'OrderedDict[bytes, Any]' = OrderedDict()
+        self._beam_cache: 'OrderedDict[bytes, Any]' = OrderedDict()
+        self._bfs_cache: 'OrderedDict[tuple[bytes, int], Any]' = OrderedDict()
+
+
+
+
+    def _is_central_key(self, key: bytes) -> bool:
+        return key == self._central_key
+
+    def _trim_graph_caches(self) -> None:
+        custom_keys = [key for key in self._graph_cache.keys() if not self._is_central_key(key)]
+        while len(custom_keys) > self._max_cached_target_graphs:
+            drop_key = custom_keys.pop(0)
+            self._graph_cache.pop(drop_key, None)
+            self._beam_cache.pop(drop_key, None)
+            stale_bfs = [bk for bk in self._bfs_cache.keys() if bk[0] == drop_key]
+            for bfs_key in stale_bfs:
+                self._bfs_cache.pop(bfs_key, None)
+
+    def _trim_bfs_cache(self) -> None:
+        custom_keys = [key for key in self._bfs_cache.keys() if not self._is_central_key(key[0])]
+        while len(custom_keys) > self._max_cached_bfs_entries:
+            drop_key = custom_keys.pop(0)
+            self._bfs_cache.pop(drop_key, None)
+
+    def clear_caches(self, *, keep_central: bool = True) -> None:
+        if not keep_central:
+            self._graph_cache.clear()
+            self._beam_cache.clear()
+            self._bfs_cache.clear()
+            self._graph = None
+            self._beam = None
+            return
+        central_graph = self._graph_cache.get(self._central_key)
+        central_beam = self._beam_cache.get(self._central_key)
+        central_bfs = {key: value for key, value in self._bfs_cache.items() if key[0] == self._central_key}
+        self._graph_cache.clear()
+        self._beam_cache.clear()
+        self._bfs_cache.clear()
+        if central_graph is not None:
+            self._graph_cache[self._central_key] = central_graph
+        if central_beam is not None:
+            self._beam_cache[self._central_key] = central_beam
+        for key, value in central_bfs.items():
+            self._bfs_cache[key] = value
+        self._graph = central_graph
+        self._beam = central_beam
 
     def backend_name(self) -> str:
         return 'cayleypy' if self.prefer_cayleypy else 'internal'
@@ -110,6 +158,9 @@ class MegaminxSearchAdapter:
         target_key = sm.state_to_bytes(target_state)
         graph = self._graph_cache.get(target_key)
         if graph is not None:
+            self._graph_cache.move_to_end(target_key)
+            if target_key in self._beam_cache:
+                self._beam_cache.move_to_end(target_key)
             return graph
         try:  # pragma: no cover - depends on optional dependency
             definition = cayleypy.CayleyGraphDef.create(
@@ -119,16 +170,14 @@ class MegaminxSearchAdapter:
                 name='megaminx_custom_v4',
             )
             graph = cayleypy.CayleyGraph(definition)
+            beam = BeamSearchAlgorithm(graph)
             self._graph_cache[target_key] = graph
-            self._beam_cache[target_key] = BeamSearchAlgorithm(graph)
+            self._beam_cache[target_key] = beam
+            self._trim_graph_caches()
             return graph
         except Exception:
             self.prefer_cayleypy = False
-            self._graph_cache.clear()
-            self._beam_cache.clear()
-            self._bfs_cache.clear()
-            self._graph = None
-            self._beam = None
+            self.clear_caches(keep_central=False)
             return None
 
     def _ensure_cayleypy(self) -> None:
@@ -154,6 +203,7 @@ class MegaminxSearchAdapter:
             return None
         key = (sm.state_to_bytes(target_state), int(depth))
         if key in self._bfs_cache:
+            self._bfs_cache.move_to_end(key)
             return self._bfs_cache[key]
         graph = self._build_graph(target_state)
         if graph is None:
@@ -166,6 +216,7 @@ class MegaminxSearchAdapter:
                 return_all_hashes=True,
             )
             self._bfs_cache[key] = bfs_result
+            self._trim_bfs_cache()
             return bfs_result
         except Exception:
             return None
@@ -278,6 +329,7 @@ class MegaminxSearchAdapter:
             self.prefer_cayleypy = False
             self._beam = None
             self._graph = None
+            self.clear_caches(keep_central=False)
             return None
 
     def search(
