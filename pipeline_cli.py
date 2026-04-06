@@ -45,7 +45,6 @@ import itertools
 import importlib
 import importlib.util
 import json
-import types
 import py_compile
 import os
 import shutil
@@ -1812,40 +1811,17 @@ def compile_all() -> None:
 
 
 def _load_solve_fn(solver_path: Path) -> Callable[[Sequence[int]], Tuple[Any, Any]]:
-    """Load `solve` from an arbitrary solve_module.py without reusing stale bytecode.
-
-    Some notebook workflows overwrite the same custom baseline path (for example
-    ``generated/baseline_overrides/baseline_override.py``) multiple times inside one
-    long-lived Python process. Importing that file through ``importlib`` can keep
-    serving stale code when the source file changes faster than the bytecode cache
-    timestamp resolution. To make repeated same-path reloads deterministic, we read
-    the source directly and execute it in a fresh module namespace each time.
-    """
+    """Dynamically import `solve` from an arbitrary solve_module.py."""
     if not solver_path.exists():
         raise FileNotFoundError(solver_path)
 
-    source = solver_path.read_text(encoding='utf-8')
-    module_name = f"solve_module_dyn_exec_{solver_path.stem}_{abs(hash((str(solver_path), len(source))))}"
-    module = types.ModuleType(module_name)
-    module.__file__ = str(solver_path)
-    module.__package__ = ''
-    module.__name__ = module_name
+    module_name = f"solve_module_dyn_{abs(hash(str(solver_path)))}"
+    spec = importlib.util.spec_from_file_location(module_name, solver_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load module from {solver_path}")
 
-    parent_dir = str(solver_path.parent)
-    added_to_syspath = False
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
-        added_to_syspath = True
-
-    try:
-        code = compile(source, str(solver_path), 'exec')
-        exec(code, module.__dict__)
-    finally:
-        if added_to_syspath:
-            try:
-                sys.path.remove(parent_dir)
-            except ValueError:
-                pass
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[attr-defined]
 
     solve = getattr(module, "solve", None)
     if solve is None or not callable(solve):

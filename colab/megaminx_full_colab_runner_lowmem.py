@@ -41,51 +41,14 @@ def read_json(path: Path, default: Any) -> Any:
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def _resolve_explicit_path(repo_root: Path, explicit: str) -> Path:
-    candidate = Path(explicit)
-    if not candidate.is_absolute():
-        candidate = repo_root / candidate
-    return candidate
-
-
-def _build_submission_from_solver(repo_root: Path, solver_path: Path, test_csv: Path, out_csv: Path) -> Path:
-    pipeline_cli = repo_root / 'pipeline_cli.py'
-    if not pipeline_cli.exists():
-        raise FileNotFoundError(pipeline_cli)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    run_cmd([
-        sys.executable,
-        str(pipeline_cli),
-        'build-submission',
-        '--competition', 'cayley-py-megaminx',
-        '--solver', str(solver_path),
-        '--puzzles', str(test_csv),
-        '--output', str(out_csv),
-        '--no-progress',
-    ], repo_root)
-    if not out_csv.exists():
-        raise FileNotFoundError(out_csv)
-    return out_csv
-
-
-def resolve_source_submission(repo_root: Path, test_csv: Path, run_dir: Path, explicit: str | None = None) -> tuple[Path, dict[str, Any]]:
+def choose_baseline(repo_root: Path, explicit: str | None = None) -> Path:
     if explicit:
-        candidate = _resolve_explicit_path(repo_root, explicit)
-        if not candidate.exists():
-            raise FileNotFoundError(candidate)
-        if candidate.suffix.lower() == '.py':
-            generated_csv = run_dir / 'baseline_from_solver.csv'
-            built = _build_submission_from_solver(repo_root, candidate, test_csv, generated_csv)
-            return built, {
-                'kind': 'solver_py',
-                'explicit_baseline': str(candidate),
-                'generated_submission': str(built),
-            }
-        return candidate, {
-            'kind': 'submission_csv',
-            'explicit_baseline': str(candidate),
-        }
-
+        candidate = Path(explicit)
+        if not candidate.is_absolute():
+            candidate = repo_root / candidate
+        if candidate.exists():
+            return candidate
+        raise FileNotFoundError(candidate)
     candidates = [
         repo_root / 'competitions' / 'cayley-py-megaminx' / 'submissions' / 'optimized_submission.csv',
         repo_root / 'submissions' / 'optimized_submission.csv',
@@ -93,10 +56,7 @@ def resolve_source_submission(repo_root: Path, test_csv: Path, run_dir: Path, ex
     ]
     for candidate in candidates:
         if candidate.exists():
-            return candidate, {
-                'kind': 'submission_csv',
-                'explicit_baseline': None,
-            }
+            return candidate
     raise FileNotFoundError('Could not find a baseline submission CSV')
 
 
@@ -154,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--aggressive-beam-mode', choices=['simple', 'advanced'], default='advanced')
     p.add_argument('--gc-every', type=int, default=1)
     p.add_argument('--trim-adapter-cache-every', type=int, default=1)
+    p.add_argument('--search-v3-top-k', type=int, default=150)
     return p
 
 
@@ -174,12 +135,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             fallback_test = repo_root / 'competition_files' / 'test.csv'
             if fallback_test.exists():
                 test_csv = fallback_test
+    source_submission = choose_baseline(repo_root, args.baseline)
+
     run_dir = repo_root / 'colab_runs' / args.run_name
     temp_dir = run_dir / 'temp'
     run_dir.mkdir(parents=True, exist_ok=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
-
-    source_submission, baseline_meta = resolve_source_submission(repo_root, test_csv, run_dir, args.baseline)
 
     current_rows = load_rows(source_submission)
     test_rows = load_rows(test_csv)
@@ -189,7 +150,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary: dict[str, Any] = {
         'run_name': args.run_name,
         'source_submission': str(source_submission),
-        'baseline_meta': baseline_meta,
         'passes': [],
         'profile_mode': args.profile_mode,
         'chunk_size': args.chunk_size,
@@ -229,7 +189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 '--out', str(chunk_out),
                 '--stats-out', str(chunk_stats),
                 '--profile-out', str(chunk_profiles),
-                '--top-k', '0',
+                '--top-k', str(args.search_v3_top_k),
                 '--min-improvement', str(args.min_improvement),
                 '--profile-mode', args.profile_mode,
                 '--gc-every', str(args.gc_every),
