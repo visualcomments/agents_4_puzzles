@@ -207,6 +207,9 @@ def _generate_llm_candidate(
     keep_improving: bool,
     improvement_rounds: int,
     baseline: str | None,
+    max_iters: int | None = None,
+    baseline_patch_max_iters: int | None = None,
+    g4f_recovery_max_iters: int | None = None,
 ) -> Path:
     cmd = [
         sys.executable,
@@ -231,6 +234,12 @@ def _generate_llm_candidate(
         cmd.extend(['--fixer-models', fixer_models])
     if keep_improving:
         cmd.extend(['--keep-improving', '--improvement-rounds', str(improvement_rounds)])
+    if max_iters is not None:
+        cmd.extend(['--max-iters', str(max(1, int(max_iters)))])
+    if baseline_patch_max_iters is not None:
+        cmd.extend(['--baseline-patch-max-iters', str(max(1, int(baseline_patch_max_iters)))])
+    if g4f_recovery_max_iters is not None:
+        cmd.extend(['--g4f-recovery-max-iters', str(max(1, int(g4f_recovery_max_iters)))])
     if baseline:
         baseline_path = Path(baseline)
         if baseline_path.suffix.lower() == '.py':
@@ -466,6 +475,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--fixer-models', default=None)
     p.add_argument('--keep-improving-llm', action='store_true')
     p.add_argument('--llm-improvement-rounds', type=int, default=8)
+    p.add_argument('--max-iters', type=int, default=None, help='Forwarded to pipeline_cli.py run / AgentLaboratory fixer iterations.')
+    p.add_argument('--baseline-patch-max-iters', type=int, default=None, help='Forwarded to pipeline_cli.py run for baseline patch fixer iterations.')
+    p.add_argument('--g4f-recovery-max-iters', type=int, default=None, help='Forwarded to pipeline_cli.py run for recovery fixer iterations.')
     p.add_argument('--baseline', default=None)
     p.add_argument('--run-search-v3', action='store_true', help='Generate a fresh search_v3 candidate from the current best deterministic source before fusion')
     p.add_argument('--search-v3-source', type=Path, default=None, help='If set, use this submission as input to search_v3')
@@ -544,6 +556,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         keep_improving=args.keep_improving_llm,
                         improvement_rounds=args.llm_improvement_rounds,
                         baseline=args.baseline,
+                        max_iters=args.max_iters,
+                        baseline_patch_max_iters=args.baseline_patch_max_iters,
+                        g4f_recovery_max_iters=args.g4f_recovery_max_iters,
                     )
                     cand = _load_candidate(out_path, name=f'generated:{variant}', generated=True, strict_validate=True)
                     if cand is not None:
