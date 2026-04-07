@@ -307,6 +307,38 @@ def ensure_competition_data(target_dir: Path, args):
     return comp_dir
 
 
+def _extract_json_payload(stdout_text: str):
+    """Parse pure JSON or recover the trailing JSON object from noisy stdout.
+
+    `pipeline_cli.py check-g4f-models --json` may still emit progress/log lines
+    before the final JSON payload. We first try a normal parse, then fall back to
+    extracting the last complete JSON object from stdout.
+    """
+    raw = (stdout_text or "").strip()
+    if not raw:
+        raise json.JSONDecodeError("Empty JSON payload", stdout_text or "", 0)
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        last_obj = None
+        for idx, ch in enumerate(raw):
+            if ch != "{":
+                continue
+            try:
+                obj, end = decoder.raw_decode(raw, idx)
+            except json.JSONDecodeError:
+                continue
+            if raw[end:].strip():
+                continue
+            if isinstance(obj, dict):
+                last_obj = obj
+        if last_obj is not None:
+            return last_obj
+        raise
+
+
 def resolve_models(target_dir: Path, args):
     explicit_pool = dedupe_keep_order(split_csv_models(args.g4f_explicit_model_pool))
     explicit_agent_map = parse_agent_models(args.g4f_explicit_agent_models)
@@ -368,7 +400,7 @@ def resolve_models(target_dir: Path, args):
             eprint(res.stderr)
         raise SystemExit(f"g4f probe failed with code {res.returncode}")
 
-    payload = json.loads(res.stdout)
+    payload = _extract_json_payload(res.stdout)
     working = payload.get("working_models") or []
     if not working:
         raise RuntimeError(
