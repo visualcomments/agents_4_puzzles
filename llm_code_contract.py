@@ -22,6 +22,7 @@ RE_CODE_LIKE_LINE = re.compile(
     r"^(?:@|async\s+def\s+\w+\s*\(|def\s+\w+\s*\(|class\s+\w+\s*(?:\(|:)|from\s+\S+\s+import|import\s+\S+|if\b|elif\b|else:|for\b|while\b|try:|except\b|finally:|with\b|return\b|raise\b|assert\b|pass\b|break\b|continue\b|[A-Za-z_][A-Za-z0-9_\[\], ]*\s*=)",
     re.IGNORECASE,
 )
+RE_CODE_FIELD_ESCAPED = re.compile(r'"code"\s*:\s*"(?P<code>(?:[^"\\]|\\.)*)"', re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -222,6 +223,99 @@ def _normalize_code_envelope(payload: Dict[str, Any], *, source_kind: str) -> Op
     return None
 
 
+def _iter_escape_decoded_variants(source: str, *, max_rounds: int = 3) -> List[str]:
+    variants: List[str] = []
+    seen: set[str] = set()
+
+    def _push(value: str) -> None:
+        cleaned = _trim_candidate_edges(value)
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        variants.append(cleaned)
+
+    _push(source)
+    current = source
+    for _ in range(max(0, int(max_rounds))):
+        changed = False
+        if len(current) >= 2 and current[0] == current[-1] and current[0] in {'"', "'"}:
+            try:
+                unquoted = ast.literal_eval(current)
+                if isinstance(unquoted, str) and unquoted.strip() and _trim_candidate_edges(unquoted) != _trim_candidate_edges(current):
+                    current = unquoted
+                    _push(current)
+                    changed = True
+            except Exception:
+                pass
+        if any(token in current for token in ("\n", "\t", "\r", '\"', "\\")):
+            try:
+                decoded = bytes(current, "utf-8").decode("unicode_escape")
+                if decoded.strip() and _trim_candidate_edges(decoded) != _trim_candidate_edges(current):
+                    current = decoded
+                    _push(current)
+                    changed = True
+            except Exception:
+                pass
+        if not changed:
+            break
+    return variants
+
+
+def _decode_escaped_python_candidate(code: str) -> str:
+    source = _trim_candidate_edges(code)
+    if not source:
+        return ""
+
+    candidates: List[str] = _iter_escape_decoded_variants(source, max_rounds=3)
+
+    best = source
+    best_score = -10**9
+    for candidate in candidates:
+        score = _python_candidate_score(candidate, fenced=False)
+        try:
+            ast.parse(candidate)
+            score += 200
+        except Exception:
+            if any(token in candidate for token in ("\n", "\t", "\r", "\\")):
+                score -= 30
+        if score > best_score:
+            best = candidate
+            best_score = score
+    return best
+
+
+def _extract_code_field_candidate(text: str) -> str:
+    source = str(text or "").strip()
+    if not source:
+        return ""
+    best = ""
+    best_score = -10**9
+    for match in RE_CODE_FIELD_ESCAPED.finditer(source):
+        raw_code = match.group("code")
+        if not raw_code:
+            continue
+        try:
+            decoded = json.loads('"' + raw_code + '"')
+        except Exception:
+            try:
+                decoded = bytes(raw_code, "utf-8").decode("unicode_escape")
+            except Exception:
+                continue
+        decoded = _trim_candidate_edges(decoded)
+        if not decoded:
+            continue
+        score = _python_candidate_score(decoded, fenced=False) + 30
+        try:
+            ast.parse(decoded)
+            score += 40
+        except Exception:
+            pass
+        if score > best_score:
+            best = decoded
+            best_score = score
+    return best
+
+
 def extract_code_envelope(text: str) -> Optional[CodeEnvelope]:
     for source_kind, candidate in _candidate_json_texts(text):
         payload = _try_load_json_dict(candidate)
@@ -229,7 +323,26 @@ def extract_code_envelope(text: str) -> Optional[CodeEnvelope]:
             continue
         envelope = _normalize_code_envelope(payload, source_kind=source_kind)
         if envelope is not None:
-            return envelope
+            decoded = _decode_escaped_python_candidate(envelope.code)
+            return CodeEnvelope(
+                version=envelope.version,
+                artifact_type=envelope.artifact_type,
+                language=envelope.language,
+                filename=envelope.filename,
+                code=decoded,
+                source_kind=envelope.source_kind,
+            )
+
+    fallback_code = _extract_code_field_candidate(text)
+    if fallback_code:
+        return CodeEnvelope(
+            version=CODE_RESPONSE_VERSION,
+            artifact_type=DEFAULT_CODE_ARTIFACT_TYPE,
+            language=DEFAULT_CODE_LANGUAGE,
+            filename=DEFAULT_CODE_FILENAME,
+            code=fallback_code,
+            source_kind="regex:code-field",
+        )
     return None
 
 
@@ -515,7 +628,10 @@ def extract_python_candidate(text: str, *, strip_comments_docstrings: bool = Fal
 
     envelope = extract_code_envelope(source)
     if envelope is not None:
-        code = _best_effort_strip_candidate(envelope.code, strip_comments_docstrings=strip_comments_docstrings)
+        code = _best_effort_strip_candidate(
+            _decode_escaped_python_candidate(envelope.code),
+            strip_comments_docstrings=strip_comments_docstrings,
+        )
         return _trim_candidate_edges(code)
 
     candidates: List[Tuple[int, int, str]] = []
@@ -536,9 +652,18 @@ def extract_python_candidate(text: str, *, strip_comments_docstrings: bool = Fal
         candidates.append((score, -10_000 - idx, cleaned))
 
     if not candidates:
+        fallback_code = _extract_code_field_candidate(source)
+        if fallback_code:
+            return _trim_candidate_edges(
+                _best_effort_strip_candidate(
+                    _decode_escaped_python_candidate(fallback_code),
+                    strip_comments_docstrings=strip_comments_docstrings,
+                )
+            )
         return ""
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return candidates[0][2].strip()
+    best = candidates[0][2].strip()
+    return _trim_candidate_edges(_decode_escaped_python_candidate(best))
 
 
 def python_compiles(code: str) -> bool:

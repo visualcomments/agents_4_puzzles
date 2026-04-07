@@ -2146,7 +2146,7 @@ def _memory_env_for_codegen(models: str) -> dict[str, str]:
         env.setdefault("AGENTLAB_G4F_USE_ASYNC", os.getenv("AGENTLAB_G4F_USE_ASYNC", "1"))
         env.setdefault("AGENTLAB_G4F_REQUEST_TIMEOUT_S", os.getenv("AGENTLAB_G4F_REQUEST_TIMEOUT_S", "180"))
         env.setdefault("AGENTLAB_MAX_RESPONSE_CHARS", os.getenv("AGENTLAB_MAX_RESPONSE_CHARS", "0"))
-        env.setdefault("AGENTLAB_G4F_STOP_AT_PYTHON_FENCE", os.getenv("AGENTLAB_G4F_STOP_AT_PYTHON_FENCE", "1"))
+        env.setdefault("AGENTLAB_G4F_STOP_AT_PYTHON_FENCE", os.getenv("AGENTLAB_G4F_STOP_AT_PYTHON_FENCE", "0"))
         env.setdefault("AGENTLAB_ARTIFACT_SPILL_CHARS", os.getenv("AGENTLAB_ARTIFACT_SPILL_CHARS", "8000"))
         env.setdefault("AGENTLAB_HEAVY_IMPORTS", os.getenv("AGENTLAB_HEAVY_IMPORTS", "0"))
         env.setdefault("MALLOC_ARENA_MAX", os.getenv("MALLOC_ARENA_MAX", "2"))
@@ -2293,9 +2293,6 @@ def _run_agent_laboratory(
     if g4f_stop_at_python_fence is not None:
         env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = "1" if g4f_stop_at_python_fence else "0"
         effective_codegen_env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"]
-    elif _prompt_bundle_requires_json_code_envelope(prompt_file, custom_prompts):
-        env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = "0"
-        effective_codegen_env["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = "0"
     print("[agentlab] " + " ".join(cmd))
     if effective_codegen_env:
         print("[agentlab] low-RAM env: " + ", ".join(f"{k}={effective_codegen_env[k]}" for k in sorted(effective_codegen_env.keys())))
@@ -3632,7 +3629,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--frontier-width", type=int, default=6, help="Planner/coder frontier width per hybrid round.")
     sp.add_argument("--archive-size", type=int, default=6, help="How many failed attempts to retain as hybrid experiment memory.")
     sp.add_argument("--refine-rounds", type=int, default=1, help="How many planner refinement rounds to run in hybrid mode.")
-    sp.add_argument("--max-iters", type=int, default=8)
+    sp.add_argument("--max-iters", type=int, default=100000)
     sp.add_argument("--g4f-recovery-rounds", type=int, default=None, help="Extra recovery rounds before offline fallback (forwarded to AgentLaboratory).")
     sp.add_argument("--g4f-recovery-max-iters", type=int, default=None, help="Fixer iterations per recovery round (forwarded to AgentLaboratory).")
     sp.add_argument("--g4f-recovery-sleep", type=float, default=None, help="Cooldown in seconds before each recovery round (forwarded to AgentLaboratory).")
@@ -3713,7 +3710,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--frontier-width", type=int, default=6, help="Planner/coder frontier width per hybrid round.")
     sp.add_argument("--archive-size", type=int, default=6, help="How many failed attempts to retain as hybrid experiment memory.")
     sp.add_argument("--refine-rounds", type=int, default=1, help="How many planner refinement rounds to run in hybrid mode.")
-    sp.add_argument("--max-iters", type=int, default=8)
+    sp.add_argument("--max-iters", type=int, default=100000)
     sp.add_argument("--g4f-recovery-rounds", type=int, default=None, help="Extra recovery rounds before offline fallback (forwarded to AgentLaboratory).")
     sp.add_argument("--g4f-recovery-max-iters", type=int, default=None, help="Fixer iterations per recovery round (forwarded to AgentLaboratory).")
     sp.add_argument("--g4f-recovery-sleep", type=float, default=None, help="Cooldown in seconds before each recovery round (forwarded to AgentLaboratory).")

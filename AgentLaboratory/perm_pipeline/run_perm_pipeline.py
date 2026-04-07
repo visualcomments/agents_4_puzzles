@@ -1024,6 +1024,38 @@ def resolve_agent_models(role: str, fallback: Sequence[str], overrides: Dict[str
     return list(fallback)
 
 
+def _credential_env_present() -> bool:
+    keys = (
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+        "DEEPINFRA_API_KEY",
+        "TOGETHER_API_KEY",
+        "HUGGINGFACE_API_KEY",
+        "PUTER_API_KEY",
+    )
+    return any((os.getenv(name, "") or "").strip() for name in keys)
+
+
+def _model_likely_requires_credentials(model: str) -> bool:
+    m = (model or "").strip().lower()
+    markers = (
+        "gpt-4", "gpt-4o", "claude", "o1", "o3", "gemini", "puter", "openai", "anthropic"
+    )
+    return any(marker in m for marker in markers)
+
+
+def _prefer_credentialless_models(models: Sequence[str]) -> List[str]:
+    ordered = [m for m in models if m]
+    if _credential_env_present():
+        return ordered
+    credentialless = [m for m in ordered if not _model_likely_requires_credentials(m)]
+    return credentialless or ordered
+
+
 def model_quality_score(model: str) -> int:
     m = model.lower()
     score = 0
@@ -1034,6 +1066,8 @@ def model_quality_score(model: str) -> int:
         score -= 6
     if "free" in m:
         score -= 2
+    if _model_likely_requires_credentials(model) and not _credential_env_present():
+        score -= 40
     return score
 
 
@@ -1543,6 +1577,68 @@ def compile_python(code: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _sanitize_candidate_python(code: str) -> str:
+    source = str(code or "").strip()
+    if not source:
+        return ""
+
+    variants: List[str] = []
+    seen: set[str] = set()
+
+    def _push(value: str) -> None:
+        cleaned = (value or "").strip()
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        variants.append(cleaned)
+
+    _push(source)
+    try:
+        extracted = code_contract.extract_python_candidate(source, strip_comments_docstrings=False)
+    except Exception:
+        extracted = ""
+    if extracted:
+        _push(extracted)
+
+    current = source
+    for _ in range(3):
+        changed = False
+        if len(current) >= 2 and current[0] == current[-1] and current[0] in {'"', "'"}:
+            try:
+                unquoted = ast.literal_eval(current)
+                if isinstance(unquoted, str) and unquoted.strip() and unquoted.strip() != current.strip():
+                    current = unquoted
+                    _push(current)
+                    changed = True
+            except Exception:
+                pass
+        if any(token in current for token in ("\n", "\t", "\r", '\"', "\\")):
+            try:
+                decoded = bytes(current, "utf-8").decode("unicode_escape")
+                if decoded.strip() and decoded.strip() != current.strip():
+                    current = decoded
+                    _push(current)
+                    changed = True
+            except Exception:
+                pass
+        if not changed:
+            break
+
+    best = source
+    best_score = -10**9
+    for candidate in variants:
+        ok, _ = compile_python(candidate)
+        score = len(candidate)
+        if ok:
+            score += 100000
+        if "\n" in candidate or "\\" in candidate:
+            score -= 100
+        if score > best_score:
+            best = candidate
+            best_score = score
+    return best
+
+
 def _validator_timeout_s() -> float:
     raw = os.getenv("AGENTLAB_VALIDATOR_TIMEOUT_S", os.getenv("PIPELINE_SOLVER_TIMEOUT_S", "20"))
     try:
@@ -1737,7 +1833,9 @@ def order_models_for_codegen(models: Sequence[str]) -> List[str]:
         status = "OK" if ok else f"skip ({reason})"
         print(f"[model-probe] {model}: {status}")
         (good if ok else bad).append(model)
-    return _interleave_by_backend_diversity(good + tail) + bad
+    if good:
+        return _interleave_by_backend_diversity(good + tail)
+    return _interleave_by_backend_diversity(tail) + bad
 
 
 def ask_first_nonempty(models: Sequence[str], prompt: str, system_prompt: str) -> Tuple[str, Optional[str]]:
@@ -2045,7 +2143,7 @@ def _query_code_block_with_rescue(
     except Exception as e:
         return None, f"{model}: {stage_label} failed ({e})"
 
-    code = extract_python(resp or "")
+    code = _sanitize_candidate_python(extract_python(resp or ""))
     if code:
         return code, None
 
@@ -2062,7 +2160,7 @@ def _query_code_block_with_rescue(
     except Exception as e:
         return None, f"{model}: {stage_label} format-rescue failed ({e})"
 
-    code = extract_python(resp or "")
+    code = _sanitize_candidate_python(extract_python(resp or ""))
     if code:
         return code, None
     return None, f"{model}: {stage_label} did not return a python file"
@@ -2101,6 +2199,7 @@ def _run_fixer_loop(
     if progress is not None:
         progress.set_postfix_str(f"iter 0/{max_iters}")
 
+    repair_context_code = current_code if (compile_python(current_code)[0] if current_code.strip() else False) else (baseline_code or current_code)
     try:
         for it in range(1, max_iters + 1):
             if progress is not None:
@@ -2115,7 +2214,7 @@ def _run_fixer_loop(
             fix_prompt = _build_fixer_prompt(
                 user_prompt=user_prompt,
                 plan=plan,
-                current_code=current_code,
+                current_code=repair_context_code,
                 last_report=last_report,
                 baseline_code=baseline_code,
                 plan_payload=plan_payload,
@@ -2144,15 +2243,20 @@ def _run_fixer_loop(
             if new_code is None:
                 return False, "\n".join(fixer_errors) if fixer_errors else f"{progress_label}: fixer iteration {it} returned no python file"
 
+            new_code = _sanitize_candidate_python(new_code)
             ok, compile_err = compile_python(new_code)
-            current_code = new_code
             if progress is not None:
                 progress.update(1)
 
             if not ok:
                 last_report = f"Fix iteration {it} compile check failed.\n{compile_err}\n"
+                if baseline_code and baseline_code.strip():
+                    repair_context_code = baseline_code
                 _best_effort_release_memory(clear_local_cache=False)
                 continue
+
+            current_code = new_code
+            repair_context_code = new_code
 
             contract_ok, contract_err = validate_solver_contract(new_code)
             if not contract_ok:
@@ -2211,6 +2315,7 @@ def try_generate_with_model(
     if not code:
         return False, err or f"{model}: {stage_label} did not return a python file"
 
+    code = _sanitize_candidate_python(code)
     ok, compile_err = compile_python(code)
     if not ok:
         last_report = f"Initial compile check failed.\n{compile_err}\n"
@@ -2300,7 +2405,7 @@ def attempt_recovery_rounds(
     if rounds <= 0 or not recovery_models or not baseline_code.strip():
         return False, None
 
-    recovery_iters = max(1, min(max_iters, _env_int("AGENTLAB_G4F_RECOVERY_MAX_ITERS", 2)))
+    recovery_iters = max(1, min(max_iters, _env_int("AGENTLAB_G4F_RECOVERY_MAX_ITERS", max_iters)))
     sleep_s = max(0.0, _env_float("AGENTLAB_G4F_RECOVERY_SLEEP_S", 1.5))
 
     if not any(_report_is_recoverable(r) for r in generation_reports[-6:]):
@@ -2518,7 +2623,7 @@ def main() -> None:
     p.add_argument("--fixer-models", default=None, help="Optional model list override for the fixer agent.")
     p.add_argument("--custom-prompts", default=None, help="Path to JSON overriding default system prompts.")
     p.add_argument("--out", default=str(Path.cwd() / "generated" / "solve_module.py"), help="Where to write the final solver.")
-    p.add_argument("--max-iters", type=int, default=4, help="Max repair iterations per model candidate.")
+    p.add_argument("--max-iters", type=int, default=100000, help="Max repair iterations per model candidate.")
     p.add_argument("--search-mode", default=os.getenv("AGENTLAB_SEARCH_MODE", "hybrid"), choices=["classic", "hybrid"], help="classic = single-plan linear search; hybrid = multi-plan frontier search with experiment-memory refinement.")
     p.add_argument("--plan-beam-width", type=int, default=_env_int("AGENTLAB_PLAN_BEAM_WIDTH", 3), help="How many planner hypotheses to keep per planning round in hybrid mode.")
     p.add_argument("--frontier-width", type=int, default=_env_int("AGENTLAB_FRONTIER_WIDTH", 6), help="How many planner/coder frontier attempts to schedule per round in hybrid mode.")
@@ -2588,9 +2693,9 @@ def main() -> None:
     apply_agent_model_override(agent_model_overrides, "coder", args.coder_models)
     apply_agent_model_override(agent_model_overrides, "fixer", args.fixer_models)
 
-    planner_models = resolve_agent_models("planner", ordered_models, agent_model_overrides)
-    coder_models = resolve_agent_models("coder", ordered_models, agent_model_overrides)
-    fixer_models = resolve_agent_models("fixer", coder_models, agent_model_overrides)
+    planner_models = _prefer_credentialless_models(resolve_agent_models("planner", ordered_models, agent_model_overrides))
+    coder_models = _prefer_credentialless_models(resolve_agent_models("coder", ordered_models, agent_model_overrides))
+    fixer_models = _prefer_credentialless_models(resolve_agent_models("fixer", coder_models, agent_model_overrides))
 
     out_path = Path(args.out).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2766,7 +2871,7 @@ def main() -> None:
 
     baseline_patch_models = resolve_agent_models("baseline-patcher", fixer_models or coder_models, agent_model_overrides)
     if prompt_baseline_code and prompt_baseline_code.strip() and baseline_patch_models:
-        patch_iters = max(1, min(args.max_iters, _env_int("AGENTLAB_BASELINE_PATCH_MAX_ITERS", 2)))
+        patch_iters = max(1, min(args.max_iters, _env_int("AGENTLAB_BASELINE_PATCH_MAX_ITERS", args.max_iters)))
         log_status(
             "[baseline-patcher] attempting a minimal validated patch of the known-good baseline before offline fallback."
         )
