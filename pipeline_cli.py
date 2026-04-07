@@ -249,15 +249,17 @@ def _discover_g4f_candidate_models(backend_api_url: Optional[str] = None) -> Lis
 
     preferred = {
         "r1-1776": 0,
-        "gpt-4o-mini": 1,
+        "gpt-4o": 1,
         "gpt-4": 2,
-        "gpt-4o": 3,
-        "claude-3.5-sonnet": 4,
-        "claude-3-haiku": 5,
+        "claude-3.5-sonnet": 3,
+        "command-r-plus": 4,
+        "deepseek-chat": 5,
         "command-r": 6,
-        "command-r-plus": 7,
-        "deepseek-chat": 8,
-        "aria": 9,
+        "aria": 7,
+        "command-a": 8,
+        "command-r7b": 9,
+        "gpt-4o-mini": 10,
+        "claude-3-haiku": 11,
     }
     deduped = _dedupe_keep_order(names)
     return sorted(deduped, key=lambda s: (preferred.get(s, 9999), s.lower()))

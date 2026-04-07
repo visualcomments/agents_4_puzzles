@@ -359,15 +359,16 @@ def resolve_models(target_dir: Path, args):
                     merged.extend(role_models)
                 explicit_pool = dedupe_keep_order(merged)
             if explicit_pool:
-                for role in ("planner", "coder", "fixer"):
-                    explicit_agent_map.setdefault(role, explicit_pool[:1] or [])
+                explicit_agent_map.setdefault("planner", pick_models(explicit_pool, 4))
+                explicit_agent_map.setdefault("coder", pick_models(explicit_pool, 7))
+                explicit_agent_map.setdefault("fixer", pick_models(explicit_pool, 5))
         else:
             if not explicit_pool:
                 raise RuntimeError("Explicit g4f configuration is enabled, but no models were provided.")
             explicit_agent_map = {
-                "planner": pick_models(explicit_pool, 2),
-                "coder": pick_models(explicit_pool, 3),
-                "fixer": pick_models(list(reversed(explicit_pool)), 2),
+                "planner": pick_models(explicit_pool, 4),
+                "coder": pick_models(explicit_pool, 7),
+                "fixer": pick_models(explicit_pool, 5),
             }
 
         working = _promote_preferred_model(explicit_pool[: max(1, int(args.g4f_working_model_limit))] if explicit_pool else [])
@@ -417,9 +418,9 @@ def resolve_models(target_dir: Path, args):
 
     working = working[: max(1, int(args.g4f_working_model_limit))]
     model_pool = ",".join(working)
-    planner_models = ",".join(pick_models(working, 2))
-    coder_models = ",".join(pick_models(working, 3))
-    fixer_models = ",".join(pick_models(list(reversed(working)), 2))
+    planner_models = ",".join(pick_models(working, 4))
+    coder_models = ",".join(pick_models(working, 7))
+    fixer_models = ",".join(pick_models(working, 5))
     agent_models = f"planner={planner_models};coder={coder_models};fixer={fixer_models}"
 
     print("WORKING_G4F_MODELS =", working)
