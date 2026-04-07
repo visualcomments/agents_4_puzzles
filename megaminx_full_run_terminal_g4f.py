@@ -339,8 +339,15 @@ def _extract_json_payload(stdout_text: str):
         raise
 
 
+def _promote_preferred_model(models, preferred="r1-1776"):
+    models = [m for m in models if m]
+    if preferred in models:
+        return [preferred] + [m for m in models if m != preferred]
+    return models
+
+
 def resolve_models(target_dir: Path, args):
-    explicit_pool = dedupe_keep_order(split_csv_models(args.g4f_explicit_model_pool))
+    explicit_pool = _promote_preferred_model(dedupe_keep_order(split_csv_models(args.g4f_explicit_model_pool)))
     explicit_agent_map = parse_agent_models(args.g4f_explicit_agent_models)
     explicit_any = bool(explicit_pool or explicit_agent_map)
 
@@ -363,7 +370,7 @@ def resolve_models(target_dir: Path, args):
                 "fixer": pick_models(list(reversed(explicit_pool)), 2),
             }
 
-        working = explicit_pool[: max(1, int(args.g4f_working_model_limit))] if explicit_pool else []
+        working = _promote_preferred_model(explicit_pool[: max(1, int(args.g4f_working_model_limit))] if explicit_pool else [])
         if not working:
             merged = []
             for role in ("planner", "coder", "fixer"):
@@ -401,7 +408,7 @@ def resolve_models(target_dir: Path, args):
         raise SystemExit(f"g4f probe failed with code {res.returncode}")
 
     payload = _extract_json_payload(res.stdout)
-    working = payload.get("working_models") or []
+    working = _promote_preferred_model(payload.get("working_models") or [])
     if not working:
         raise RuntimeError(
             "No working g4f models found. Try setting --g4f-provider, API keys, "
@@ -592,7 +599,11 @@ def run_baseline(target_dir: Path, args, model_pool: str, agent_models: str) -> 
         "--agent-models", agent_models,
     ]
     if custom_baseline is not None:
-        cmd += ["--baseline", str(custom_baseline), "--candidate", str(custom_baseline)]
+        print(
+            f"[baseline] passing custom baseline submission as candidate/search source only: {custom_baseline}",
+            flush=True,
+        )
+        cmd += ["--candidate", str(custom_baseline)]
     if args.generate_llm:
         cmd += ["--generate-llm", "--llm-variants", args.llm_variants]
     if args.keep_improving_llm:

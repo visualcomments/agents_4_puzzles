@@ -248,15 +248,16 @@ def _discover_g4f_candidate_models(backend_api_url: Optional[str] = None) -> Lis
                 names.append(item.strip())
 
     preferred = {
-        "gpt-4o-mini": 0,
-        "gpt-4": 1,
-        "gpt-4o": 2,
-        "claude-3.5-sonnet": 3,
-        "claude-3-haiku": 4,
-        "command-r": 5,
-        "command-r-plus": 6,
-        "deepseek-chat": 7,
-        "aria": 8,
+        "r1-1776": 0,
+        "gpt-4o-mini": 1,
+        "gpt-4": 2,
+        "gpt-4o": 3,
+        "claude-3.5-sonnet": 4,
+        "claude-3-haiku": 5,
+        "command-r": 6,
+        "command-r-plus": 7,
+        "deepseek-chat": 8,
+        "aria": 9,
     }
     deduped = _dedupe_keep_order(names)
     return sorted(deduped, key=lambda s: (preferred.get(s, 9999), s.lower()))
@@ -688,6 +689,8 @@ def cmd_check_g4f_models(args: argparse.Namespace) -> None:
             on_result=_on_result,
         )
     working: List[str] = [str(r["model"]) for r in results if r.get("ok")]
+    if "r1-1776" in working:
+        working = ["r1-1776"] + [name for name in working if name != "r1-1776"]
 
     payload = {
         "provider": provider_name or None,
@@ -2745,6 +2748,25 @@ def cmd_show_pipeline(args: argparse.Namespace) -> None:
         print(f"  Generate solver:  python pipeline_cli.py generate-solver --competition {spec.key} --out generated/solve_{spec.key}.py")
 
 
+def _normalize_explicit_baseline_path(spec: PipelineSpec, baseline_value: Optional[str], *, command_name: str) -> Optional[Path]:
+    if not baseline_value:
+        return None
+    explicit_baseline = Path(baseline_value).resolve()
+    if not explicit_baseline.exists():
+        raise SystemExit(f"Explicit --baseline file does not exist: {explicit_baseline}")
+
+    if explicit_baseline.suffix.lower() == '.csv':
+        print(
+            f"[baseline] WARNING: {command_name} received a CSV via --baseline ({explicit_baseline}). "
+            f"This flag expects a solver .py file, so the CSV override will be ignored and the default solver baseline "
+            f"{spec.baseline_solver} will be used for prompt grounding and fallback.",
+            flush=True,
+        )
+        return None
+
+    return explicit_baseline
+
+
 def cmd_generate_solver(args: argparse.Namespace) -> None:
     spec = get_pipeline(args.competition) if args.competition else None
     if spec is None:
@@ -2752,9 +2774,7 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
             "Unknown --competition. Run `python pipeline_cli.py list-pipelines` to see supported pipelines."
         )
 
-    explicit_baseline = Path(args.baseline).resolve() if getattr(args, 'baseline', None) else None
-    if explicit_baseline is not None and not explicit_baseline.exists():
-        raise SystemExit(f"Explicit --baseline file does not exist: {explicit_baseline}")
+    explicit_baseline = _normalize_explicit_baseline_path(spec, getattr(args, 'baseline', None), command_name='generate-solver')
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3070,9 +3090,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             f"Unknown competition/pipeline '{args.competition}'. Run `python pipeline_cli.py list-pipelines`."
         )
 
-    explicit_baseline = Path(args.baseline).resolve() if getattr(args, 'baseline', None) else None
-    if explicit_baseline is not None and not explicit_baseline.exists():
-        raise SystemExit(f"Explicit --baseline file does not exist: {explicit_baseline}")
+    explicit_baseline = _normalize_explicit_baseline_path(spec, getattr(args, 'baseline', None), command_name='run')
 
     generated_dir = ROOT / "generated"
     generated_dir.mkdir(exist_ok=True)

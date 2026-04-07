@@ -232,7 +232,14 @@ def _generate_llm_candidate(
     if keep_improving:
         cmd.extend(['--keep-improving', '--improvement-rounds', str(improvement_rounds)])
     if baseline:
-        cmd.extend(['--baseline', baseline])
+        baseline_path = Path(baseline)
+        if baseline_path.suffix.lower() == '.py':
+            cmd.extend(['--baseline', baseline])
+        else:
+            print(
+                f"[baseline] WARNING: skipping non-Python --baseline for solver generation: {baseline_path}",
+                flush=True,
+            )
     _run_command(cmd, cwd=REPO_ROOT)
     return output_path
 
