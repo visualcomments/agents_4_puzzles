@@ -45,6 +45,14 @@ def run(cmd, *, cwd=None, env=None, check=True, capture_output=False, text=True)
     )
 
 
+def _script_help_text(script_path: Path) -> str:
+    try:
+        proc = subprocess.run([sys.executable, str(script_path), '--help'], check=False, text=True, capture_output=True)
+        return (proc.stdout or '') + '\n' + (proc.stderr or '')
+    except Exception:
+        return ''
+
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -631,8 +639,16 @@ def run_baseline(target_dir: Path, args, model_pool: str, agent_models: str) -> 
         "--out", str(hybrid_out),
         "--models", model_pool,
         "--agent-models", agent_models,
-        "--max-iters", str(max(1, int(args.max_iters))),
     ]
+    supported_flags = _script_help_text(hybrid_solver)
+    if "--max-iters" in supported_flags:
+        cmd += ["--max-iters", str(max(1, int(args.max_iters)))]
+    else:
+        print(f"[compat] {hybrid_solver.name} does not support --max-iters; skipping this flag.", flush=True)
+    if "--baseline-patch-max-iters" in supported_flags and hasattr(args, 'baseline_patch_max_iters'):
+        cmd += ["--baseline-patch-max-iters", str(max(1, int(args.baseline_patch_max_iters)))]
+    if "--g4f-recovery-max-iters" in supported_flags and hasattr(args, 'g4f_recovery_max_iters'):
+        cmd += ["--g4f-recovery-max-iters", str(max(1, int(args.g4f_recovery_max_iters)))]
     if custom_baseline is not None:
         print(
             f"[baseline] passing custom baseline submission as candidate/search source only: {custom_baseline}",

@@ -512,7 +512,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    args, extra = build_arg_parser().parse_known_args(argv)
+    if extra:
+        print(f"[compat] ignoring extra args: {' '.join(extra)}", flush=True)
     t0 = time.perf_counter()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.stats_out.parent.mkdir(parents=True, exist_ok=True)
