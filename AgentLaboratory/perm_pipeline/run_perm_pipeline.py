@@ -1577,6 +1577,57 @@ def compile_python(code: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _canonicalize_common_cli_json_patterns(code: str) -> str:
+    source = str(code or "").strip()
+    if not source:
+        return ""
+    try:
+        tree = ast.parse(source)
+    except Exception:
+        return source
+
+    class _JsonLoadsArgvFixer(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call):  # type: ignore[override]
+            self.generic_visit(node)
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr == 'loads'
+                and isinstance(func.value, ast.Name)
+                and func.value.id == 'json'
+                and node.args
+            ):
+                return node
+
+            first_arg = node.args[0]
+            replacement = None
+            if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                if first_arg.value.id == 'sys' and first_arg.attr == 'argv':
+                    replacement = ast.Subscript(
+                        value=ast.Attribute(value=ast.Name(id='sys', ctx=ast.Load()), attr='argv', ctx=ast.Load()),
+                        slice=ast.Constant(value=1),
+                        ctx=ast.Load(),
+                    )
+            elif isinstance(first_arg, ast.Name) and first_arg.id == 'argv':
+                replacement = ast.Subscript(
+                    value=ast.Name(id='argv', ctx=ast.Load()),
+                    slice=ast.Constant(value=1),
+                    ctx=ast.Load(),
+                )
+
+            if replacement is not None:
+                node.args[0] = ast.copy_location(replacement, first_arg)
+            return node
+
+    fixed_tree = _JsonLoadsArgvFixer().visit(tree)
+    ast.fix_missing_locations(fixed_tree)
+    try:
+        normalized = ast.unparse(fixed_tree)
+    except Exception:
+        return source
+    return normalized.strip() or source
+
+
 def _sanitize_candidate_python(code: str) -> str:
     source = str(code or "").strip()
     if not source:
@@ -1599,6 +1650,14 @@ def _sanitize_candidate_python(code: str) -> str:
         extracted = ""
     if extracted:
         _push(extracted)
+
+    for candidate in list(variants):
+        try:
+            normalized = _canonicalize_common_cli_json_patterns(candidate)
+        except Exception:
+            normalized = ""
+        if normalized:
+            _push(normalized)
 
     current = source
     for _ in range(3):

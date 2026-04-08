@@ -478,3 +478,43 @@ def test_megaminx_baseline_fails_generic_tests_but_passes_resolved_smoke_vectors
 
     resolved_ok, report = rpp.validate_solver_suite(validator, solver, rpp.resolve_validator_smoke_vectors(validator))
     assert resolved_ok is True, report
+
+
+def test_sanitize_candidate_python_fixes_json_loads_on_sys_argv_list():
+    broken = '''import json
+import sys
+
+
+def solve(vec):
+    return [], list(vec)
+
+
+def _main():
+    vec = json.loads(sys.argv)
+    moves, sorted_array = solve(vec)
+    print(json.dumps({"moves": moves, "sorted_array": sorted_array}))
+'''
+    fixed = rpp._sanitize_candidate_python(broken)
+    assert 'json.loads(sys.argv[1])' in fixed
+    ok, reason = rpp.compile_python(fixed)
+    assert ok is True, reason
+
+
+def test_sanitize_candidate_python_fixes_json_loads_on_imported_argv_list():
+    broken = '''import json
+from sys import argv
+
+
+def solve(vec):
+    return [], list(vec)
+
+
+def _main():
+    vec = json.loads(argv)
+    moves, sorted_array = solve(vec)
+    print(json.dumps({"moves": moves, "sorted_array": sorted_array}))
+'''
+    fixed = rpp._sanitize_candidate_python(broken)
+    assert 'json.loads(argv[1])' in fixed
+    ok, reason = rpp.compile_python(fixed)
+    assert ok is True, reason
