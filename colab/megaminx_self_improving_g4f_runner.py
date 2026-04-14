@@ -1,19 +1,21 @@
 # %% [markdown]
-# agents_4_puzzles — Megaminx self-improving Colab runner
-
-Этот notebook рассчитан на **уже пропатченный** репозиторий с поддержкой `--self-improve-prompts`.
-
-Что умеет:
-- распаковать **готовый patched archive** или клонировать репозиторий;
-- установить зависимости из `requirements-full.txt`;
-- дать форму-параметры для `g4f`/AgentLaboratory;
-- собрать и запустить `pipeline_cli.py run` с нужными флагами;
-- сохранить **полный вывод** запуска в лог-файл;
-- показывать **последние 30 строк логов каждую секунду** прямо в notebook;
-- отдельно прогнать `check-g4f-models`;
-- настроить `kaggle.json`, сделать preflight и submit.
-
-По умолчанию параметры предзаполнены по вашему длинному примеру команды.
+# # agents_4_puzzles — Megaminx self-improving Colab runner
+# 
+# Этот notebook рассчитан на **уже пропатченный** репозиторий с поддержкой `--self-improve-prompts`.
+# 
+# Что умеет:
+# - распаковать **готовый patched archive** или клонировать репозиторий;
+# - установить зависимости из `requirements-full.txt`;
+# - дать форму-параметры для `g4f` / AgentLaboratory;
+# - **заранее** подгрузить `kaggle.json` **до основного прогона**;
+# - **заранее** подгрузить свой кастомный baseline `solve.py` и передать его через `--baseline`;
+# - собрать и запустить `pipeline_cli.py run` с нужными флагами;
+# - сохранить **полный вывод** запуска в лог-файл;
+# - показывать **последние 30 строк логов каждую секунду** прямо в notebook;
+# - отдельно прогнать `check-g4f-models`;
+# - сделать `kaggle-preflight` и submit.
+# 
+# По умолчанию параметры предзаполнены по вашему длинному примеру команды.
 
 # %%
 # @title 1. Источник репозитория и рабочая папка
@@ -43,8 +45,8 @@ if SOURCE_MODE == "patched_archive":
     subprocess.run(["unzip", "-q", str(archive_path), "-d", str(workdir)], check=True)
     repo_dir = workdir / REPO_SUBDIR_NAME
 else:
-    subprocess.run(["git", "clone", "--depth", "1", "--branch", GIT_BRANCH, GIT_REPO_URL, str(workdir / 'repo')], check=True)
-    repo_dir = workdir / 'repo'
+    subprocess.run(["git", "clone", "--depth", "1", "--branch", GIT_BRANCH, GIT_REPO_URL, str(workdir / "repo")], check=True)
+    repo_dir = workdir / "repo"
 
 if not repo_dir.exists():
     raise FileNotFoundError(f"Не найдена рабочая папка репозитория: {repo_dir}")
@@ -52,20 +54,121 @@ if not repo_dir.exists():
 os.chdir(repo_dir)
 print("repo_dir =", repo_dir)
 print("cwd =", Path.cwd())
-print("pipeline_cli exists =", (repo_dir / 'pipeline_cli.py').exists())
+print("pipeline_cli exists =", (repo_dir / "pipeline_cli.py").exists())
 
 # %%
-# @title 2. Установка зависимостей
+# @title 2. Предзагрузка Kaggle credentials и кастомного baseline solve.py (до основного прогона)
+import os
+import json
+import shutil
+from pathlib import Path
+
+UPLOAD_KAGGLE_JSON_FROM_BROWSER = False  # @param {type:"boolean"}
+KAGGLE_JSON_UPLOAD_PATH = ""  # @param {type:"string"}
+KAGGLE_JSON_INLINE = ""  # @param {type:"string"}
+
+UPLOAD_CUSTOM_BASELINE_FROM_BROWSER = False  # @param {type:"boolean"}
+CUSTOM_BASELINE_UPLOAD_PATH = ""  # @param {type:"string"}
+CUSTOM_BASELINE_RUNTIME_PATH = ""  # @param {type:"string"}
+CUSTOM_BASELINE_TARGET_NAME = "custom_baseline_solve.py"  # @param {type:"string"}
+
+repo_dir = Path.cwd()
+user_uploads_dir = repo_dir / "_user_uploads"
+baseline_upload_dir = user_uploads_dir / "baselines"
+user_uploads_dir.mkdir(parents=True, exist_ok=True)
+baseline_upload_dir.mkdir(parents=True, exist_ok=True)
+
+def _in_colab():
+    try:
+        import google.colab  # type: ignore
+        return True
+    except Exception:
+        return False
+
+def _upload_via_browser(prompt_name: str, target_dir: Path) -> Path:
+    if not _in_colab():
+        raise RuntimeError(f"Browser upload for {prompt_name} is available only inside Google Colab.")
+    from google.colab import files  # type: ignore
+
+    print(f"Upload {prompt_name} ...")
+    uploaded = files.upload()
+    if not uploaded:
+        raise RuntimeError(f"No file uploaded for {prompt_name}.")
+    first_name, first_payload = next(iter(uploaded.items()))
+    dst = target_dir / Path(first_name).name
+    dst.write_bytes(first_payload)
+    print(f"Uploaded {prompt_name} -> {dst}")
+    return dst
+
+def _resolve_existing_path(raw: str) -> Path:
+    candidate = Path(os.path.expanduser(raw)).resolve()
+    if not candidate.exists():
+        raise FileNotFoundError(candidate)
+    return candidate
+
+# --- Kaggle credentials ---
+home_kaggle_dir = Path.home() / ".kaggle"
+home_kaggle_dir.mkdir(parents=True, exist_ok=True)
+home_kaggle_json = home_kaggle_dir / "kaggle.json"
+os.environ["KAGGLE_CONFIG_DIR"] = str(home_kaggle_dir)
+
+resolved_kaggle_source = None
+if KAGGLE_JSON_INLINE.strip():
+    payload = json.loads(KAGGLE_JSON_INLINE)
+    home_kaggle_json.write_text(json.dumps(payload), encoding="utf-8")
+    resolved_kaggle_source = "inline-json"
+elif KAGGLE_JSON_UPLOAD_PATH.strip():
+    src = _resolve_existing_path(KAGGLE_JSON_UPLOAD_PATH.strip())
+    shutil.copyfile(src, home_kaggle_json)
+    resolved_kaggle_source = str(src)
+elif UPLOAD_KAGGLE_JSON_FROM_BROWSER:
+    src = _upload_via_browser("kaggle.json", user_uploads_dir)
+    shutil.copyfile(src, home_kaggle_json)
+    resolved_kaggle_source = str(src)
+
+if home_kaggle_json.exists():
+    os.chmod(home_kaggle_json, 0o600)
+
+# --- Custom baseline solve.py ---
+RESOLVED_CUSTOM_BASELINE_PATH = ""
+resolved_baseline_source = None
+
+if CUSTOM_BASELINE_RUNTIME_PATH.strip():
+    src = _resolve_existing_path(CUSTOM_BASELINE_RUNTIME_PATH.strip())
+    resolved_baseline_source = str(src)
+elif CUSTOM_BASELINE_UPLOAD_PATH.strip():
+    src = _resolve_existing_path(CUSTOM_BASELINE_UPLOAD_PATH.strip())
+    resolved_baseline_source = str(src)
+elif UPLOAD_CUSTOM_BASELINE_FROM_BROWSER:
+    src = _upload_via_browser("custom baseline solve.py", baseline_upload_dir)
+    resolved_baseline_source = str(src)
+else:
+    src = None
+
+if src is not None:
+    if src.suffix.lower() != ".py":
+        raise ValueError(f"Custom baseline must be a .py file, got: {src}")
+    baseline_target = baseline_upload_dir / CUSTOM_BASELINE_TARGET_NAME
+    shutil.copyfile(src, baseline_target)
+    RESOLVED_CUSTOM_BASELINE_PATH = str(baseline_target.resolve())
+
+print("kaggle_json_exists =", home_kaggle_json.exists(), home_kaggle_json)
+print("kaggle_json_source =", resolved_kaggle_source)
+print("custom_baseline =", RESOLVED_CUSTOM_BASELINE_PATH or "<not set>")
+print("custom_baseline_source =", resolved_baseline_source)
+
+# %%
+# @title 3. Установка зависимостей
 import subprocess
 from pathlib import Path
 
 repo_dir = Path.cwd()
 subprocess.run(["python3", "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"], check=True)
-subprocess.run(["python3", "-m", "pip", "install", "-r", str(repo_dir / 'requirements-full.txt')], check=True)
+subprocess.run(["python3", "-m", "pip", "install", "-r", str(repo_dir / "requirements-full.txt")], check=True)
 print("requirements-full.txt installed")
 
 # %%
-# @title 3. Параметры запуска Megaminx
+# @title 4. Параметры запуска Megaminx
 COMPETITION = "cayley-py-megaminx"  # @param {type:"string"}
 PROMPT_VARIANT = "regular"  # @param ["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid"]
 OUTPUT_PATH = "competitions/cayley-py-megaminx/submissions/submission_best.csv"  # @param {type:"string"}
@@ -86,7 +189,7 @@ ARCHIVE_SIZE = 48  # @param {type:"integer"}
 REFINE_ROUNDS = 100  # @param {type:"integer"}
 MAX_ITERS = 100000  # @param {type:"integer"}
 
-# g4f / generation behaviour
+# g4f / generation
 G4F_ASYNC = True  # @param {type:"boolean"}
 G4F_REQUEST_TIMEOUT = 120  # @param {type:"integer"}
 G4F_STOP_AT_PYTHON_FENCE = True  # @param {type:"boolean"}
@@ -94,26 +197,23 @@ MAX_RESPONSE_CHARS = 0  # @param {type:"integer"}
 PRINT_GENERATION = True  # @param {type:"boolean"}
 PRINT_GENERATION_MAX_CHARS = 16000  # @param {type:"integer"}
 
-# Improvement loop
+# Improvement
 KEEP_IMPROVING = True  # @param {type:"boolean"}
 IMPROVEMENT_ROUNDS = 50000  # @param {type:"integer"}
 SELF_IMPROVE_PROMPTS = True  # @param {type:"boolean"}
 
-# Kaggle submit inside run
-SUBMIT = True  # @param {type:"boolean"}
-SUBMIT_VIA = "auto"  # @param ["auto", "api", "cli"]
+# Baseline override
+BASELINE_PATH_OVERRIDE = ""  # @param {type:"string"}
+REQUIRE_KAGGLE_JSON_BEFORE_RUN = False  # @param {type:"boolean"}
+
+# Submit
+SUBMIT = False  # @param {type:"boolean"}
+SUBMIT_VIA = "auto"  # @param ["auto", "kaggle", "none"]
 SUBMIT_COMPETITION = "cayley-py-megaminx"  # @param {type:"string"}
 MESSAGE = "bobik"  # @param {type:"string"}
 KAGGLE_JSON_PATH = "~/.kaggle/kaggle.json"  # @param {type:"string"}
 
-# Optional extras
-PUZZLES_PATH = ""  # @param {type:"string"}
-RUN_LOG_PATH = ""  # @param {type:"string"}
-NO_PROGRESS = False  # @param {type:"boolean"}
-SCHEMA_CHECK = False  # @param {type:"boolean"}
-NO_SCHEMA_CHECK_IDS = False  # @param {type:"boolean"}
-
-# Live notebook logging
+# Live logs
 ENABLE_LIVE_LOG_TAIL = True  # @param {type:"boolean"}
 LIVE_LOG_PATH = "logs/megaminx_live_run.log"  # @param {type:"string"}
 TAIL_LINES = 30  # @param {type:"integer"}
@@ -123,40 +223,6 @@ CLEAR_OUTPUT_EACH_REFRESH = True  # @param {type:"boolean"}
 print("Parameters loaded")
 
 # %%
-# @title 4. Настройка Kaggle credentials (опционально)
-import os
-import json
-from pathlib import Path
-
-# Вариант A: вставить JSON целиком строкой.
-KAGGLE_JSON_INLINE = ""  # @param {type:"string"}
-
-# Вариант B: заранее загрузить kaggle.json в Colab Files и указать путь ниже.
-KAGGLE_JSON_UPLOAD_PATH = ""  # @param {type:"string"}
-
-home_kaggle_dir = Path.home() / ".kaggle"
-home_kaggle_dir.mkdir(parents=True, exist_ok=True)
-home_kaggle_json = home_kaggle_dir / "kaggle.json"
-
-written = False
-if KAGGLE_JSON_INLINE.strip():
-    payload = json.loads(KAGGLE_JSON_INLINE)
-    home_kaggle_json.write_text(json.dumps(payload), encoding="utf-8")
-    written = True
-elif KAGGLE_JSON_UPLOAD_PATH.strip():
-    src = Path(os.path.expanduser(KAGGLE_JSON_UPLOAD_PATH)).resolve()
-    if not src.exists():
-        raise FileNotFoundError(f"Не найден uploaded kaggle.json: {src}")
-    home_kaggle_json.write_bytes(src.read_bytes())
-    written = True
-
-if written:
-    os.chmod(home_kaggle_json, 0o600)
-    print("kaggle.json prepared at", home_kaggle_json)
-else:
-    print("Credentials not changed. If SUBMIT=True, убедитесь, что ~/.kaggle/kaggle.json уже существует.")
-
-# %%
 # @title 5. Проверка доступных g4f-моделей (опционально)
 import subprocess
 subprocess.run(["python3", "pipeline_cli.py", "check-g4f-models", "--list-only"], check=False)
@@ -164,7 +230,6 @@ subprocess.run(["python3", "pipeline_cli.py", "check-g4f-models", "--list-only"]
 # %%
 # @title 6. Сборка команды run
 import os
-import shlex
 from pathlib import Path
 
 repo_dir = Path.cwd()
@@ -181,6 +246,28 @@ def add_flag(args, flag, value=None, allow_empty=False):
         return
     args.extend([flag, s])
 
+def ensure_kaggle_json_ready():
+    expected = Path(os.path.expanduser(KAGGLE_JSON_PATH.strip() or "~/.kaggle/kaggle.json"))
+    if not expected.exists():
+        raise FileNotFoundError(
+            f"Kaggle credentials file not found: {expected}. "
+            "Сначала выполните ячейку предзагрузки kaggle.json."
+        )
+    return expected
+
+if REQUIRE_KAGGLE_JSON_BEFORE_RUN or SUBMIT or SUBMIT_VIA in {"auto", "kaggle"}:
+    try:
+        ensure_kaggle_json_ready()
+        print("Kaggle credentials are ready.")
+    except FileNotFoundError as exc:
+        print(f"[kaggle-warning] {exc}")
+
+baseline_override = ""
+if BASELINE_PATH_OVERRIDE.strip():
+    baseline_override = str(Path(os.path.expanduser(BASELINE_PATH_OVERRIDE.strip())).resolve())
+elif globals().get("RESOLVED_CUSTOM_BASELINE_PATH"):
+    baseline_override = RESOLVED_CUSTOM_BASELINE_PATH
+
 cmd = [
     "python3", "-u", "pipeline_cli.py", "run",
     "--competition", COMPETITION,
@@ -196,45 +283,37 @@ cmd = [
     "--max-response-chars", str(MAX_RESPONSE_CHARS),
     "--print-generation-max-chars", str(PRINT_GENERATION_MAX_CHARS),
     "--improvement-rounds", str(IMPROVEMENT_ROUNDS),
+    "--submit-via", SUBMIT_VIA,
+    "--submit-competition", SUBMIT_COMPETITION or COMPETITION,
+    "--message", MESSAGE,
+    "--kaggle-json", os.path.expanduser(KAGGLE_JSON_PATH),
 ]
 
 if USE_AGENT_MODELS and AGENT_MODELS.strip():
-    cmd.extend(["--agent-models", AGENT_MODELS.strip()])
+    add_flag(cmd, "--agent-models", AGENT_MODELS.strip())
 elif MODELS.strip():
-    cmd.extend(["--models", MODELS.strip()])
+    add_flag(cmd, "--models", MODELS.strip())
 
 add_flag(cmd, "--planner-models", PLANNER_MODELS.strip())
 add_flag(cmd, "--coder-models", CODER_MODELS.strip())
 add_flag(cmd, "--fixer-models", FIXER_MODELS.strip())
-add_flag(cmd, "--puzzles", PUZZLES_PATH.strip())
-add_flag(cmd, "--run-log", RUN_LOG_PATH.strip())
+
 add_flag(cmd, "--g4f-async", G4F_ASYNC)
 add_flag(cmd, "--g4f-stop-at-python-fence", G4F_STOP_AT_PYTHON_FENCE)
 add_flag(cmd, "--print-generation", PRINT_GENERATION)
 add_flag(cmd, "--keep-improving", KEEP_IMPROVING)
 add_flag(cmd, "--self-improve-prompts", SELF_IMPROVE_PROMPTS)
-add_flag(cmd, "--no-progress", NO_PROGRESS)
-add_flag(cmd, "--schema-check", SCHEMA_CHECK)
-add_flag(cmd, "--no-schema-check-ids", NO_SCHEMA_CHECK_IDS)
+add_flag(cmd, "--submit", SUBMIT)
+add_flag(cmd, "--baseline", baseline_override)
 
-if SUBMIT:
-    cmd.append("--submit")
-    cmd.extend(["--submit-via", SUBMIT_VIA])
-    if SUBMIT_COMPETITION.strip():
-        cmd.extend(["--submit-competition", SUBMIT_COMPETITION.strip()])
-    if MESSAGE.strip():
-        cmd.extend(["--message", MESSAGE.strip()])
-    if KAGGLE_JSON_PATH.strip():
-        cmd.extend(["--kaggle-json", os.path.expanduser(KAGGLE_JSON_PATH.strip())])
-
-cmd_display = " \\\n  ".join(shlex.quote(x) for x in cmd)
-print(cmd_display)
 RUN_CMD = cmd
+print("RUN_CMD:")
+print(" ".join(RUN_CMD))
+print("baseline_override =", baseline_override or "<default repo baseline>")
 
 # %%
 # @title 7. Live logging helper
 import os
-import sys
 import time
 import threading
 from collections import deque
@@ -245,7 +324,6 @@ try:
     from IPython.display import clear_output
 except Exception:
     clear_output = None
-
 
 def stream_command_with_live_tail(cmd, cwd=None, env=None, log_path="run.log", tail_lines=30, refresh_seconds=1.0, clear_screen=True):
     log_path = Path(log_path)
@@ -276,72 +354,62 @@ def stream_command_with_live_tail(cmd, cwd=None, env=None, log_path="run.log", t
         )
 
         def reader():
-            try:
-                assert proc.stdout is not None
-                for raw_line in proc.stdout:
-                    line = raw_line.rstrip("\n")
-                    with lock:
-                        last_lines.append(line)
-                        state["lines"] += 1
-                    logf.write(raw_line)
-                    logf.flush()
-            finally:
-                try:
-                    if proc.stdout is not None:
-                        proc.stdout.close()
-                except Exception:
-                    pass
+            assert proc.stdout is not None
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip("\n")
+                logf.write(raw_line)
+                with lock:
+                    last_lines.append(line)
+                    state["lines"] += 1
 
-        thread = threading.Thread(target=reader, daemon=True)
-        thread.start()
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
 
-        def render(final=False):
+        while proc.poll() is None:
+            time.sleep(max(0.1, float(refresh_seconds)))
             with lock:
                 snapshot = list(last_lines)
-                total_lines = state["lines"]
-            elapsed = time.time() - state["started"]
-            status = proc.poll()
+                n_lines = state["lines"]
+                started = state["started"]
             if clear_screen and clear_output is not None:
                 clear_output(wait=True)
-            print("Live tail monitor")
-            print("Command:")
-            print(" ".join(cmd))
-            print(f"Log file: {log_path}")
-            print(f"Elapsed: {elapsed:.1f}s | Captured lines: {total_lines} | Return code: {status}")
+            print(f"log_path: {log_path}")
+            print(f"elapsed_sec: {time.time() - started:.1f}")
+            print(f"captured_lines: {n_lines}")
             print("=" * 100)
-            print(f"Last {tail_lines} lines:")
             if snapshot:
                 print("\n".join(snapshot))
             else:
-                print("<log is empty yet>")
-            if final:
-                print("=" * 100)
-                print("Process finished")
+                print("<waiting for log output>")
 
-        try:
-            while proc.poll() is None or thread.is_alive():
-                render(final=False)
-                time.sleep(max(0.2, float(refresh_seconds)))
-            thread.join(timeout=2.0)
-            render(final=True)
-        except KeyboardInterrupt:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except Exception:
-                proc.kill()
-            thread.join(timeout=2.0)
-            render(final=True)
-            raise
+        t.join(timeout=5)
+        with lock:
+            snapshot = list(last_lines)
+            n_lines = state["lines"]
+            started = state["started"]
 
-    return proc.returncode, log_path
+        if clear_screen and clear_output is not None:
+            clear_output(wait=True)
+        print(f"log_path: {log_path}")
+        print(f"elapsed_sec: {time.time() - started:.1f}")
+        print(f"captured_lines: {n_lines}")
+        print("=" * 100)
+        print("\n".join(snapshot) if snapshot else "<empty log>")
 
-print("stream_command_with_live_tail ready")
+        return proc.returncode, log_path
 
 # %%
 # @title 8. Kaggle preflight (рекомендуется перед live submit)
 import os
 import subprocess
+from pathlib import Path
+
+expected_kaggle_json = Path(os.path.expanduser(KAGGLE_JSON_PATH.strip() or "~/.kaggle/kaggle.json"))
+if not expected_kaggle_json.exists():
+    raise FileNotFoundError(
+        f"Не найден {expected_kaggle_json}. "
+        "Сначала выполните ячейку предзагрузки kaggle.json."
+    )
 
 preflight = [
     "python3", "pipeline_cli.py", "kaggle-preflight",
@@ -360,8 +428,16 @@ import os
 import subprocess
 from pathlib import Path
 
-if 'RUN_CMD' not in globals():
+if "RUN_CMD" not in globals():
     raise RuntimeError("Сначала выполните ячейку 'Сборка команды run'")
+
+if REQUIRE_KAGGLE_JSON_BEFORE_RUN:
+    expected_kaggle_json = Path(os.path.expanduser(KAGGLE_JSON_PATH.strip() or "~/.kaggle/kaggle.json"))
+    if not expected_kaggle_json.exists():
+        raise FileNotFoundError(
+            f"Не найден {expected_kaggle_json}. "
+            "Сначала выполните ячейку предзагрузки kaggle.json."
+        )
 
 print("Running:")
 print(" ".join(RUN_CMD))
@@ -390,7 +466,6 @@ if out_path.exists():
 
 # %%
 # @title 10. Показать последние 30 строк уже сохранённого лога (повторный просмотр)
-import os
 from pathlib import Path
 
 existing_log_path = Path(LIVE_LOG_PATH)
@@ -411,6 +486,13 @@ print("\n".join(lines[-30:]) if lines else "<empty log>")
 import subprocess
 from pathlib import Path
 
+expected_kaggle_json = Path(os.path.expanduser(KAGGLE_JSON_PATH.strip() or "~/.kaggle/kaggle.json"))
+if not expected_kaggle_json.exists():
+    raise FileNotFoundError(
+        f"Не найден {expected_kaggle_json}. "
+        "Сначала выполните ячейку предзагрузки kaggle.json."
+    )
+
 out_path = Path(OUTPUT_PATH)
 if not out_path.exists():
     raise FileNotFoundError(f"Сначала получите submission file: {out_path}")
@@ -425,13 +507,15 @@ print(" ".join(submit_cmd))
 subprocess.run(submit_cmd, check=False)
 
 # %%
-# @title 12. Скачать submission и лог-файл (Colab)
+# @title 12. Скачать submission, лог-файл и кастомный baseline (Colab)
 from pathlib import Path
 
 out_path = Path(OUTPUT_PATH)
 log_path = Path(LIVE_LOG_PATH)
 if not log_path.is_absolute():
     log_path = Path.cwd() / log_path
+
+baseline_path = Path(RESOLVED_CUSTOM_BASELINE_PATH) if globals().get("RESOLVED_CUSTOM_BASELINE_PATH") else None
 
 try:
     from google.colab import files
@@ -443,7 +527,11 @@ try:
         files.download(str(log_path))
     else:
         print("Log file not found:", log_path)
+    if baseline_path and baseline_path.exists():
+        files.download(str(baseline_path))
 except Exception as exc:
     print("Автоскачивание недоступно вне Colab:", exc)
     print("submission:", out_path.resolve())
     print("log:", log_path.resolve())
+    if baseline_path:
+        print("baseline:", baseline_path.resolve())
