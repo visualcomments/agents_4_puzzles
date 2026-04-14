@@ -8,6 +8,8 @@
 - установить зависимости из `requirements-full.txt`;
 - дать форму-параметры для `g4f`/AgentLaboratory;
 - собрать и запустить `pipeline_cli.py run` с нужными флагами;
+- сохранить **полный вывод** запуска в лог-файл;
+- показывать **последние 30 строк логов каждую секунду** прямо в notebook;
 - отдельно прогнать `check-g4f-models`;
 - настроить `kaggle.json`, сделать preflight и submit.
 
@@ -21,7 +23,7 @@ import subprocess
 from pathlib import Path
 
 SOURCE_MODE = "patched_archive"  # @param ["patched_archive", "github_clone"]
-PATCHED_ARCHIVE_PATH = "/content/agents_4_puzzles-main_megaminx_self_improving_patched_with_parametric_colab.zip"  # @param {type:"string"}
+PATCHED_ARCHIVE_PATH = "/content/agents_4_puzzles-main_megaminx_self_improving_patched_with_parametric_colab_and_live_logs.zip"  # @param {type:"string"}
 GIT_REPO_URL = "https://github.com/visualcomments/agents_4_puzzles.git"  # @param {type:"string"}
 GIT_BRANCH = "main"  # @param {type:"string"}
 WORKDIR = "/content/work_agents_4_puzzles"  # @param {type:"string"}
@@ -54,7 +56,6 @@ print("pipeline_cli exists =", (repo_dir / 'pipeline_cli.py').exists())
 
 # %%
 # @title 2. Установка зависимостей
-import os
 import subprocess
 from pathlib import Path
 
@@ -65,8 +66,6 @@ print("requirements-full.txt installed")
 
 # %%
 # @title 3. Параметры запуска Megaminx
-from pathlib import Path
-
 COMPETITION = "cayley-py-megaminx"  # @param {type:"string"}
 PROMPT_VARIANT = "regular"  # @param ["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid"]
 OUTPUT_PATH = "competitions/cayley-py-megaminx/submissions/submission_best.csv"  # @param {type:"string"}
@@ -113,6 +112,13 @@ RUN_LOG_PATH = ""  # @param {type:"string"}
 NO_PROGRESS = False  # @param {type:"boolean"}
 SCHEMA_CHECK = False  # @param {type:"boolean"}
 NO_SCHEMA_CHECK_IDS = False  # @param {type:"boolean"}
+
+# Live notebook logging
+ENABLE_LIVE_LOG_TAIL = True  # @param {type:"boolean"}
+LIVE_LOG_PATH = "logs/megaminx_live_run.log"  # @param {type:"string"}
+TAIL_LINES = 30  # @param {type:"integer"}
+TAIL_REFRESH_SECONDS = 1.0  # @param {type:"number"}
+CLEAR_OUTPUT_EACH_REFRESH = True  # @param {type:"boolean"}
 
 print("Parameters loaded")
 
@@ -176,7 +182,7 @@ def add_flag(args, flag, value=None, allow_empty=False):
     args.extend([flag, s])
 
 cmd = [
-    "python3", "pipeline_cli.py", "run",
+    "python3", "-u", "pipeline_cli.py", "run",
     "--competition", COMPETITION,
     "--prompt-variant", PROMPT_VARIANT,
     "--output", OUTPUT_PATH,
@@ -226,7 +232,114 @@ print(cmd_display)
 RUN_CMD = cmd
 
 # %%
-# @title 7. Kaggle preflight (рекомендуется перед live submit)
+# @title 7. Live logging helper
+import os
+import sys
+import time
+import threading
+from collections import deque
+from pathlib import Path
+from subprocess import Popen, PIPE, STDOUT
+
+try:
+    from IPython.display import clear_output
+except Exception:
+    clear_output = None
+
+
+def stream_command_with_live_tail(cmd, cwd=None, env=None, log_path="run.log", tail_lines=30, refresh_seconds=1.0, clear_screen=True):
+    log_path = Path(log_path)
+    if cwd is not None:
+        cwd = str(cwd)
+        log_path = log_path if log_path.is_absolute() else Path(cwd) / log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
+    merged_env.setdefault("PYTHONUNBUFFERED", "1")
+
+    last_lines = deque(maxlen=max(1, int(tail_lines)))
+    lock = threading.Lock()
+    state = {"lines": 0, "started": time.time()}
+
+    with log_path.open("w", encoding="utf-8", buffering=1) as logf:
+        proc = Popen(
+            cmd,
+            cwd=cwd,
+            env=merged_env,
+            stdout=PIPE,
+            stderr=STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        def reader():
+            try:
+                assert proc.stdout is not None
+                for raw_line in proc.stdout:
+                    line = raw_line.rstrip("\n")
+                    with lock:
+                        last_lines.append(line)
+                        state["lines"] += 1
+                    logf.write(raw_line)
+                    logf.flush()
+            finally:
+                try:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+
+        def render(final=False):
+            with lock:
+                snapshot = list(last_lines)
+                total_lines = state["lines"]
+            elapsed = time.time() - state["started"]
+            status = proc.poll()
+            if clear_screen and clear_output is not None:
+                clear_output(wait=True)
+            print("Live tail monitor")
+            print("Command:")
+            print(" ".join(cmd))
+            print(f"Log file: {log_path}")
+            print(f"Elapsed: {elapsed:.1f}s | Captured lines: {total_lines} | Return code: {status}")
+            print("=" * 100)
+            print(f"Last {tail_lines} lines:")
+            if snapshot:
+                print("\n".join(snapshot))
+            else:
+                print("<log is empty yet>")
+            if final:
+                print("=" * 100)
+                print("Process finished")
+
+        try:
+            while proc.poll() is None or thread.is_alive():
+                render(final=False)
+                time.sleep(max(0.2, float(refresh_seconds)))
+            thread.join(timeout=2.0)
+            render(final=True)
+        except KeyboardInterrupt:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                proc.kill()
+            thread.join(timeout=2.0)
+            render(final=True)
+            raise
+
+    return proc.returncode, log_path
+
+print("stream_command_with_live_tail ready")
+
+# %%
+# @title 8. Kaggle preflight (рекомендуется перед live submit)
 import os
 import subprocess
 
@@ -242,7 +355,8 @@ print(" ".join(preflight))
 subprocess.run(preflight, check=False)
 
 # %%
-# @title 8. Запуск сценария
+# @title 9. Запуск сценария c live-логом
+import os
 import subprocess
 from pathlib import Path
 
@@ -251,7 +365,23 @@ if 'RUN_CMD' not in globals():
 
 print("Running:")
 print(" ".join(RUN_CMD))
-subprocess.run(RUN_CMD, check=False)
+
+repo_dir = Path.cwd()
+if ENABLE_LIVE_LOG_TAIL:
+    exit_code, actual_log_path = stream_command_with_live_tail(
+        RUN_CMD,
+        cwd=repo_dir,
+        env={"PYTHONUNBUFFERED": "1"},
+        log_path=LIVE_LOG_PATH,
+        tail_lines=TAIL_LINES,
+        refresh_seconds=TAIL_REFRESH_SECONDS,
+        clear_screen=CLEAR_OUTPUT_EACH_REFRESH,
+    )
+    print("exit_code =", exit_code)
+    print("actual_log_path =", actual_log_path)
+else:
+    subprocess.run(RUN_CMD, check=False)
+    actual_log_path = None
 
 out_path = Path(OUTPUT_PATH)
 print("output exists =", out_path.exists(), out_path)
@@ -259,8 +389,25 @@ if out_path.exists():
     print("output size =", out_path.stat().st_size)
 
 # %%
-# @title 9. Отдельный submit через официальный kaggle CLI (опционально)
+# @title 10. Показать последние 30 строк уже сохранённого лога (повторный просмотр)
 import os
+from pathlib import Path
+
+existing_log_path = Path(LIVE_LOG_PATH)
+if not existing_log_path.is_absolute():
+    existing_log_path = Path.cwd() / existing_log_path
+
+if not existing_log_path.exists():
+    raise FileNotFoundError(existing_log_path)
+
+lines = existing_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+print("Log path:", existing_log_path)
+print("Total log lines:", len(lines))
+print("=" * 100)
+print("\n".join(lines[-30:]) if lines else "<empty log>")
+
+# %%
+# @title 11. Отдельный submit через официальный kaggle CLI (опционально)
 import subprocess
 from pathlib import Path
 
@@ -278,16 +425,25 @@ print(" ".join(submit_cmd))
 subprocess.run(submit_cmd, check=False)
 
 # %%
-# @title 10. Скачать submission файл (Colab)
+# @title 12. Скачать submission и лог-файл (Colab)
 from pathlib import Path
 
 out_path = Path(OUTPUT_PATH)
-if not out_path.exists():
-    raise FileNotFoundError(out_path)
+log_path = Path(LIVE_LOG_PATH)
+if not log_path.is_absolute():
+    log_path = Path.cwd() / log_path
 
 try:
     from google.colab import files
-    files.download(str(out_path))
+    if out_path.exists():
+        files.download(str(out_path))
+    else:
+        print("Submission file not found:", out_path)
+    if log_path.exists():
+        files.download(str(log_path))
+    else:
+        print("Log file not found:", log_path)
 except Exception as exc:
     print("Автоскачивание недоступно вне Colab:", exc)
-    print("Файл лежит здесь:", out_path.resolve())
+    print("submission:", out_path.resolve())
+    print("log:", log_path.resolve())
