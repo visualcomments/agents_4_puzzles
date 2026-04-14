@@ -966,6 +966,61 @@ def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def _load_competition_self_improver(spec: PipelineSpec):
+    module_path = ROOT / 'competitions' / spec.key / 'prompt_self_improver.py'
+    if not module_path.exists():
+        return None
+    module_name = f"competition_prompt_self_improver_{re.sub(r'[^a-zA-Z0-9_]+', '_', spec.key)}"
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        return loaded
+    spec_obj = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec_obj is None or spec_obj.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec_obj)
+    sys.modules[module_name] = module
+    spec_obj.loader.exec_module(module)
+    return module
+
+
+def _prepare_competition_self_improvement_prompt_bundle(
+    *,
+    spec: PipelineSpec,
+    base_prompt_file: Path,
+    base_custom_prompts: Optional[Path],
+    baseline_solver: Path,
+    round_idx: int,
+    score_history: Sequence[Dict[str, Any]],
+    best_metric: Optional[Dict[str, Any]],
+    prompt_history: Sequence[Dict[str, Any]],
+    output_dir: Path,
+) -> Optional[dict[str, Any]]:
+    module = _load_competition_self_improver(spec)
+    if module is None or not hasattr(module, 'build_round_prompt_bundle'):
+        return None
+    return module.build_round_prompt_bundle(
+        base_prompt_file=base_prompt_file,
+        base_custom_prompts=base_custom_prompts,
+        baseline_solver=baseline_solver,
+        round_idx=round_idx,
+        score_history=score_history,
+        best_metric=best_metric,
+        prompt_history=prompt_history,
+        output_dir=output_dir,
+    )
+
+
+def _write_prompt_evolution_history(out_path: Path, history: Sequence[Dict[str, Any]]) -> None:
+    if not history:
+        return
+    try:
+        target = out_path.with_name(out_path.stem + '_prompt_evolution.json')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(list(history), ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception:
+        return
+
+
 def _parse_score_value(raw: Any) -> Optional[float]:
     if raw in (None, '', 'None'):
         return None
@@ -1949,6 +2004,13 @@ def _probe_solver_validation_failure(
     except Exception as exc:
         return False, f'py_compile failed: {type(exc).__name__}: {exc}'
 
+    try:
+        solver_text = solver_path.read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        solver_text = ''
+    if 'def solve(' not in solver_text and 'async def solve(' not in solver_text:
+        return False, 'py_compile failed: missing solve() entrypoint'
+
     smoke_vectors = _normalize_smoke_vectors(smoke_vector)
     if not smoke_vectors:
         return True, None
@@ -2383,6 +2445,7 @@ def _generate_solver_with_optional_improvement(
     validated_round_hook: Optional[Callable[[int, Path], Optional[Dict[str, Any]]]] = None,
     initial_baseline: Optional[Path] = None,
     candidate_round_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
+    self_improve_prompts: bool = False,
 ) -> dict[str, Any]:
     smoke_vectors = _resolve_smoke_vectors(spec)
     scoring_enabled = bool(keep_improving and puzzles_csv_for_score is not None)
@@ -2412,6 +2475,7 @@ def _generate_solver_with_optional_improvement(
     best_candidate_path: Optional[Path] = None
     best_round: Optional[int] = None
     submitted_rounds: list[int] = []
+    prompt_evolution_history: list[dict[str, Any]] = []
 
     for round_idx in range(1, rounds + 1):
         candidate_path = out_path if (not keep_improving and round_idx == 1) else out_path.parent / f'{out_path.stem}.round{round_idx}{out_path.suffix}'
@@ -2419,12 +2483,33 @@ def _generate_solver_with_optional_improvement(
         print(f'[improve] round {round_idx}/{rounds}: baseline={baseline_for_round} -> candidate={candidate_path}', flush=True)
 
         try:
+            prompt_file_for_round = prompt_file
+            custom_prompts_for_round = custom_prompts
+            if self_improve_prompts:
+                prompt_bundle_dir = out_path.parent / f'{out_path.stem}_prompt_rounds'
+                prepared_prompt = _prepare_competition_self_improvement_prompt_bundle(
+                    spec=spec,
+                    base_prompt_file=prompt_file,
+                    base_custom_prompts=custom_prompts,
+                    baseline_solver=baseline_for_round,
+                    round_idx=round_idx,
+                    score_history=score_history,
+                    best_metric=best_metric,
+                    prompt_history=prompt_evolution_history,
+                    output_dir=prompt_bundle_dir,
+                )
+                if prepared_prompt is not None:
+                    prompt_file_for_round = Path(prepared_prompt['prompt_file'])
+                    custom_prompts_for_round = Path(prepared_prompt['custom_prompts_file']) if prepared_prompt.get('custom_prompts_file') else None
+                    meta = prepared_prompt.get('meta') if isinstance(prepared_prompt.get('meta'), dict) else None
+                    if meta is not None:
+                        prompt_evolution_history.append(meta)
             _run_agent_laboratory(
-                prompt_file=prompt_file,
+                prompt_file=prompt_file_for_round,
                 out_path=candidate_path,
                 validator=spec.validator,
                 baseline=baseline_for_round,
-                custom_prompts=custom_prompts,
+                custom_prompts=custom_prompts_for_round,
                 llm=llm,
                 agent_models=agent_models,
                 planner_models=planner_models,
@@ -2550,6 +2635,8 @@ def _generate_solver_with_optional_improvement(
     if best_candidate_path is None:
         shutil.copyfile(baseline_origin, out_path)
         best_candidate_path = out_path
+
+    _write_prompt_evolution_history(out_path, prompt_evolution_history)
 
     return {
         'best_score': best_score,
@@ -2875,6 +2962,7 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         competition_format_slug=spec.format_slug,
         initial_baseline=effective_baseline,
         candidate_round_hook=_candidate_round_hook if adaptive_baseline_info.get('enabled') else None,
+        self_improve_prompts=getattr(args, 'self_improve_prompts', False),
     )
     if args.keep_improving:
         print(f"[improve] best_round={result.get('best_round')} best_score={result.get('best_score')}", flush=True)
@@ -3368,6 +3456,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 validated_round_hook=_validated_round_hook if submit_during_improvement else None,
                 initial_baseline=effective_baseline,
                 candidate_round_hook=_candidate_round_hook if adaptive_baseline_info.get('enabled') else None,
+                self_improve_prompts=getattr(args, 'self_improve_prompts', False),
             )
             report['stages']['generate_solver']['improvement'] = improvement_result
             if per_round_submit_reports:
@@ -3645,6 +3734,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(g4f_async=None, g4f_stop_at_python_fence=None)
     sp.add_argument("--keep-improving", action="store_true", help="Do not stop after the first validated solver; keep running additional locally scored improvement rounds.")
     sp.add_argument("--improvement-rounds", type=int, default=3, help="How many validated generation rounds to run when --keep-improving is enabled.")
+    sp.add_argument("--self-improve-prompts", action="store_true", help="For competition-specific pipelines that support it, synthesize a stronger round-specific prompt bundle from the previous accepted solver before each new improvement round.")
     sp.add_argument("--allow-baseline", action="store_true")
     sp.add_argument("--baseline", default=None, help="Optional explicit baseline solve_module.py override used for prompt grounding, fallback, and --no-llm.")
     sp.add_argument("--no-llm", action="store_true", help="Skip LLM: just copy baseline")
@@ -3726,6 +3816,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(g4f_async=None, g4f_stop_at_python_fence=None)
     sp.add_argument("--keep-improving", action="store_true", help="Do not stop after the first validated solver; keep running additional locally scored improvement rounds.")
     sp.add_argument("--improvement-rounds", type=int, default=3, help="How many validated generation rounds to run when --keep-improving is enabled.")
+    sp.add_argument("--self-improve-prompts", action="store_true", help="For competition-specific pipelines that support it, synthesize a stronger round-specific prompt bundle from the previous accepted solver before each new improvement round.")
     sp.add_argument("--allow-baseline", action="store_true")
     sp.add_argument("--baseline", default=None, help="Optional explicit baseline solve_module.py override used for prompt grounding, fallback, and --no-llm.")
     sp.add_argument("--no-llm", action="store_true")
