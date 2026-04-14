@@ -2850,6 +2850,17 @@ def _normalize_explicit_baseline_path(spec: PipelineSpec, baseline_value: Option
         )
         return None
 
+    try:
+        _load_solve_fn(explicit_baseline)
+        _validate_solver(explicit_baseline, spec.validator, _resolve_smoke_vectors(spec))
+    except Exception as exc:
+        print(
+            f"[baseline] WARNING: explicit override {explicit_baseline} failed preflight ({exc}). "
+            f"Falling back to default baseline {spec.baseline_solver}.",
+            flush=True,
+        )
+        return None
+
     return explicit_baseline
 
 

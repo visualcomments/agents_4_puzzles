@@ -61,6 +61,7 @@ print("pipeline_cli exists =", (repo_dir / "pipeline_cli.py").exists())
 import os
 import json
 import shutil
+import importlib.util
 from pathlib import Path
 
 UPLOAD_KAGGLE_JSON_FROM_BROWSER = False  # @param {type:"boolean"}
@@ -145,12 +146,29 @@ elif UPLOAD_CUSTOM_BASELINE_FROM_BROWSER:
 else:
     src = None
 
+def _baseline_has_callable_solve(path: Path) -> bool:
+    try:
+        spec = importlib.util.spec_from_file_location(f"custom_baseline_{abs(hash(str(path)))}", path)
+        if spec is None or spec.loader is None:
+            return False
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # type: ignore[attr-defined]
+        solve = getattr(module, "solve", None)
+        return callable(solve)
+    except Exception:
+        return False
+
 if src is not None:
     if src.suffix.lower() != ".py":
         raise ValueError(f"Custom baseline must be a .py file, got: {src}")
     baseline_target = baseline_upload_dir / CUSTOM_BASELINE_TARGET_NAME
     shutil.copyfile(src, baseline_target)
-    RESOLVED_CUSTOM_BASELINE_PATH = str(baseline_target.resolve())
+    if _baseline_has_callable_solve(baseline_target):
+        RESOLVED_CUSTOM_BASELINE_PATH = str(baseline_target.resolve())
+    else:
+        print(f"[baseline-warning] Uploaded custom baseline has no callable solve(vec): {baseline_target}")
+        print("[baseline-warning] Falling back to the repository default baseline.")
+        RESOLVED_CUSTOM_BASELINE_PATH = ""
 
 print("kaggle_json_exists =", home_kaggle_json.exists(), home_kaggle_json)
 print("kaggle_json_source =", resolved_kaggle_source)
