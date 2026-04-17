@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 
 def _safe_read_text(path: Optional[Path]) -> str:
@@ -15,15 +15,6 @@ def _safe_read_text(path: Optional[Path]) -> str:
         return path.read_text(encoding="utf-8")
     except Exception:
         return ""
-
-
-def _clip(text: str, limit: int = 1200) -> str:
-    body = str(text or "")
-    if len(body) <= limit:
-        return body
-    head = max(80, limit // 2)
-    tail = max(80, limit - head)
-    return body[:head] + "\n...\n" + body[-tail:]
 
 
 def _solver_fingerprint(code: str) -> str:
@@ -61,6 +52,24 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
         rationale="Different Megaminx rows compress under different legal commuting orders, so one global order leaves score on the table.",
         priority=100,
     ),
+    "score_regression_guard": Directive(
+        key="score_regression_guard",
+        title="Score-regression guard",
+        instruction=(
+            "Introduce an explicit rollback / acceptance guard: risky optimization stages must keep the previous exact-valid candidate when they fail to shorten a fixed deterministic evaluation shard or violate exact replay equivalence."
+        ),
+        rationale="Many prompt rounds are syntactically valid but score-regressive; the model should be forced to design safe fallback logic instead of assuming every new optimizer stage helps.",
+        priority=98,
+    ),
+    "semantic_equivalence_replay": Directive(
+        key="semantic_equivalence_replay",
+        title="Semantic-equivalence replay",
+        instruction=(
+            "After each non-trivial rewrite family, replay the optimized local word under official permutations and keep the rewrite only when the exact local effect matches and the word is strictly shorter."
+        ),
+        rationale="Algorithmic prompting works better when the solver proves semantic preservation programmatically instead of trusting heuristic transformations.",
+        priority=95,
+    ),
     "bidirectional_window_rewrite": Directive(
         key="bidirectional_window_rewrite",
         title="Bidirectional bounded local rewrite",
@@ -69,6 +78,33 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
         ),
         rationale="The current local DP often depends on scan direction; a deterministic bidirectional pass can improve local minima without changing asymptotic guarantees.",
         priority=90,
+    ),
+    "validator_triad_recheck": Directive(
+        key="validator_triad_recheck",
+        title="Validator triad recheck",
+        instruction=(
+            "Harden the final contract with a deterministic three-part check: compile/import health, legal official move-name check, and exact replay-to-final-state verification before returning the candidate result."
+        ),
+        rationale="For this repository, the best process supervision signal is a strict validator-aware triad.",
+        priority=88,
+    ),
+    "compile_first_then_optimize": Directive(
+        key="compile_first_then_optimize",
+        title="Compile first, then optimize",
+        instruction=(
+            "Stage the patch so that the lookup-first baseline path stays intact and import-safe before adding heavier optimizer deltas; when a later stage is uncertain, fail back to the exact baseline-compatible path rather than breaking the whole solver."
+        ),
+        rationale="Rounds that mix architectural rewrites and fragile plumbing often fail for avoidable reasons; forcing a compile-safe baseline-preserving layer improves outer-loop efficiency.",
+        priority=86,
+    ),
+    "policy_ablation_search": Directive(
+        key="policy_ablation_search",
+        title="Policy ablation search",
+        instruction=(
+            "Use a tiny fixed ablation bank of optimizer policy packages and keep per-row or per-window winners under a deterministic local score proxy, rather than betting on a single composite heuristic."
+        ),
+        rationale="APE-style prompt search is a strong fit for this repository because different deterministic policy mixes win on different bundled rows.",
+        priority=84,
     ),
     "small_support_macro_mining": Directive(
         key="small_support_macro_mining",
@@ -86,7 +122,7 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
             "Strengthen the fixed-radius exact effect atlas: keep the shortest representative per local effect, canonicalize equivalent short words before storage, and memoize packed effects."
         ),
         rationale="A weak exact atlas makes the downstream optimizer blind to many safe equivalences already available at small radius.",
-        priority=70,
+        priority=72,
     ),
     "candidate_bank_scoring": Directive(
         key="candidate_bank_scoring",
@@ -94,8 +130,8 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
         instruction=(
             "Construct a small deterministic bank of optimizer variants, score them with a local exact-validity-preserving proxy, and keep only the best valid result."
         ),
-        rationale="The repository already supports keep-improving loops; the solver itself should also exploit a bounded candidate bank instead of committing to a single rewrite schedule.",
-        priority=60,
+        rationale="The solver itself should exploit a bounded candidate bank instead of committing to a single rewrite schedule.",
+        priority=65,
     ),
 }
 
@@ -107,7 +143,7 @@ def inspect_solver_code(code: str) -> Dict[str, Any]:
         "local_window": _parse_small_int(code, "_LOCAL_WINDOW"),
         "optimization_passes": _parse_small_int(code, "_OPTIMIZATION_PASSES"),
     }
-    features = {
+    return {
         "uses_lookup_first": "optimized_lookup" in low or "lookup.get(state_key)" in low,
         "has_exact_short_atlas": "_short_word_data" in low or "short_table_depth" in low,
         "has_local_window_dp": "_optimize_local_windows" in low or ("dp =" in low and "nxt =" in low),
@@ -118,7 +154,6 @@ def inspect_solver_code(code: str) -> Dict[str, Any]:
         "fingerprint": _solver_fingerprint(code),
         "constants": constants,
     }
-    return features
 
 
 def _recent_directives(prompt_history: Sequence[Dict[str, Any]], *, limit: int = 2) -> set[str]:
@@ -131,45 +166,128 @@ def _recent_directives(prompt_history: Sequence[Dict[str, Any]], *, limit: int =
     return used
 
 
+def _error_bucket(entry: Dict[str, Any]) -> str | None:
+    text = str(entry.get("error") or "").lower()
+    if not text:
+        return None
+    if any(token in text for token in ("json", "decode", "strict output", "fence")):
+        return "json_contract"
+    if any(token in text for token in ("validator", "illegal move", "unsolved", "final state", "replay")):
+        return "validation"
+    if any(token in text for token in ("syntax", "import", "traceback", "exception", "compile", "typeerror", "nameerror")):
+        return "runtime"
+    return "other"
+
+
+def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6) -> Dict[str, Any]:
+    window = list(history)[-max(0, limit):]
+    signals: Dict[str, Any] = {
+        "window": len(window),
+        "recent_accepts": 0,
+        "recent_failures": 0,
+        "json_contract_failures": 0,
+        "validation_failures": 0,
+        "runtime_failures": 0,
+        "other_failures": 0,
+        "validated_not_selected": 0,
+        "plateau": False,
+        "score_regressions": 0,
+        "recent_failure_labels": [],
+    }
+    if not window:
+        return signals
+
+    labels: List[str] = []
+    for entry in window:
+        if entry.get("accepted") is True:
+            signals["recent_accepts"] += 1
+            continue
+        bucket = _error_bucket(entry)
+        if bucket is not None:
+            signals["recent_failures"] += 1
+            labels.append(bucket)
+            if bucket == "json_contract":
+                signals["json_contract_failures"] += 1
+            elif bucket == "validation":
+                signals["validation_failures"] += 1
+            elif bucket == "runtime":
+                signals["runtime_failures"] += 1
+            else:
+                signals["other_failures"] += 1
+            continue
+        signals["validated_not_selected"] += 1
+        metric = entry.get("metric") if isinstance(entry.get("metric"), dict) else {}
+        if metric.get("source") == "local_score" and metric.get("value") is not None:
+            signals["score_regressions"] += 1
+
+    tail = window[-3:]
+    if tail and all(entry.get("accepted") is False for entry in tail):
+        signals["plateau"] = True
+    signals["recent_failure_labels"] = labels[-3:]
+    return signals
+
+
 def select_directives(
     *,
     feature_snapshot: Dict[str, Any],
     round_idx: int,
     prompt_history: Sequence[Dict[str, Any]],
+    score_history: Sequence[Dict[str, Any]],
 ) -> List[Directive]:
-    candidates: List[Directive] = []
+    candidates: Dict[str, Directive] = {}
     constants = feature_snapshot.get("constants") if isinstance(feature_snapshot.get("constants"), dict) else {}
+    history_signals = analyze_history_signals(score_history)
+
+    def add(key: str) -> None:
+        candidates[key] = DIRECTIVE_LIBRARY[key]
+
     if not feature_snapshot.get("has_multi_policy_sweep"):
-        candidates.append(DIRECTIVE_LIBRARY["multi_policy_sweep"])
+        add("multi_policy_sweep")
     if not feature_snapshot.get("has_bidirectional_rewrite"):
-        candidates.append(DIRECTIVE_LIBRARY["bidirectional_window_rewrite"])
+        add("bidirectional_window_rewrite")
     if not feature_snapshot.get("has_macro_mining"):
-        candidates.append(DIRECTIVE_LIBRARY["small_support_macro_mining"])
+        add("small_support_macro_mining")
     if not feature_snapshot.get("has_exact_short_atlas") or int(constants.get("short_table_depth") or 0) <= 5:
-        candidates.append(DIRECTIVE_LIBRARY["stronger_effect_atlas"])
+        add("stronger_effect_atlas")
     if not feature_snapshot.get("has_candidate_bank_scoring"):
-        candidates.append(DIRECTIVE_LIBRARY["candidate_bank_scoring"])
+        add("candidate_bank_scoring")
+
+    if history_signals.get("plateau"):
+        add("policy_ablation_search")
+        add("score_regression_guard")
+        add("semantic_equivalence_replay")
+    if history_signals.get("validation_failures") or history_signals.get("runtime_failures"):
+        add("compile_first_then_optimize")
+        add("validator_triad_recheck")
+    if history_signals.get("json_contract_failures"):
+        add("validator_triad_recheck")
+        add("compile_first_then_optimize")
+    if history_signals.get("score_regressions"):
+        add("score_regression_guard")
+        add("semantic_equivalence_replay")
 
     if not candidates:
-        candidates = [
-            DIRECTIVE_LIBRARY["multi_policy_sweep"],
-            DIRECTIVE_LIBRARY["bidirectional_window_rewrite"],
-            DIRECTIVE_LIBRARY["stronger_effect_atlas"],
-        ]
+        for key in ("multi_policy_sweep", "bidirectional_window_rewrite", "stronger_effect_atlas"):
+            add(key)
 
+    ordered = sorted(candidates.values(), key=lambda item: (-item.priority, item.key))
     used_recently = _recent_directives(prompt_history)
-    fresh = [item for item in sorted(candidates, key=lambda item: (-item.priority, item.key)) if item.key not in used_recently]
-    selected = fresh[:3]
-    if len(selected) < 3:
-        for item in sorted(candidates, key=lambda item: (-item.priority, item.key)):
+    fresh = [item for item in ordered if item.key not in used_recently]
+    target_size = 4 if (history_signals.get("plateau") or history_signals.get("recent_failures")) else 3
+    selected = fresh[:target_size]
+    if len(selected) < target_size:
+        for item in ordered:
             if item not in selected:
                 selected.append(item)
-            if len(selected) >= 3:
+            if len(selected) >= target_size:
                 break
 
-    if round_idx >= 3 and DIRECTIVE_LIBRARY["candidate_bank_scoring"] not in selected:
-        selected[-1] = DIRECTIVE_LIBRARY["candidate_bank_scoring"]
-    return selected[:3]
+    if (round_idx >= 3 or history_signals.get("plateau") or history_signals.get("score_regressions")) and DIRECTIVE_LIBRARY["score_regression_guard"] not in selected:
+        if selected:
+            selected[-1] = DIRECTIVE_LIBRARY["score_regression_guard"]
+        else:
+            selected.append(DIRECTIVE_LIBRARY["score_regression_guard"])
+    return selected[:target_size]
 
 
 def summarize_history(history: Sequence[Dict[str, Any]], *, limit: int = 3) -> List[str]:
@@ -235,10 +353,9 @@ def _feature_block(feature_snapshot: Dict[str, Any]) -> str:
         f"- macro mining: {'yes' if feature_snapshot.get('has_macro_mining') else 'no'}",
         f"- candidate-bank scoring: {'yes' if feature_snapshot.get('has_candidate_bank_scoring') else 'no'}",
     ]
-    if constants:
-        rendered = ", ".join(f"{k}={v}" for k, v in constants.items() if v is not None)
-        if rendered:
-            lines.append(f"- extracted constants: {rendered}")
+    rendered = ", ".join(f"{k}={v}" for k, v in constants.items() if v is not None)
+    if rendered:
+        lines.append(f"- extracted constants: {rendered}")
     return "\n".join(lines)
 
 
@@ -247,6 +364,21 @@ def _history_block(history: Sequence[Dict[str, Any]]) -> str:
     if not items:
         return "Recent round memory:\n- no prior rounds yet"
     return "Recent round memory:\n- " + "\n- ".join(items)
+
+
+def _history_signal_block(history: Sequence[Dict[str, Any]]) -> str:
+    signals = analyze_history_signals(history)
+    labels = ", ".join(signals.get("recent_failure_labels") or []) or "none"
+    return "\n".join(
+        [
+            "Recent failure / plateau signals:",
+            f"- recent_accepts: {signals.get('recent_accepts')}",
+            f"- recent_failures: {signals.get('recent_failures')} (json={signals.get('json_contract_failures')}, validation={signals.get('validation_failures')}, runtime={signals.get('runtime_failures')})",
+            f"- validated_not_selected: {signals.get('validated_not_selected')}",
+            f"- plateau_detected: {'yes' if signals.get('plateau') else 'no'}",
+            f"- recent_failure_labels: {labels}",
+        ]
+    )
 
 
 def synthesize_round_prompt_text(
@@ -259,7 +391,12 @@ def synthesize_round_prompt_text(
     prompt_history: Sequence[Dict[str, Any]],
 ) -> Dict[str, Any]:
     feature_snapshot = inspect_solver_code(baseline_code)
-    directives = select_directives(feature_snapshot=feature_snapshot, round_idx=round_idx, prompt_history=prompt_history)
+    directives = select_directives(
+        feature_snapshot=feature_snapshot,
+        round_idx=round_idx,
+        prompt_history=prompt_history,
+        score_history=score_history,
+    )
     evolution_block = "\n\n".join(
         [
             f"SELF-IMPROVEMENT ROUND {round_idx}",
@@ -267,8 +404,10 @@ def synthesize_round_prompt_text(
             f"Current best selection metric: {_best_metric_text(best_metric)}",
             _feature_block(feature_snapshot),
             _history_block(score_history),
+            _history_signal_block(score_history),
             _directive_block(directives),
-            "Acceptance intent for this round: keep exact lookup first, preserve legal official move names only, preserve deterministic replay, and significantly revise the local optimization core so that the resulting solver has a real chance to beat the previous answer rather than paraphrase it.",
+            "Acceptance intent for this round: keep exact lookup first, preserve legal official move names only, preserve deterministic replay, add an explicit anti-regression fallback, and materially revise the local optimization core so that the resulting solver has a real chance to beat the previous answer rather than paraphrase it.",
+            "Planner quality bar for this round: prefer compile-safe staged patches, require exact semantic-equivalence replay for every new local rewrite family, and build a tiny deterministic policy bank instead of trusting one heuristic ordering.",
         ]
     )
     text = _insert_before_strict_contract(base_prompt_text, evolution_block)
@@ -304,23 +443,23 @@ def synthesize_round_custom_prompts(
         "planner": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver with fingerprint {feature_snapshot.get('fingerprint')}. "
             f"Return a materially stronger plan rather than a paraphrase. Force the plan to rethink the optimization core around: {directive_summary}. "
-            f"Current best metric: {best_metric_text}."
+            f"Current best metric: {best_metric_text}. Include an anti-regression and replay-equivalence story."
         ),
         "coder": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver. "
             f"Do not produce a superficial patch. Make the optimization core materially stronger around: {directive_summary}. "
-            "Preserve lookup-first semantics, legal move names only, deterministic replay, and competition-safe bounded search."
+            "Preserve lookup-first semantics, legal move names only, deterministic replay, explicit rollback-safe score guarding, and competition-safe bounded search."
         ),
         "fixer": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: when repairing the candidate, preserve the newly requested architecture deltas ({directive_summary}) instead of collapsing back to the previous answer. "
-            "Fix only what is necessary for correctness and validation."
+            "Fix only what is necessary for correctness and validation, and preserve any replay-equivalence / score-guard logic that was added on purpose."
         ),
     }
     for role, addition in per_role_additions.items():
-        text = str(payload.get(role) or "").strip()
-        if not text:
+        role_text = str(payload.get(role) or "").strip()
+        if not role_text:
             continue
-        payload[role] = _insert_before_strict_contract(text, addition)
+        payload[role] = _insert_before_strict_contract(role_text, addition)
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -374,6 +513,7 @@ def build_round_prompt_bundle(
         "prompt_file": str(prompt_file),
         "custom_prompts_file": str(custom_file) if custom_file is not None else None,
         "history_summary": summarize_history(score_history),
+        "history_signals": analyze_history_signals(score_history),
     }
     meta_path = output_dir / f"round_{round_idx:04d}_meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

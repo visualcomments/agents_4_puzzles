@@ -15,7 +15,7 @@
 # - отдельно прогнать `check-g4f-models`;
 # - сделать `kaggle-preflight` и submit.
 # 
-# По умолчанию параметры предзаполнены по вашему длинному примеру команды.
+# По умолчанию параметры предзаполнены для strongest-safe варианта `score_guarded` и без встроенных секретов.
 
 # %%
 # @title 1. Источник репозитория и рабочая папка
@@ -25,7 +25,7 @@ import subprocess
 from pathlib import Path
 
 SOURCE_MODE = "patched_archive"  # @param ["patched_archive", "github_clone"]
-PATCHED_ARCHIVE_PATH = "/content/agents_4_puzzles-main_megaminx_self_improving_patched_with_parametric_colab_and_live_logs.zip"  # @param {type:"string"}
+PATCHED_ARCHIVE_PATH = "/content/agents_4_puzzles-main_megaminx_score_guarded_patch.zip"  # @param {type:"string"}
 GIT_REPO_URL = "https://github.com/visualcomments/agents_4_puzzles.git"  # @param {type:"string"}
 GIT_BRANCH = "main"  # @param {type:"string"}
 WORKDIR = "/content/work_agents_4_puzzles"  # @param {type:"string"}
@@ -188,7 +188,7 @@ print("requirements-full.txt installed")
 # %%
 # @title 4. Параметры запуска Megaminx
 COMPETITION = "cayley-py-megaminx"  # @param {type:"string"}
-PROMPT_VARIANT = "regular"  # @param ["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid"]
+PROMPT_VARIANT = "score_guarded"  # @param ["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid", "score_guarded"]
 OUTPUT_PATH = "competitions/cayley-py-megaminx/submissions/submission_best.csv"  # @param {type:"string"}
 
 # Модели
@@ -217,7 +217,7 @@ PRINT_GENERATION_MAX_CHARS = 16000  # @param {type:"integer"}
 
 # Improvement
 KEEP_IMPROVING = True  # @param {type:"boolean"}
-IMPROVEMENT_ROUNDS = 50000  # @param {type:"integer"}
+IMPROVEMENT_ROUNDS = 128  # @param {type:"integer"}
 SELF_IMPROVE_PROMPTS = True  # @param {type:"boolean"}
 
 # Baseline override
@@ -228,8 +228,15 @@ REQUIRE_KAGGLE_JSON_BEFORE_RUN = False  # @param {type:"boolean"}
 SUBMIT = False  # @param {type:"boolean"}
 SUBMIT_VIA = "auto"  # @param ["auto", "kaggle", "none"]
 SUBMIT_COMPETITION = "cayley-py-megaminx"  # @param {type:"string"}
-MESSAGE = "bobik"  # @param {type:"string"}
+MESSAGE = "megaminx-score-guarded"  # @param {type:"string"}
 KAGGLE_JSON_PATH = "~/.kaggle/kaggle.json"  # @param {type:"string"}
+
+# Оценочный датасет / шард
+PUZZLES_CSV = ""  # @param {type:"string"}
+VECTOR_COL_OVERRIDE = ""  # @param {type:"string"}
+MAX_ROWS = 0  # @param {type:"integer"}
+WRITE_RUN_CONFIG_JSON = True  # @param {type:"boolean"}
+RUN_CONFIG_PATH = "logs/megaminx_run_config.json"  # @param {type:"string"}
 
 # Live logs
 ENABLE_LIVE_LOG_TAIL = True  # @param {type:"boolean"}
@@ -315,6 +322,10 @@ elif MODELS.strip():
 add_flag(cmd, "--planner-models", PLANNER_MODELS.strip())
 add_flag(cmd, "--coder-models", CODER_MODELS.strip())
 add_flag(cmd, "--fixer-models", FIXER_MODELS.strip())
+add_flag(cmd, "--puzzles", PUZZLES_CSV.strip())
+add_flag(cmd, "--vector-col", VECTOR_COL_OVERRIDE.strip())
+if int(MAX_ROWS) > 0:
+    add_flag(cmd, "--max-rows", int(MAX_ROWS))
 
 add_flag(cmd, "--g4f-async", G4F_ASYNC)
 add_flag(cmd, "--g4f-stop-at-python-fence", G4F_STOP_AT_PYTHON_FENCE)
@@ -325,6 +336,45 @@ add_flag(cmd, "--submit", SUBMIT)
 add_flag(cmd, "--baseline", baseline_override)
 
 RUN_CMD = cmd
+RUN_CONFIG = {
+    "competition": COMPETITION,
+    "prompt_variant": PROMPT_VARIANT,
+    "output_path": OUTPUT_PATH,
+    "models": {
+        "use_agent_models": USE_AGENT_MODELS,
+        "models": MODELS,
+        "agent_models": AGENT_MODELS,
+        "planner_models": PLANNER_MODELS,
+        "coder_models": CODER_MODELS,
+        "fixer_models": FIXER_MODELS,
+    },
+    "search": {
+        "mode": SEARCH_MODE,
+        "plan_beam_width": PLAN_BEAM_WIDTH,
+        "frontier_width": FRONTIER_WIDTH,
+        "archive_size": ARCHIVE_SIZE,
+        "refine_rounds": REFINE_ROUNDS,
+        "max_iters": MAX_ITERS,
+    },
+    "improvement": {
+        "keep_improving": KEEP_IMPROVING,
+        "improvement_rounds": IMPROVEMENT_ROUNDS,
+        "self_improve_prompts": SELF_IMPROVE_PROMPTS,
+    },
+    "score": {
+        "puzzles_csv": PUZZLES_CSV,
+        "vector_col_override": VECTOR_COL_OVERRIDE,
+        "max_rows": MAX_ROWS,
+    },
+    "baseline_override": baseline_override,
+}
+if WRITE_RUN_CONFIG_JSON:
+    cfg_path = Path(RUN_CONFIG_PATH)
+    if not cfg_path.is_absolute():
+        cfg_path = Path.cwd() / cfg_path
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps(RUN_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("run_config_path =", cfg_path)
 print("RUN_CMD:")
 print(" ".join(RUN_CMD))
 print("baseline_override =", baseline_override or "<default repo baseline>")
