@@ -133,6 +133,51 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
         rationale="The solver itself should exploit a bounded candidate bank instead of committing to a single rewrite schedule.",
         priority=65,
     ),
+    "prompt_population_search": Directive(
+        key="prompt_population_search",
+        title="Prompt-population search",
+        instruction=(
+            "Treat this round as one member of a small prompt population instead of a single linear patch chain: produce a candidate that is deliberately differentiated from recent accepted rounds in search policy, acceptance guard design, and candidate-ranking logic."
+        ),
+        rationale="Promptbreeder-style diversity is a better fit for algorithmic plateau breaking than repeatedly paraphrasing the last accepted prompt.",
+        priority=110,
+    ),
+    "exact_evaluator_shard": Directive(
+        key="exact_evaluator_shard",
+        title="Exact evaluator shard",
+        instruction=(
+            "Introduce or strengthen a tiny exact evaluation shard inside the generated solver workflow: every risky optimizer stage must justify itself against a fixed deterministic replay-based micro-benchmark before replacing the previous exact-valid candidate."
+        ),
+        rationale="Algorithmic improvement should be driven by executable validation and score deltas, not by prose confidence alone.",
+        priority=108,
+    ),
+    "solver_archive_lineage": Directive(
+        key="solver_archive_lineage",
+        title="Solver archive and lineage",
+        instruction=(
+            "Preserve explicit lineage and candidate provenance in the design: keep track of baseline, patch lane, fresh lane, acceptance metric, and why the winning candidate survived."
+        ),
+        rationale="AlphaEvolve-style improvement works better when each accepted candidate is grounded in verifiable lineage rather than hidden prompt drift.",
+        priority=104,
+    ),
+    "patch_fresh_lane_split": Directive(
+        key="patch_fresh_lane_split",
+        title="Patch/fresh lane split",
+        instruction=(
+            "Ask for two bounded candidate lanes: a minimal patch over the best validated solver and a deliberately fresh candidate that preserves the public contract but is not anchored to the same local rewrite ordering."
+        ),
+        rationale="A mixed patch-vs-fresh proposal bank reduces premature convergence while keeping the repository's contract-safe bias.",
+        priority=102,
+    ),
+    "pareto_candidate_selection": Directive(
+        key="pareto_candidate_selection",
+        title="Pareto candidate selection",
+        instruction=(
+            "Select winners using a simple Pareto-style view over exact validity, score delta, runtime risk, and novelty instead of a one-dimensional preference for whichever patch sounds strongest."
+        ),
+        rationale="Megaminx prompt evolution should trade off score, safety, and diversity explicitly when search begins to plateau.",
+        priority=101,
+    ),
 }
 
 
@@ -193,6 +238,9 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
         "plateau": False,
         "score_regressions": 0,
         "recent_failure_labels": [],
+        "accepted_rounds": 0,
+        "accepted_metric_values": [],
+        "accepted_metric_plateau": False,
     }
     if not window:
         return signals
@@ -201,6 +249,10 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
     for entry in window:
         if entry.get("accepted") is True:
             signals["recent_accepts"] += 1
+            signals["accepted_rounds"] += 1
+            metric = entry.get("metric") if isinstance(entry.get("metric"), dict) else {}
+            if metric.get("source") == "local_score" and metric.get("value") is not None:
+                signals["accepted_metric_values"].append(metric.get("value"))
             continue
         bucket = _error_bucket(entry)
         if bucket is not None:
@@ -223,6 +275,9 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
     tail = window[-3:]
     if tail and all(entry.get("accepted") is False for entry in tail):
         signals["plateau"] = True
+    accepted_metric_values = [float(v) for v in signals.get("accepted_metric_values") or [] if v is not None]
+    if len(accepted_metric_values) >= 2 and max(accepted_metric_values) - min(accepted_metric_values) <= 1.0:
+        signals["accepted_metric_plateau"] = True
     signals["recent_failure_labels"] = labels[-3:]
     return signals
 
@@ -252,6 +307,14 @@ def select_directives(
     if not feature_snapshot.get("has_candidate_bank_scoring"):
         add("candidate_bank_scoring")
 
+    plateau = bool(history_signals.get("plateau") or history_signals.get("accepted_metric_plateau") or history_signals.get("validated_not_selected"))
+    if plateau or round_idx >= 2:
+        add("prompt_population_search")
+        add("exact_evaluator_shard")
+        add("solver_archive_lineage")
+        add("patch_fresh_lane_split")
+        add("pareto_candidate_selection")
+
     if history_signals.get("plateau"):
         add("policy_ablation_search")
         add("score_regression_guard")
@@ -259,12 +322,14 @@ def select_directives(
     if history_signals.get("validation_failures") or history_signals.get("runtime_failures"):
         add("compile_first_then_optimize")
         add("validator_triad_recheck")
+        add("exact_evaluator_shard")
     if history_signals.get("json_contract_failures"):
         add("validator_triad_recheck")
         add("compile_first_then_optimize")
     if history_signals.get("score_regressions"):
         add("score_regression_guard")
         add("semantic_equivalence_replay")
+        add("pareto_candidate_selection")
 
     if not candidates:
         for key in ("multi_policy_sweep", "bidirectional_window_rewrite", "stronger_effect_atlas"):
@@ -273,7 +338,18 @@ def select_directives(
     ordered = sorted(candidates.values(), key=lambda item: (-item.priority, item.key))
     used_recently = _recent_directives(prompt_history)
     fresh = [item for item in ordered if item.key not in used_recently]
-    target_size = 4 if (history_signals.get("plateau") or history_signals.get("recent_failures")) else 3
+    core_required: list[str] = []
+    for key in ("multi_policy_sweep", "bidirectional_window_rewrite", "small_support_macro_mining"):
+        if key in candidates:
+            core_required.append(key)
+    if history_signals.get("score_regressions") or history_signals.get("plateau"):
+        core_required.append("score_regression_guard")
+        if "semantic_equivalence_replay" in candidates:
+            core_required.append("semantic_equivalence_replay")
+        elif "policy_ablation_search" in candidates:
+            core_required.append("policy_ablation_search")
+    target_size = 8 if (plateau or history_signals.get("recent_failures") or round_idx >= 2) else 4
+    target_size = max(target_size, len(core_required))
     selected = fresh[:target_size]
     if len(selected) < target_size:
         for item in ordered:
@@ -281,13 +357,29 @@ def select_directives(
                 selected.append(item)
             if len(selected) >= target_size:
                 break
-
-    if (round_idx >= 3 or history_signals.get("plateau") or history_signals.get("score_regressions")) and DIRECTIVE_LIBRARY["score_regression_guard"] not in selected:
-        if selected:
-            selected[-1] = DIRECTIVE_LIBRARY["score_regression_guard"]
-        else:
-            selected.append(DIRECTIVE_LIBRARY["score_regression_guard"])
-    return selected[:target_size]
+    for key in core_required:
+        directive = DIRECTIVE_LIBRARY[key]
+        if directive in selected:
+            continue
+        if len(selected) < target_size:
+            selected.append(directive)
+            continue
+        replaced = False
+        for idx in range(len(selected) - 1, -1, -1):
+            if selected[idx].key not in core_required:
+                selected[idx] = directive
+                replaced = True
+                break
+        if not replaced:
+            selected.append(directive)
+    deduped: list[Directive] = []
+    seen_keys: set[str] = set()
+    for item in selected:
+        if item.key in seen_keys:
+            continue
+        deduped.append(item)
+        seen_keys.add(item.key)
+    return deduped
 
 
 def summarize_history(history: Sequence[Dict[str, Any]], *, limit: int = 3) -> List[str]:
@@ -376,7 +468,24 @@ def _history_signal_block(history: Sequence[Dict[str, Any]]) -> str:
             f"- recent_failures: {signals.get('recent_failures')} (json={signals.get('json_contract_failures')}, validation={signals.get('validation_failures')}, runtime={signals.get('runtime_failures')})",
             f"- validated_not_selected: {signals.get('validated_not_selected')}",
             f"- plateau_detected: {'yes' if signals.get('plateau') else 'no'}",
+            f"- accepted_metric_plateau: {'yes' if signals.get('accepted_metric_plateau') else 'no'}",
+            f"- score_regressions: {signals.get('score_regressions')}",
             f"- recent_failure_labels: {labels}",
+        ]
+    )
+
+
+def _algorithm_search_block(round_idx: int) -> str:
+    return "\n".join(
+        [
+            "Algorithm-search operating mode:",
+            f"- round: {round_idx}",
+            "- think in terms of a tiny population of bounded candidates, not one fragile linear rewrite",
+            "- require an exact evaluator shard or replay-based acceptance gate before risky optimizer stages survive",
+            "- keep two lanes when useful: minimal patch lane and fresh-contract-safe lane",
+            "- preserve lineage: baseline fingerprint, candidate type, acceptance metric, and rollback reason",
+            "- optimize for a simple Pareto frontier over exact validity, score delta, runtime risk, and novelty",
+            "- never use Kaggle leaderboard probing as an inner-loop reward; rely on bundled deterministic evaluation only",
         ]
     )
 
@@ -405,9 +514,10 @@ def synthesize_round_prompt_text(
             _feature_block(feature_snapshot),
             _history_block(score_history),
             _history_signal_block(score_history),
+            _algorithm_search_block(round_idx),
             _directive_block(directives),
-            "Acceptance intent for this round: keep exact lookup first, preserve legal official move names only, preserve deterministic replay, add an explicit anti-regression fallback, and materially revise the local optimization core so that the resulting solver has a real chance to beat the previous answer rather than paraphrase it.",
-            "Planner quality bar for this round: prefer compile-safe staged patches, require exact semantic-equivalence replay for every new local rewrite family, and build a tiny deterministic policy bank instead of trusting one heuristic ordering.",
+            "Acceptance intent for this round: keep exact lookup first, preserve legal official move names only, preserve deterministic replay, add an explicit anti-regression fallback, maintain candidate lineage, and materially revise the local optimization core so that the resulting solver has a real chance to beat the previous answer rather than paraphrase it.",
+            "Planner quality bar for this round: prefer compile-safe staged patches, require exact semantic-equivalence replay for every new local rewrite family, design a tiny prompt/candidate population instead of a single chain, and build a deterministic policy bank instead of trusting one heuristic ordering.",
         ]
     )
     text = _insert_before_strict_contract(base_prompt_text, evolution_block)
@@ -443,16 +553,16 @@ def synthesize_round_custom_prompts(
         "planner": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver with fingerprint {feature_snapshot.get('fingerprint')}. "
             f"Return a materially stronger plan rather than a paraphrase. Force the plan to rethink the optimization core around: {directive_summary}. "
-            f"Current best metric: {best_metric_text}. Include an anti-regression and replay-equivalence story."
+            f"Current best metric: {best_metric_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story."
         ),
         "coder": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver. "
             f"Do not produce a superficial patch. Make the optimization core materially stronger around: {directive_summary}. "
-            "Preserve lookup-first semantics, legal move names only, deterministic replay, explicit rollback-safe score guarding, and competition-safe bounded search."
+            "Preserve lookup-first semantics, legal move names only, deterministic replay, explicit rollback-safe score guarding, competition-safe bounded search, and a bounded patch-vs-fresh candidate split backed by exact replay-based acceptance."
         ),
         "fixer": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: when repairing the candidate, preserve the newly requested architecture deltas ({directive_summary}) instead of collapsing back to the previous answer. "
-            "Fix only what is necessary for correctness and validation, and preserve any replay-equivalence / score-guard logic that was added on purpose."
+            "Fix only what is necessary for correctness and validation, and preserve any replay-equivalence, evaluator-shard, lineage, or score-guard logic that was added on purpose."
         ),
     }
     for role, addition in per_role_additions.items():
