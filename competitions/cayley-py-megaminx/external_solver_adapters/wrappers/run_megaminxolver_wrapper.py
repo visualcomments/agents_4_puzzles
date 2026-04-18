@@ -5,11 +5,11 @@ from pathlib import Path
 from wrapper_common import build_basic_parser, finish, run_with_autodiscovery
 
 
-DEFAULT_REPO = 'external/MegaminXolver-master'
+DEFAULT_REPO = 'external_real/Odder_MegaminXolver'
 
 
 def main() -> None:
-    parser = build_basic_parser('Run MegaminXolver checkout and emit Kaggle-style submission CSV', DEFAULT_REPO)
+    parser = build_basic_parser('Run Odder/MegaminXolver checkout and emit Kaggle-style submission CSV', DEFAULT_REPO)
     args = parser.parse_args()
     repo = Path(args.repo)
     summary = run_with_autodiscovery(
@@ -54,6 +54,9 @@ def main() -> None:
                 'format': 'submission_csv',
             },
         ],
+        fallback_empty_ok=True,
+        smoke_files=['MegaminXolver.py'],
+        smoke_cmd=['python3', '-c', 'import sys; sys.path.insert(0, r"{repo}"); import MegaminXolver; print("ok")'],
     )
     finish(summary, args.summary_out)
 

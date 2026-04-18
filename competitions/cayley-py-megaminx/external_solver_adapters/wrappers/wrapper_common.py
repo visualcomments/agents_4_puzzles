@@ -6,9 +6,8 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 from pathlib import Path
-from typing import Iterable, List, Mapping, Sequence
+from typing import Mapping, Sequence
 
 
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -26,6 +25,13 @@ def _write_submission(path: Path, rows: Sequence[Mapping[str, str]]) -> None:
                 'initial_state_id': str(row.get('initial_state_id') or row.get('row_index') or ''),
                 'path': str(row.get('path') or ''),
             })
+
+
+def _write_empty_submission_for_test(path: Path, test_csv: Path) -> int:
+    rows = _read_csv_rows(test_csv)
+    payload = [{'initial_state_id': str(row.get('initial_state_id') or idx), 'path': ''} for idx, row in enumerate(rows)]
+    _write_submission(path, payload)
+    return len(payload)
 
 
 def _render(parts: Sequence[str], context: Mapping[str, str]) -> list[str]:
@@ -84,6 +90,22 @@ def _discover_existing_output(repo: Path, candidates: Sequence[tuple[str, str]])
     return None
 
 
+def _run_smoke_command(cmd: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float) -> tuple[bool, str]:
+    proc = subprocess.run(
+        list(cmd),
+        cwd=str(cwd),
+        env=dict(env),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True, proc.stdout[-400:]
+    return False, (proc.stderr or proc.stdout)[-400:]
+
+
 def run_with_autodiscovery(
     *,
     repo: Path,
@@ -93,6 +115,9 @@ def run_with_autodiscovery(
     command_specs: Sequence[dict],
     existing_outputs: Sequence[tuple[str, str]],
     env_overrides: Mapping[str, str] | None = None,
+    fallback_empty_ok: bool = False,
+    smoke_files: Sequence[str] = (),
+    smoke_cmd: Sequence[str] | None = None,
 ) -> dict:
     repo = repo.resolve()
     output_csv = output_csv.resolve()
@@ -189,8 +214,35 @@ def run_with_autodiscovery(
             'errors': errors,
         }
 
+    if fallback_empty_ok and repo.exists():
+        smoke_details = []
+        files_ok = True
+        for rel in smoke_files:
+            path = repo / rel
+            exists = path.exists()
+            smoke_details.append({'type': 'file', 'path': str(path), 'exists': exists})
+            files_ok = files_ok and exists
+        cmd_ok = True
+        if smoke_cmd:
+            env = os.environ.copy()
+            env['PYTHONPATH'] = str(repo) + os.pathsep + env.get('PYTHONPATH', '')
+            ok, detail = _run_smoke_command(_render(smoke_cmd, context), cwd=repo, env=env, timeout=120.0)
+            smoke_details.append({'type': 'cmd', 'cmd': ' '.join(_render(smoke_cmd, context)), 'ok': ok, 'detail': detail})
+            cmd_ok = ok
+        if files_ok and cmd_ok:
+            row_count = _write_empty_submission_for_test(output_csv, test_csv)
+            return {
+                'label': label,
+                'mode': 'smoke_only_empty_submission',
+                'repo': str(repo),
+                'rows': row_count,
+                'format': 'submission_csv',
+                'errors': errors,
+                'smoke': smoke_details,
+            }
+
     raise RuntimeError(
-        f'Could not materialize candidates for {label} from {repo}. ' \
+        f'Could not materialize candidates for {label} from {repo}. '
         f'Tried {len(command_specs)} commands and {len(existing_outputs)} output patterns. Errors: {errors[:4]}'
     )
 
