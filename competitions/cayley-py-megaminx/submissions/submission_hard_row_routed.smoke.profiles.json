@@ -1,0 +1,122 @@
+[
+  {
+    "initial_state_id": "1000",
+    "row_index": 1000,
+    "row_rank": 0,
+    "baseline_len": 839,
+    "preopt_len": 839,
+    "preopt_saved": 0,
+    "final_len": 839,
+    "saved_moves": 0,
+    "tier": "aggressive",
+    "stage": "none",
+    "elapsed_ms": 17924.271,
+    "backend_preference": "internal",
+    "search_profile": {
+      "segments_considered": 64,
+      "segments_attempted": 1,
+      "segments_improved": 0,
+      "search_hits": 0,
+      "backend_counts": {
+        "internal": 1
+      },
+      "timed_out_segments": true
+    }
+  },
+  {
+    "initial_state_id": "989",
+    "row_index": 989,
+    "row_rank": 1,
+    "baseline_len": 838,
+    "preopt_len": 838,
+    "preopt_saved": 0,
+    "final_len": 838,
+    "saved_moves": 0,
+    "tier": "aggressive",
+    "stage": "none",
+    "elapsed_ms": 158.968,
+    "backend_preference": "internal",
+    "search_profile": {
+      "segments_considered": 64,
+      "segments_attempted": 1,
+      "segments_improved": 0,
+      "search_hits": 0,
+      "backend_counts": {
+        "internal": 1
+      },
+      "timed_out_segments": true
+    }
+  },
+  {
+    "initial_state_id": "998",
+    "row_index": 998,
+    "row_rank": 2,
+    "baseline_len": 837,
+    "preopt_len": 837,
+    "preopt_saved": 0,
+    "final_len": 837,
+    "saved_moves": 0,
+    "tier": "aggressive",
+    "stage": "none",
+    "elapsed_ms": 162.72,
+    "backend_preference": "internal",
+    "search_profile": {
+      "segments_considered": 64,
+      "segments_attempted": 1,
+      "segments_improved": 0,
+      "search_hits": 0,
+      "backend_counts": {
+        "internal": 1
+      },
+      "timed_out_segments": true
+    }
+  },
+  {
+    "initial_state_id": "996",
+    "row_index": 996,
+    "row_rank": 3,
+    "baseline_len": 836,
+    "preopt_len": 836,
+    "preopt_saved": 0,
+    "final_len": 836,
+    "saved_moves": 0,
+    "tier": "aggressive",
+    "stage": "none",
+    "elapsed_ms": 159.414,
+    "backend_preference": "internal",
+    "search_profile": {
+      "segments_considered": 64,
+      "segments_attempted": 1,
+      "segments_improved": 0,
+      "search_hits": 0,
+      "backend_counts": {
+        "internal": 1
+      },
+      "timed_out_segments": true
+    }
+  },
+  {
+    "initial_state_id": "985",
+    "row_index": 985,
+    "row_rank": 4,
+    "baseline_len": 831,
+    "preopt_len": 831,
+    "preopt_saved": 0,
+    "final_len": 831,
+    "saved_moves": 0,
+    "tier": "aggressive",
+    "stage": "none",
+    "elapsed_ms": 160.522,
+    "backend_preference": "internal",
+    "search_profile": {
+      "segments_considered": 64,
+      "segments_attempted": 1,
+      "segments_improved": 0,
+      "search_hits": 0,
+      "backend_counts": {
+        "internal": 1
+      },
+      "timed_out_segments": true
+    }
+  }
+]

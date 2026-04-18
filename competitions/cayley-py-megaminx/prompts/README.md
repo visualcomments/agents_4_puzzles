@@ -13,6 +13,9 @@ Baseline-backed variants inject `competitions/cayley-py-megaminx/megaminx_best_t
 - `master_hybrid` — master prompt bundle that synthesizes the repository architecture with stronger exact effect atlases, multi-policy candidate sweeps, and small-support commutator/conjugate mining for local semantic rewrites only.
 - `score_guarded` — stricter bounded hybrid focused on semantic-equivalence replay, explicit anti-regression fallback, and safer score-seeking local rewrites.
 - `algorithmic_population` — new algorithmic self-improvement bundle that frames each round as a bounded population search problem with exact evaluator shards, patch-vs-fresh deterministic lanes, Pareto-style candidate selection, and lineage-friendly staging for future rounds.
+- `portfolio_orchestrated` — exact row-level portfolio fusion bundle focused on multi-lane orchestration and winner-take-best asset promotion.
+- `hard_row_routed` — bundle that pushes compute toward the hardest rows first and emphasizes saved moves per CPU-hour.
+- `exact_score_population` — bundle that turns prompt evolution into exact-score population search on deterministic dev/holdout shards.
 
 Examples:
 

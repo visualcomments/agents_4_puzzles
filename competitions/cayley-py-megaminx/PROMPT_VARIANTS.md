@@ -20,3 +20,7 @@ python pipeline_cli.py run --competition cayley-py-megaminx --output competition
 ```
 
 Explicit `--prompt-file` and `--custom-prompts` still override the variant mechanism.
+
+- `portfolio_orchestrated`
+- `hard_row_routed`
+- `exact_score_population`

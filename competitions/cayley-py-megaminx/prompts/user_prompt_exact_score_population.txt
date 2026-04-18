@@ -1,0 +1,165 @@
+We are solving the Kaggle competition "CayleyPy Megaminx Solve Optimally":
+https://www.kaggle.com/competitions/cayley-py-megaminx
+
+I need a Python module `solve_module.py` that preserves the exact bundled-state lookup pipeline and upgrades the Megaminx local optimizer with an algorithmic-population, evaluator-driven, score-guarded hybrid strategy designed for self-improving outer loops.
+
+PRIMARY GOAL
+Produce the best bundled-data score you can while keeping the solver fully deterministic, standard-library only, and competition-contract safe.
+
+ABSOLUTE REQUIREMENTS
+- Start from the exact best-tested bundled Megaminx baseline and patch it rather than replacing it.
+- Preserve `solve(vec) -> (moves, sorted_array)`.
+- Preserve script mode:
+  `python solve_module.py "[1,2,3]"`
+  -> `{"moves": [...], "sorted_array": [...]}`
+- `vec` is a Python list[int].
+- `moves` must be a list[str] using ONLY official move names from `puzzle_info.json`.
+- Do NOT invent moves, aliases, macros-as-fake-moves, or renamed generators.
+- `sorted_array` must be the actual final state obtained by replaying `moves` from `vec`.
+- Preserve compatibility with the existing competition folder layout and bundled assets.
+- Keep exact bundled lookup compatibility with:
+  - `optimized_lookup.json` if present,
+  - bundled optimized submission if present,
+  - otherwise deterministic rebuilding from `sample_submission.csv`.
+
+COMPETITION FACTS YOU MUST USE
+- State vectors have length 120.
+- The solved state is `central_state` from `puzzle_info.json`.
+- Legal generators are exactly the Megaminx face turns from `puzzle_info.json` and their inverses.
+- Submission paths are dot-separated move names.
+- The Kaggle score is the SUM of path lengths over all bundled rows.
+- `sample_submission.csv` contains valid but non-optimal words, so exact word rewriting over those valid paths is a legitimate and high-value strategy.
+
+NON-NEGOTIABLE ARCHITECTURE
+Keep the current successful structure:
+1. load the official bundle;
+2. prefer exact bundled state -> path lookup;
+3. optimize those known-valid words locally;
+4. replay the optimized path to obtain the actual final state.
+
+Do NOT replace this with a risky generic solver that can fail on bundled rows.
+Do NOT regress bundled correctness.
+Do NOT remove compatibility with `optimized_lookup.json` / bundled optimized submission / deterministic rebuilding from `sample_submission.csv`.
+
+ALGORITHMIC-POPULATION MASTER STRATEGY
+Implement a bounded, deterministic candidate-population optimizer instead of a single rewrite schedule. The key idea is NOT to solve Megaminx from scratch, but to keep a tiny bank of exact-valid local optimizer families, score them under exact replay-based guards, and select the winner using score-safe acceptance logic.
+
+The optimizer should combine ALL of these ideas in a competition-safe way:
+
+1. Exact evaluator shard inside the solver
+- every risky optimization stage must justify itself against exact replay, not prose confidence;
+- for non-trivial local rewrites, verify semantic equivalence under official permutations before keeping them;
+- keep a tiny deterministic evaluation shard / micro-benchmark so that regressions can be rejected immediately.
+
+2. Tiny candidate population instead of one heuristic chain
+- maintain a tiny fixed bank of candidate local-optimization pipelines per row or per path;
+- include at least one conservative patch lane and at least one fresh-but-contract-safe lane with a different rewrite ordering;
+- each lane must remain deterministic, bounded, and polynomial-time.
+
+3. Official move algebra from `puzzle_info.json`
+- derive everything from the official permutations only;
+- derive inverse pairs from the official generators, not by guessing names;
+- exploit the true order-5 structure of each face turn;
+- reduce repeated powers of the same face modulo 5;
+- cancel adjacent inverse pairs online and after each optimization pass.
+
+4. Official commutation graph + multiple deterministic normalization policies
+- compute commutation only from official permutations;
+- do NOT rely on a single canonical commuting order;
+- implement a tiny fixed bank of admissible deterministic orderings for commuting blocks;
+- examples of safe policies: lexical, reverse lexical, graph-degree order, reverse graph-degree order, first-occurrence order, last-occurrence order;
+- for each candidate path, run the optimizer under several such policies and keep the shortest valid result;
+- the number of policies must remain a tiny fixed constant.
+
+5. Strong exact short-word effect atlas
+- build a stronger fixed-radius exact table of short word effects using official permutations only;
+- preserve the shortest representative for each local permutation effect;
+- prune obvious inverse backtracking while building the table;
+- canonicalize equivalent local words before storage;
+- use compact packed permutation/effect keys to avoid recomputing composed effects.
+
+6. Bounded bidirectional window rewriting
+- run bounded-window DP or exact segmentation over local path windows;
+- do both left-to-right and right-to-left passes if useful;
+- allow a tiny fixed number of passes until convergence or a small pass limit;
+- memoize repeated windows and composed local effects;
+- prefer exact replacements over heuristic guesses.
+
+7. Small-support commutator / conjugate mining only as local rewrite candidates
+- enumerate only bounded short words and their conjugates / commutators;
+- keep only macros whose official permutation support is small or especially structured;
+- treat them as local rewrite candidates only if they produce an already-seen exact effect with a shorter representative;
+- do NOT add fake macro move names;
+- do NOT introduce instance-growing search.
+
+8. Pareto-style candidate selection + anti-regression guard
+- select winners using exact validity first, then shorter path length, then lower runtime risk, then novelty/diversity as a tie-breaker;
+- if a candidate is more aggressive but not strictly better on the exact-valid metric path, keep the previous exact-valid candidate;
+- add explicit rollback-safe staging so the baseline-compatible path always survives.
+
+9. Compile-first and lineage-friendly structure
+- keep the lookup-first baseline path import-safe first;
+- add new optimizer layers in bounded staged helpers rather than one giant rewrite;
+- structure the code so it is clear which helper belongs to which candidate family / lane;
+- prefer a solver that is easy for future self-improving rounds to patch, compare, and ablate.
+
+ALLOWED SEARCH / OPTIMIZATION
+Allowed:
+- exact fixed-radius precomputation on short words;
+- exact local replacement tables;
+- bounded-window dynamic programming;
+- deterministic comparison of a fixed small bank of normalization / rewrite policies;
+- local conjugate / commutator mining over a fixed small radius;
+- exact semantic-equivalence replacement only.
+
+Forbidden:
+- BFS / DFS / A* / IDA* / beam search whose depth grows with the instance;
+- whole-state-space search;
+- generic solving from scratch per row;
+- non-deterministic random search;
+- returning `UNSOLVED` for bundled rows that the baseline solves;
+- provider-dependent behavior or non-standard-library dependencies;
+- Kaggle leaderboard probing as an inner-loop reward signal.
+
+IMPLEMENTATION REQUIREMENTS
+- Keep the solver self-contained and standard-library only.
+- Preserve exact bundled-state solving first.
+- Every returned path for bundled rows must still solve to the central state.
+- Preserve the actual final-state replay contract.
+- Keep runtime comfortably practical on the full bundled set.
+- Prefer readable, well-factored helpers.
+- Add comments only where they explain invariants or non-obvious correctness constraints.
+
+QUALITY BAR FOR THIS VARIANT
+This variant should be stronger than `score_guarded` for algorithmic self-improvement loops:
+- keep exact lookup first;
+- keep the bounded local-rewrite philosophy;
+- add tiny candidate-population logic;
+- add evaluator-shard acceptance gates;
+- add patch-vs-fresh deterministic lanes;
+- add Pareto-style candidate selection and lineage-friendly staging;
+- preserve polynomial-time guarantees by keeping all radii, windows, candidate banks, and pass counts fixed constants.
+
+
+
+BREAKTHROUGH SCENARIO FOCUS:
+This exact_score_population variant must switch selection from rubric-only refinement to exact score-driven population search on fixed dev/holdout shards: compare bounded candidate prompts or solver lanes by exact bundled move count, validator pass rate, and anti-regression safety before promotion.
+
+STRICT OUTPUT REQUIREMENTS:
+- Return exactly one JSON object and no prose outside JSON.
+- The JSON object must contain exactly these keys: version, artifact_type, language, filename, code.
+- Set version='code_response.v2', artifact_type='python_module', language='python', filename='solve_module.py'.
+- Put the entire Python file only inside the code string.
+- Do not wrap the code in markdown fences inside the JSON string.
+- Do not include explanations, bullet points, extra keys, or commentary before or after the JSON object.
+- Inside the code, omit comments and docstrings unless they are absolutely necessary.
+- Preserve the public solve(vec) entrypoint and the script-mode JSON stdout contract with keys moves and sorted_array.
+JSON EXAMPLE:
+{
+  "version": "code_response.v2",
+  "artifact_type": "python_module",
+  "language": "python",
+  "filename": "solve_module.py",
+  "code": "from __future__ import annotations\n\nimport json\n\n\ndef solve(vec):\n    return [], list(vec)\n"
+}
+- The produced code must be self-contained and runnable.

@@ -178,6 +178,43 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
         rationale="Megaminx prompt evolution should trade off score, safety, and diversity explicitly when search begins to plateau.",
         priority=101,
     ),
+    "portfolio_orchestration": Directive(
+    key="portfolio_orchestration",
+    title="Portfolio orchestration",
+    instruction=(
+        "Design the solver or outer loop as a bounded multi-lane portfolio: exact row-level scoring, row-wise best-of-lanes fusion, lineage logging, and promotion only when a lane wins on exact bundled move count."
+    ),
+    rationale="Megaminx is already an asset-first pipeline, so portfolio selection across safe lanes is more valuable than a single monolithic heuristic.",
+    priority=107,
+),
+"hard_row_routing": Directive(
+    key="hard_row_routing",
+    title="Hard-row routed search",
+    instruction=(
+        "Build an explicit row difficulty profile and spend aggressive search budget only on the hardest rows first; optimize for saved moves per CPU-hour, not uniform per-row effort."
+    ),
+    rationale="The current bundled score is dominated by a hard tail, so routing search by difficulty is a better use of bounded compute.",
+    priority=106,
+),
+"exact_metric_acceptance": Directive(
+    key="exact_metric_acceptance",
+    title="Exact metric acceptance",
+    instruction=(
+        "Treat acceptance as an exact bundled-score problem: a refinement must beat the incumbent on a fixed deterministic dev shard with zero validator regressions before it can replace the parent."
+    ),
+    rationale="A prompt that sounds stronger but does not shorten exact paths should not be promoted in a move-count competition.",
+    priority=109,
+),
+"shadow_split_benchmarking": Directive(
+    key="shadow_split_benchmarking",
+    title="Shadow split benchmarking",
+    instruction=(
+        "Keep separate deterministic train/dev/holdout shards for prompt and code evolution, and report exact scores on each split so that the outer loop does not overfit the whole bundled set."
+    ),
+    rationale="Exact-score search over a fixed bundle needs a lightweight anti-overfitting protocol, especially when prompts mutate aggressively.",
+    priority=103,
+),
+
 }
 
 
@@ -314,11 +351,17 @@ def select_directives(
         add("solver_archive_lineage")
         add("patch_fresh_lane_split")
         add("pareto_candidate_selection")
+        add("portfolio_orchestration")
+        add("exact_metric_acceptance")
+        add("shadow_split_benchmarking")
 
     if history_signals.get("plateau"):
         add("policy_ablation_search")
         add("score_regression_guard")
         add("semantic_equivalence_replay")
+        add("hard_row_routing")
+        add("portfolio_orchestration")
+        add("exact_metric_acceptance")
     if history_signals.get("validation_failures") or history_signals.get("runtime_failures"):
         add("compile_first_then_optimize")
         add("validator_triad_recheck")
@@ -484,7 +527,7 @@ def _algorithm_search_block(round_idx: int) -> str:
             "- require an exact evaluator shard or replay-based acceptance gate before risky optimizer stages survive",
             "- keep two lanes when useful: minimal patch lane and fresh-contract-safe lane",
             "- preserve lineage: baseline fingerprint, candidate type, acceptance metric, and rollback reason",
-            "- optimize for a simple Pareto frontier over exact validity, score delta, runtime risk, and novelty",
+            "- optimize for a simple Pareto frontier over exact validity, score delta, runtime risk, and novelty\n- evaluate risky changes on deterministic shadow splits so prompt evolution is driven by exact dev-score rather than prose confidence",
             "- never use Kaggle leaderboard probing as an inner-loop reward; rely on bundled deterministic evaluation only",
         ]
     )
