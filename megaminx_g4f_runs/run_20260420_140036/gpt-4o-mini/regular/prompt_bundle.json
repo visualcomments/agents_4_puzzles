@@ -1,0 +1,4 @@
+{
+  "prompt_file": "/mnt/data/repo_inspect/agents_4_puzzles-main/competitions/cayley-py-megaminx/prompts/user_prompt_regular.txt",
+  "custom_prompts": "/mnt/data/repo_inspect/agents_4_puzzles-main/competitions/cayley-py-megaminx/prompts/custom_prompts_regular.json"
+}

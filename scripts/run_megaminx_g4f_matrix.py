@@ -57,6 +57,55 @@ DEFAULT_SEARCH_SETTINGS = {
 }
 
 
+def is_repo_root(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "pipeline_cli.py").is_file()
+        and (path / "competitions").is_dir()
+    )
+
+
+def infer_repo_root(raw: str | None) -> Path:
+    tried: list[Path] = []
+
+    def _push(candidate: Path | None) -> None:
+        if candidate is None:
+            return
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            resolved = candidate.expanduser().absolute()
+        if resolved not in tried:
+            tried.append(resolved)
+
+    if raw:
+        _push(Path(raw))
+
+    env_root = os.environ.get("MEGAMINX_REPO_ROOT") or os.environ.get("REPO_ROOT")
+    if env_root:
+        _push(Path(env_root))
+
+    script_path = Path(__file__).resolve()
+    _push(script_path.parent)
+    for parent in script_path.parents:
+        _push(parent)
+
+    cwd = Path.cwd().resolve()
+    _push(cwd)
+    for parent in cwd.parents:
+        _push(parent)
+
+    for candidate in tried:
+        if is_repo_root(candidate):
+            return candidate
+
+    tried_text = "\n  - ".join(str(path) for path in tried)
+    raise SystemExit(
+        "Could not locate the repository root containing pipeline_cli.py and competitions/.\n"
+        "Pass --repo-root /path/to/agents_4_puzzles-main or set MEGAMINX_REPO_ROOT.\n"
+        f"Tried:\n  - {tried_text}"
+    )
+
 def now_utc() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -278,9 +327,10 @@ def build_main_run_command(
 ) -> tuple[list[str], Path, Path]:
     output_csv = variant_dir / "submission" / "submission.csv"
     run_log = variant_dir / "run_log_main.json"
+    pipeline_cli = repo_root / "pipeline_cli.py"
     cmd = [
         python_exe,
-        "pipeline_cli.py",
+        str(pipeline_cli),
         "run",
         "--competition",
         args.competition,
@@ -351,15 +401,17 @@ def build_main_run_command(
 def build_final_submit_command(
     python_exe: str,
     *,
+    repo_root: Path,
     args: argparse.Namespace,
     baseline_solver: Path,
     output_csv: Path,
     run_log: Path,
     message: str,
 ) -> list[str]:
+    pipeline_cli = repo_root / "pipeline_cli.py"
     cmd = [
         python_exe,
-        "pipeline_cli.py",
+        str(pipeline_cli),
         "run",
         "--competition",
         args.competition,
@@ -387,10 +439,11 @@ def build_final_submit_command(
     return cmd
 
 
-def build_detector_command(python_exe: str, args: argparse.Namespace) -> list[str]:
+def build_detector_command(python_exe: str, repo_root: Path, args: argparse.Namespace) -> list[str]:
+    pipeline_cli = repo_root / "pipeline_cli.py"
     cmd = [
         python_exe,
-        "pipeline_cli.py",
+        str(pipeline_cli),
         "check-g4f-models",
         "--json",
         "--timeout",
@@ -427,7 +480,6 @@ def make_run_root(args: argparse.Namespace, repo_root: Path) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    repo_default = Path(__file__).resolve().parents[1]
     p = argparse.ArgumentParser(
         description="Megaminx g4f matrix runner: detect working g4f models, run every prompt variant, collect artifacts, and build a zip archive.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -440,7 +492,7 @@ def build_parser() -> argparse.ArgumentParser:
             """
         ),
     )
-    p.add_argument("--repo-root", default=str(repo_default), help="Repository root (default: inferred from this script).")
+    p.add_argument("--repo-root", default=None, help="Repository root (default: auto-detect from this script, CWD, or MEGAMINX_REPO_ROOT).")
     p.add_argument("--competition", default="cayley-py-megaminx")
     p.add_argument("--puzzles", default=None, help="Optional explicit puzzles CSV path.")
     p.add_argument("--output-root", default=None, help="Directory where the run tree will be written.")
@@ -498,7 +550,7 @@ def write_text(path: Path, text: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    repo_root = Path(args.repo_root).resolve()
+    repo_root = infer_repo_root(args.repo_root)
     run_root = make_run_root(args, repo_root).resolve()
     archive_path = Path(args.archive_path).resolve() if args.archive_path else Path(str(run_root) + ".zip")
     variants = parse_variants(args.prompt_variants)
@@ -551,7 +603,7 @@ def main(argv: list[str] | None = None) -> int:
 
     detector_stdout = logs_dir / "check_g4f_models.stdout.log"
     detector_stderr = logs_dir / "check_g4f_models.stderr.log"
-    detector_cmd = build_detector_command(args.python_exe, args)
+    detector_cmd = build_detector_command(args.python_exe, repo_root, args)
 
     detector_result = {
         "cmd": detector_cmd,
@@ -645,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
                     submit_run_log = variant_dir / "run_log_submit.json"
                     submit_cmd = build_final_submit_command(
                         args.python_exe,
+                        repo_root=repo_root,
                         args=args,
                         baseline_solver=selected_solver,
                         output_csv=submit_output_csv,
