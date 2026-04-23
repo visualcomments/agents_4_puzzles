@@ -56,6 +56,7 @@ def _load_local_module(name: str, filename: str):
 sm = _load_local_module('megaminx_hybrid_solve_module', 'solve_module.py')
 v3 = _load_local_module('megaminx_hybrid_search_improver_v3', 'search_improver_v3.py')
 best_tested = _load_local_module('megaminx_hybrid_best_tested_solver', 'megaminx_best_tested_solver.py')
+neighbour_lane = _load_local_module('megaminx_hybrid_neighbour_model_lane', 'megaminx_neighbour_model_lane.py')
 
 COMPETITION = 'cayley-py-megaminx'
 SUBMISSIONS_DIR = HERE / 'submissions'
@@ -349,6 +350,7 @@ def _default_candidate_paths() -> list[tuple[str, Path]]:
         ('llm_structured', SUBMISSIONS_DIR / 'submission_structured.csv'),
         ('llm_heuristic_boosted', SUBMISSIONS_DIR / 'submission_heuristic_boosted.csv'),
         ('llm_master_hybrid', SUBMISSIONS_DIR / 'submission_master_hybrid.csv'),
+        ('llm_neighbour_model_hybrid', SUBMISSIONS_DIR / 'submission_neighbour_model_hybrid.csv'),
         ('llm_notebook_structured_live', SUBMISSIONS_DIR / 'submission_notebook_structured_live.csv'),
     ]
 
@@ -467,7 +469,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--skip-default-candidates', action='store_true')
     p.add_argument('--strict-validate-candidates', action='store_true')
     p.add_argument('--generate-llm', action='store_true', help='Generate fresh LLM candidate submissions before fusion')
-    p.add_argument('--llm-variants', default='structured,heuristic_boosted,master_hybrid')
+    p.add_argument('--llm-variants', default='structured,heuristic_boosted,master_hybrid,neighbour_model_hybrid')
     p.add_argument('--models', default=None)
     p.add_argument('--agent-models', default=None)
     p.add_argument('--planner-models', default=None)
@@ -479,6 +481,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--baseline-patch-max-iters', type=int, default=None, help='Forwarded to pipeline_cli.py run for baseline patch fixer iterations.')
     p.add_argument('--g4f-recovery-max-iters', type=int, default=None, help='Forwarded to pipeline_cli.py run for recovery fixer iterations.')
     p.add_argument('--baseline', default=None)
+    p.add_argument('--generate-neighbour-model', action='store_true', help='Run the vendored CayleyPy neighbour-model lane against the fused submission before post-refinement')
+    p.add_argument('--neighbour-model-repo', type=Path, default=None, help='Optional override for the vendored cayleypy-neighbour-model-training repo path')
+    p.add_argument('--neighbour-model-model-id', type=int, default=1776581286)
+    p.add_argument('--neighbour-model-device', default='cpu')
+    p.add_argument('--neighbour-model-eval-batch-size', type=int, default=2048)
+    p.add_argument('--neighbour-model-beam-width', type=int, default=128)
+    p.add_argument('--neighbour-model-num-steps', type=int, default=18)
+    p.add_argument('--neighbour-model-num-attempts', type=int, default=4)
+    p.add_argument('--neighbour-model-max-rows', type=int, default=32, help='How many longest fused rows to try solving from scratch with the neighbour-model lane')
     p.add_argument('--run-search-v3', action='store_true', help='Generate a fresh search_v3 candidate from the current best deterministic source before fusion')
     p.add_argument('--search-v3-source', type=Path, default=None, help='If set, use this submission as input to search_v3')
     p.add_argument('--skip-post-refine', action='store_true', help='Skip the final v3 post-refinement on the fused submission')
@@ -596,18 +607,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_rows(fused_path, fused_rows)
 
         final_rows = fused_rows
+        neighbour_model_stats: dict[str, Any] = {}
+        neighbour_model_profiles: list[dict[str, Any]] = []
+        if args.generate_neighbour_model:
+            neighbour_cfg = neighbour_lane.NeighbourModelConfig(
+                repo_dir=args.neighbour_model_repo,
+                model_id=int(args.neighbour_model_model_id),
+                device=str(args.neighbour_model_device),
+                eval_batch_size=int(args.neighbour_model_eval_batch_size),
+                beam_width=int(args.neighbour_model_beam_width),
+                num_steps=int(args.neighbour_model_num_steps),
+                num_attempts=int(args.neighbour_model_num_attempts),
+                max_rows=int(args.neighbour_model_max_rows),
+                only_if_shorter=True,
+            )
+            try:
+                nm_rows, nm_stats, nm_profiles = neighbour_lane.improve_submission_rows(
+                    submission_rows=final_rows,
+                    test_rows=_get_test_rows(),
+                    central=CENTRAL,
+                    generators=GENERATORS,
+                    config=neighbour_cfg,
+                )
+                if _score_rows(nm_rows) <= _score_rows(final_rows):
+                    final_rows = nm_rows
+                neighbour_model_stats = nm_stats
+                neighbour_model_profiles = nm_profiles
+            except Exception as exc:
+                neighbour_model_stats = {'error': f'{type(exc).__name__}: {exc}'}
+
         post_refine_stats: dict[str, Any] = {}
         post_refine_profiles: list[dict[str, Any]] = []
         if not args.skip_post_refine:
             ns = _build_namespace_for_v3(args)
             improved_rows, stats, profiles = v3.improve_submission_rows(
-                submission_rows=fused_rows,
+                submission_rows=final_rows,
                 test_rows=_get_test_rows(),
                 central=CENTRAL,
                 generators=GENERATORS,
                 args=ns,
             )
-            if _score_rows(improved_rows) <= _score_rows(fused_rows):
+            if _score_rows(improved_rows) <= _score_rows(final_rows):
                 final_rows = improved_rows
                 post_refine_stats = stats
                 post_refine_profiles = profiles
@@ -634,17 +674,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 'winner_counts': fusion_stats.get('winner_counts', {}),
                 'invalid_counts': fusion_stats.get('invalid_counts', {}),
             },
+            'neighbour_model': neighbour_model_stats,
             'post_refine': post_refine_stats,
             'final_validation': final_validation,
             'output': str(args.out),
             'uses_cayleypy': not args.disable_cayleypy,
             'llm_enabled': bool(args.generate_llm),
+            'neighbour_model_enabled': bool(args.generate_neighbour_model),
         }
         args.stats_out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
         args.profiles_out.write_text(
             json.dumps(
                 {
                     'fusion_per_row': fusion_stats.get('per_row', []),
+                    'neighbour_model_profiles': neighbour_model_profiles,
                     'post_refine_profiles': post_refine_profiles,
                 },
                 ensure_ascii=False,

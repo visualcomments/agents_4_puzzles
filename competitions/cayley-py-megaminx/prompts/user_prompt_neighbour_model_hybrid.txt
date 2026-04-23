@@ -1,0 +1,44 @@
+We are solving the Kaggle competition "CayleyPy Megaminx Solve Optimally":
+https://www.kaggle.com/competitions/cayley-py-megaminx
+
+I need a Python module `solve_module.py` that stays fully compatible with the existing Megaminx repository pipeline and the new vendored neighbour-model hybrid lane.
+
+ABSOLUTE REQUIREMENTS
+- Preserve the public API `solve(vec) -> (moves, sorted_array)`.
+- `vec` is a Python list[int].
+- `moves` must be a list[str] of legal official move names from `puzzle_info.json`.
+- `sorted_array` must be the actual final array obtained by replaying `moves` from `vec`.
+- Script mode must print JSON: `{"moves": [...], "sorted_array": [...]}`.
+- Use ONLY official move names from the bundled Megaminx competition data.
+- Keep exact bundled-state lookup support and do not regress correctness.
+
+NEIGHBOUR-MODEL HYBRID CONTEXT YOU MUST RESPECT
+This repository now includes a vendored Megaminx neighbour-model training snapshot and a runtime lane that can solve selected hard rows from scratch with a Q-model. Your generated solver must remain compatible with that workflow.
+
+Concretely:
+- do not invent new move aliases or hidden macro tokens;
+- do not change CSV / JSON contracts used by hybrid candidate fusion;
+- do not remove the exact lookup first architecture;
+- keep deterministic behavior so LLM-generated candidates can still be fused safely with neighbour-model candidates;
+- prefer improvements that strengthen local exact rewrites, canonicalization, and bounded dynamic programming around valid words.
+
+STRATEGIC DIRECTION
+Keep the baseline as an exact bundled lookup + Megaminx word-rewriting engine.
+The neighbour-model lane already covers the "solve selected rows from scratch" role, so your job is to improve the exact deterministic solver layer without breaking interoperability.
+
+Good directions:
+- stronger short exact replacement tables;
+- safer canonicalization of commuting blocks;
+- better left-to-right / right-to-left bounded local optimization;
+- memoization of local permutation effects;
+- preserving the shortest representative for each local exact effect;
+- cleaner factoring that makes the solver easier for the hybrid orchestrator to reuse.
+
+Avoid:
+- replacing exact lookup with generic search;
+- introducing non-official move syntax;
+- changing the solve contract;
+- anything that would make neighbour-model + LLM candidate fusion less reliable.
+
+OUTPUT EXPECTATION
+Return only a complete `solve_module.py` implementation that improves the deterministic Megaminx baseline while staying compatible with the new neighbour-model hybrid lane and the existing prompt-driven LLM workflow.

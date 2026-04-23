@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.ipynb_checkpoints/
+.DS_Store
+logs/tensorboard/
+weights/*
+!weights/p900-t000_1776548012_best.pth
+!weights/p900-t000-q_1776581286_best.pth
+*.report.json

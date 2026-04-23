@@ -1,0 +1,2 @@
+# Intentionally left empty in the vendored snapshot.
+# Real checkpoint binaries are fetched on demand via scripts/fetch_megaminx_neighbour_weights.py.
