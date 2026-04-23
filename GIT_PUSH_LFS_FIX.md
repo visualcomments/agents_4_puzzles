@@ -1,28 +1,21 @@
-# Git push fix for missing vendored neighbour-model weights
+# Git push / Git LFS fix
 
-This repository does not commit the Megaminx checkpoint `.pth` files from the vendored
-`tp/cayleypy-neighbour-model-training-main` snapshot.
+This archive removes vendored `.pth` checkpoint pointer files from the repository payload.
 
-The upstream training repository stores those files in Git LFS. If only the tiny LFS pointer
-files are copied into this repository, GitHub rejects `git push` with a missing-object error.
+## Fresh start
 
-Use this flow instead:
+If you initialize a **new** Git repository from this archive, pushes should not hit the previous Git LFS integrity error for the Megaminx neighbour-model checkpoints.
 
-1. Keep the vendored `weights/` directory empty in Git.
-2. After clone, fetch the real checkpoints only in the local runtime:
+## If your existing local clone still fails to push
 
-```bash
-python scripts/fetch_megaminx_neighbour_weights.py
-```
+Your local Git history may still contain old Git LFS pointers. Clean them from history and remove the LFS tracking rule.
 
-If you already committed the pointer files by mistake, remove them from the index and amend:
+Recommended outline:
 
-```bash
-git rm --cached tp/cayleypy-neighbour-model-training-main/weights/*.pth
-git add tp/cayleypy-neighbour-model-training-main/.gitattributes \
-        tp/cayleypy-neighbour-model-training-main/weights/README.md \
-        GIT_PUSH_LFS_FIX.md
-git commit --amend --no-edit
-```
+1. Remove the LFS tracking rule for `tp/cayleypy-neighbour-model-training-main/weights/*.pth`.
+2. Remove the old checkpoint paths from Git history using `git filter-repo`.
+3. Force-push the rewritten branch.
 
-If the bad commit is not the latest one, rewrite the unpushed history before pushing.
+Reference documentation:
+- GitHub Docs: Resolving Git Large File Storage upload failures
+- GitHub Docs: Removing files from Git Large File Storage

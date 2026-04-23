@@ -2270,6 +2270,7 @@ def _run_agent_laboratory(
     no_llm: bool = False,
     allow_baseline: bool = True,
     g4f_recovery_rounds: int | None = None,
+    baseline_patch_max_iters: int | None = None,
     g4f_recovery_max_iters: int | None = None,
     g4f_recovery_sleep: float | None = None,
     worker_no_kill_process_group: bool = False,
@@ -2328,6 +2329,9 @@ def _run_agent_laboratory(
     if g4f_recovery_rounds is not None:
         env["AGENTLAB_G4F_RECOVERY_ROUNDS"] = str(max(0, int(g4f_recovery_rounds)))
         effective_codegen_env["AGENTLAB_G4F_RECOVERY_ROUNDS"] = env["AGENTLAB_G4F_RECOVERY_ROUNDS"]
+    if baseline_patch_max_iters is not None:
+        env["AGENTLAB_BASELINE_PATCH_MAX_ITERS"] = str(max(1, int(baseline_patch_max_iters)))
+        effective_codegen_env["AGENTLAB_BASELINE_PATCH_MAX_ITERS"] = env["AGENTLAB_BASELINE_PATCH_MAX_ITERS"]
     if g4f_recovery_max_iters is not None:
         env["AGENTLAB_G4F_RECOVERY_MAX_ITERS"] = str(max(1, int(g4f_recovery_max_iters)))
         effective_codegen_env["AGENTLAB_G4F_RECOVERY_MAX_ITERS"] = env["AGENTLAB_G4F_RECOVERY_MAX_ITERS"]
@@ -2427,6 +2431,7 @@ def _generate_solver_with_optional_improvement(
     max_iters: int,
     allow_baseline: bool,
     g4f_recovery_rounds: int | None,
+    baseline_patch_max_iters: int | None,
     g4f_recovery_max_iters: int | None,
     g4f_recovery_sleep: float | None,
     worker_no_kill_process_group: bool,
@@ -2524,6 +2529,7 @@ def _generate_solver_with_optional_improvement(
                 no_llm=False,
                 allow_baseline=allow_baseline,
                 g4f_recovery_rounds=g4f_recovery_rounds,
+                baseline_patch_max_iters=baseline_patch_max_iters,
                 g4f_recovery_max_iters=g4f_recovery_max_iters,
                 g4f_recovery_sleep=g4f_recovery_sleep,
                 worker_no_kill_process_group=worker_no_kill_process_group,
@@ -2958,6 +2964,7 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         max_iters=args.max_iters,
         allow_baseline=args.allow_baseline,
         g4f_recovery_rounds=args.g4f_recovery_rounds,
+        baseline_patch_max_iters=args.baseline_patch_max_iters,
         g4f_recovery_max_iters=args.g4f_recovery_max_iters,
         g4f_recovery_sleep=args.g4f_recovery_sleep,
         worker_no_kill_process_group=args.worker_no_kill_process_group,
@@ -3234,6 +3241,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             "g4f_stop_at_python_fence": args.g4f_stop_at_python_fence,
             "keep_improving": bool(getattr(args, 'keep_improving', False)),
             "improvement_rounds": getattr(args, 'improvement_rounds', 1),
+            "baseline_patch_max_iters": getattr(args, 'baseline_patch_max_iters', None),
+            "g4f_recovery_max_iters": getattr(args, 'g4f_recovery_max_iters', None),
             "vector_col": args.vector_col,
             "max_rows": args.max_rows,
             "submit": bool(args.submit),
@@ -3449,6 +3458,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 max_iters=args.max_iters,
                 allow_baseline=args.allow_baseline,
                 g4f_recovery_rounds=args.g4f_recovery_rounds,
+                baseline_patch_max_iters=args.baseline_patch_max_iters,
                 g4f_recovery_max_iters=args.g4f_recovery_max_iters,
                 g4f_recovery_sleep=args.g4f_recovery_sleep,
                 worker_no_kill_process_group=args.worker_no_kill_process_group,
@@ -3731,6 +3741,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--refine-rounds", type=int, default=1, help="How many planner refinement rounds to run in hybrid mode.")
     sp.add_argument("--max-iters", type=int, default=100000)
     sp.add_argument("--g4f-recovery-rounds", type=int, default=None, help="Extra recovery rounds before offline fallback (forwarded to AgentLaboratory).")
+    sp.add_argument("--baseline-patch-max-iters", type=int, default=None, help="Optional fixer iterations for the baseline-patcher stage (forwarded as AGENTLAB_BASELINE_PATCH_MAX_ITERS).")
     sp.add_argument("--g4f-recovery-max-iters", type=int, default=None, help="Fixer iterations per recovery round (forwarded to AgentLaboratory).")
     sp.add_argument("--g4f-recovery-sleep", type=float, default=None, help="Cooldown in seconds before each recovery round (forwarded to AgentLaboratory).")
     sp.add_argument("--worker-no-kill-process-group", action="store_true", help="Do not hard-kill the entire worker process group on timeout; only terminate the worker process itself.")
@@ -3813,6 +3824,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--refine-rounds", type=int, default=1, help="How many planner refinement rounds to run in hybrid mode.")
     sp.add_argument("--max-iters", type=int, default=100000)
     sp.add_argument("--g4f-recovery-rounds", type=int, default=None, help="Extra recovery rounds before offline fallback (forwarded to AgentLaboratory).")
+    sp.add_argument("--baseline-patch-max-iters", type=int, default=None, help="Optional fixer iterations for the baseline-patcher stage (forwarded as AGENTLAB_BASELINE_PATCH_MAX_ITERS).")
     sp.add_argument("--g4f-recovery-max-iters", type=int, default=None, help="Fixer iterations per recovery round (forwarded to AgentLaboratory).")
     sp.add_argument("--g4f-recovery-sleep", type=float, default=None, help="Cooldown in seconds before each recovery round (forwarded to AgentLaboratory).")
     sp.add_argument("--worker-no-kill-process-group", action="store_true", help="Do not hard-kill the entire worker process group on timeout; only terminate the worker process itself.")
