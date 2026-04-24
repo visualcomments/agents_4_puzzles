@@ -5,6 +5,7 @@ This runner sits above pipeline_cli.py and is intentionally standard-library onl
 It tests all Megaminx prompt bundles, records full logs/metrics, submits each
 successful submission to Kaggle when enabled, reads the public score from Kaggle
 submission history, and uses score movement to adjust the next prompt strategy.
+It also supports ordered g4f model fallback lists and writes analytics artifacts.
 
 The runner does not store Kaggle credentials. Configure Kaggle in Colab via
 ~/.kaggle/kaggle.json, KAGGLE_USERNAME/KAGGLE_KEY, or --kaggle-json.
@@ -59,6 +60,43 @@ SAFE_VARIANTS: List[str] = [
     "dataset_adapted",
     "neighbour_model_hybrid",
 ]
+
+
+def split_model_list(value: Optional[str]) -> List[str]:
+    """Parse comma/semicolon/newline separated model lists while keeping single values intact."""
+    if value is None:
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    parts = [p.strip() for p in re.split(r"[;,\n]+", text) if p.strip()]
+    return parts or [text]
+
+
+def resolve_model_fallbacks(args: argparse.Namespace) -> List[str]:
+    """Return ordered model fallbacks.
+
+    If --model-fallbacks is passed it wins; otherwise --models itself can be a
+    comma/semicolon/newline separated list. The runner passes exactly one model
+    to pipeline_cli.py per attempt, so a failing g4f model does not block the
+    entire prompt variant.
+    """
+    models = split_model_list(getattr(args, "model_fallbacks", None))
+    if not models:
+        models = split_model_list(getattr(args, "models", None))
+    if not models:
+        models = ["g4f:gpt-4o-mini"]
+    seen: set[str] = set()
+    out: List[str] = []
+    for m in models:
+        if m not in seen:
+            out.append(m)
+            seen.add(m)
+    return out
+
+
+def looks_like_g4f_fallback(models: Sequence[str]) -> bool:
+    return len(models) > 1 and all(str(m).startswith("g4f:") or str(m).startswith("g4f/") for m in models)
 
 
 def utc_now() -> str:
@@ -488,7 +526,14 @@ def reorder_queue(queue: List[str], state: StrategyState) -> List[str]:
     return prioritized + rest
 
 
-def build_run_command(args: argparse.Namespace, variant: str, output_csv: Path, run_log: Path, state: StrategyState) -> List[str]:
+def build_run_command(
+    args: argparse.Namespace,
+    variant: str,
+    output_csv: Path,
+    run_log: Path,
+    state: StrategyState,
+    model_override: Optional[str] = None,
+) -> List[str]:
     cmd = [
         sys.executable,
         "pipeline_cli.py",
@@ -500,7 +545,7 @@ def build_run_command(args: argparse.Namespace, variant: str, output_csv: Path, 
         "--prompt-variant",
         variant,
         "--models",
-        args.models,
+        model_override or args.models,
         "--run-log",
         str(run_log),
         "--schema-check",
@@ -581,6 +626,9 @@ def flatten_metrics(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             {
                 "round": r.get("round"),
                 "variant": r.get("variant"),
+                "model": r.get("model"),
+                "model_attempt_count": len(r.get("model_attempts") or []),
+                "attempted_models": ";".join([str(a.get("model")) for a in (r.get("model_attempts") or [])]),
                 "ok": r.get("ok"),
                 "returncode": r.get("returncode"),
                 "runtime_seconds": r.get("runtime_seconds"),
@@ -619,6 +667,217 @@ def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
             writer.writerow({k: row.get(k) for k in keys})
 
 
+
+def _group_rows(rows: List[Dict[str, Any]], key: str) -> Dict[Any, List[Dict[str, Any]]]:
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(row.get(key), []).append(row)
+    return groups
+
+
+def _mean(values: Iterable[Any]) -> Optional[float]:
+    nums = [parse_float(v) for v in values]
+    nums = [v for v in nums if v is not None]
+    return sum(nums) / len(nums) if nums else None
+
+
+def _best(values: Iterable[Any], direction: str) -> Optional[float]:
+    nums = [parse_float(v) for v in values]
+    nums = [v for v in nums if v is not None]
+    if not nums:
+        return None
+    return max(nums) if direction == "max" else min(nums)
+
+
+def _walk_prompt_signals(obj: Any, prefix: str = "") -> List[Dict[str, Any]]:
+    """Best-effort extraction of self-improving prompt traces from arbitrary run_log JSON."""
+    signals: List[Dict[str, Any]] = []
+    interesting = ("prompt", "improv", "refine", "self", "feedback", "strategy", "breakthrough")
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            path = f"{prefix}.{k}" if prefix else str(k)
+            lk = str(k).lower()
+            if any(tok in lk for tok in interesting):
+                preview = json.dumps(v, ensure_ascii=False)[:2000] if not isinstance(v, str) else v[:2000]
+                signals.append({"path": path, "key": str(k), "preview": preview})
+            if isinstance(v, (dict, list)):
+                signals.extend(_walk_prompt_signals(v, path))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:200]):
+            path = f"{prefix}[{i}]"
+            if isinstance(v, (dict, list)):
+                signals.extend(_walk_prompt_signals(v, path))
+            elif isinstance(v, str) and any(tok in v.lower() for tok in interesting):
+                signals.append({"path": path, "key": "list_item", "preview": v[:2000]})
+    return signals
+
+
+def _grep_log_signals(path: Optional[str], limit: int = 80) -> List[Dict[str, Any]]:
+    if not path:
+        return []
+    p = Path(path)
+    if not p.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    needles = ("self-improve", "self improve", "improvement", "refine", "prompt", "breakthrough", "score")
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as f:
+            for line_no, line in enumerate(f, start=1):
+                low = line.lower()
+                if any(n in low for n in needles):
+                    out.append({"line": line_no, "text": line.rstrip()[:1200]})
+                    if len(out) >= limit:
+                        break
+    except Exception as exc:
+        out.append({"line": None, "text": f"log_read_error: {type(exc).__name__}: {exc}"})
+    return out
+
+
+def generate_analytics(run_dir: Path, records: List[Dict[str, Any]], state: StrategyState) -> Dict[str, Any]:
+    """Create analysis artifacts that are included in the auto-downloaded zip."""
+    analytics_dir = run_dir / "analytics"
+    analytics_dir.mkdir(parents=True, exist_ok=True)
+    flat = flatten_metrics(records)
+    write_csv(analytics_dir / "score_timeline.csv", flat)
+
+    # Prompt-level summary
+    prompt_rows: List[Dict[str, Any]] = []
+    for variant, rows in _group_rows(flat, "variant").items():
+        prompt_rows.append({
+            "variant": variant,
+            "runs": len(rows),
+            "successes": sum(1 for r in rows if str(r.get("ok")).lower() == "true"),
+            "failures": sum(1 for r in rows if str(r.get("ok")).lower() != "true"),
+            "success_rate": (sum(1 for r in rows if str(r.get("ok")).lower() == "true") / len(rows)) if rows else None,
+            "best_kaggle_score": _best([r.get("kaggle_score") for r in rows], state.direction),
+            "mean_runtime_seconds": _mean([r.get("runtime_seconds") for r in rows]),
+            "mean_move_tokens": _mean([r.get("mean_move_tokens") for r in rows]),
+            "score_improvements": sum(1 for r in rows if str(r.get("score_improved")).lower() == "true"),
+        })
+    write_csv(analytics_dir / "prompt_variant_summary.csv", prompt_rows)
+
+    # Model fallback analytics
+    attempts: List[Dict[str, Any]] = []
+    for r in records:
+        for a in r.get("model_attempts") or []:
+            attempts.append({
+                "round": r.get("round"),
+                "variant": r.get("variant"),
+                "model": a.get("model"),
+                "attempt_index": a.get("attempt_index"),
+                "ok": a.get("ok"),
+                "returncode": a.get("returncode"),
+                "runtime_seconds": a.get("runtime_seconds"),
+                "output_csv": a.get("output_csv"),
+                "stdout_log": a.get("stdout_log"),
+                "run_log": a.get("run_log"),
+            })
+    write_csv(analytics_dir / "model_fallback_attempts.csv", attempts)
+    model_rows: List[Dict[str, Any]] = []
+    for model, rows in _group_rows(attempts, "model").items():
+        model_rows.append({
+            "model": model,
+            "attempts": len(rows),
+            "successes": sum(1 for r in rows if str(r.get("ok")).lower() == "true"),
+            "failures": sum(1 for r in rows if str(r.get("ok")).lower() != "true"),
+            "success_rate": (sum(1 for r in rows if str(r.get("ok")).lower() == "true") / len(rows)) if rows else None,
+            "mean_runtime_seconds": _mean([r.get("runtime_seconds") for r in rows]),
+        })
+    write_csv(analytics_dir / "model_fallback_summary.csv", model_rows)
+
+    # Strategy and self-improvement traces
+    strategy_rows = list(state.decisions)
+    write_csv(analytics_dir / "strategy_transitions.csv", strategy_rows)
+    prompt_signal_rows: List[Dict[str, Any]] = []
+    lineage_rows: List[Dict[str, Any]] = []
+    for r in records:
+        signals = _walk_prompt_signals(r.get("run_log_summary") or {})
+        log_signals = _grep_log_signals(r.get("stdout_log"))
+        decision = r.get("strategy_decision") or {}
+        lineage_rows.append({
+            "round": r.get("round"),
+            "variant": r.get("variant"),
+            "model": r.get("model"),
+            "ok": r.get("ok"),
+            "kaggle_score": (r.get("kaggle_score") or {}).get("score"),
+            "score_improved": decision.get("improved"),
+            "strategy_mode": decision.get("mode"),
+            "breakthrough_pressure": decision.get("breakthrough_pressure"),
+            "prompt_json_signal_count": len(signals),
+            "prompt_log_signal_count": len(log_signals),
+        })
+        for sig in signals:
+            prompt_signal_rows.append({
+                "round": r.get("round"),
+                "variant": r.get("variant"),
+                "model": r.get("model"),
+                "source": "run_log_json",
+                "path": sig.get("path"),
+                "key": sig.get("key"),
+                "preview": sig.get("preview"),
+            })
+        for sig in log_signals:
+            prompt_signal_rows.append({
+                "round": r.get("round"),
+                "variant": r.get("variant"),
+                "model": r.get("model"),
+                "source": "stdout_log",
+                "path": sig.get("line"),
+                "key": "log_line",
+                "preview": sig.get("text"),
+            })
+    write_csv(analytics_dir / "self_improving_prompt_lineage.csv", lineage_rows)
+    write_csv(analytics_dir / "self_improving_prompt_signals.csv", prompt_signal_rows)
+    with (analytics_dir / "self_improving_prompt_signals.jsonl").open("w", encoding="utf-8") as f:
+        for row in prompt_signal_rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    # Successful vs failed scripts manifest
+    script_rows: List[Dict[str, Any]] = []
+    for r in records:
+        script_rows.append({
+            "round": r.get("round"),
+            "variant": r.get("variant"),
+            "model": r.get("model"),
+            "ok": r.get("ok"),
+            "solver_path": r.get("solver_path"),
+            "copied_solver": r.get("copied_solver"),
+            "returncode": r.get("returncode"),
+            "kaggle_score": (r.get("kaggle_score") or {}).get("score"),
+        })
+    write_csv(analytics_dir / "successful_vs_failed_scripts.csv", script_rows)
+
+    best = state.best_score
+    report = []
+    report.append("# Megaminx prompt sweep analytics\n")
+    report.append(f"Generated UTC: {utc_now()}\n")
+    report.append(f"Score direction: `{state.direction}`; best score: `{best}`; best variant: `{state.best_variant}`; best round: `{state.best_round}`.\n")
+    report.append("## Model fallback\n")
+    if attempts:
+        report.append("The runner tried models sequentially per prompt variant and stopped after the first successful CSV. See `model_fallback_attempts.csv` and `model_fallback_summary.csv`.\n")
+    else:
+        report.append("No model fallback attempts were recorded.\n")
+    report.append("## Self-improving prompt dynamics\n")
+    report.append("Use `self_improving_prompt_lineage.csv` as the timeline: it joins round, prompt variant, selected model, Kaggle score, strategy mode, breakthrough pressure, and counts of extracted prompt-improvement signals.\n")
+    report.append("Use `self_improving_prompt_signals.csv` / `.jsonl` for the extracted prompt/refinement/feedback snippets from run logs. Extraction is best-effort because pipeline logs can vary by prompt variant.\n")
+    report.append("## Strategy interpretation\n")
+    report.append("`score_improved_promote_then_breakthrough` means a Kaggle-score movement promoted the lineage but also increased breakthrough pressure. `validated_but_score_flat_use_more_breakthrough` means the generated code passed local checks but did not improve the score, so more aggressive prompt families should be tried. `script_failed_backoff_to_guarded` means the runner backs off into safer prompts.\n")
+    report.append("## Key files\n")
+    report.append("- `prompt_variant_summary.csv` — aggregate metrics per prompt family.\n")
+    report.append("- `score_timeline.csv` — one row per completed round.\n")
+    report.append("- `strategy_transitions.csv` — score-driven strategy decisions.\n")
+    report.append("- `model_fallback_summary.csv` — reliability of each g4f fallback model.\n")
+    report.append("- `successful_vs_failed_scripts.csv` — manifest of solver scripts and outcomes.\n")
+    report_path = analytics_dir / "analysis_report.md"
+    report_path.write_text("\n".join(report), encoding="utf-8")
+    return {
+        "analytics_dir": str(analytics_dir),
+        "analysis_report": str(report_path),
+        "prompt_signal_count": len(prompt_signal_rows),
+        "model_attempt_count": len(attempts),
+    }
+
+
 def package_results(run_dir: Path, output_zip: Path) -> None:
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     if output_zip.exists():
@@ -635,7 +894,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--competition", default="cayley-py-megaminx")
     parser.add_argument("--kaggle-competition", default="cayley-py-megaminx")
     parser.add_argument("--puzzles", default=None)
-    parser.add_argument("--models", default="g4f:gpt-4o-mini")
+    parser.add_argument("--models", default="g4f:gpt-4o-mini", help="One model or comma/semicolon/newline-separated fallback list. Example: g4f:gpt-4o-mini,g4f:gpt-4o")
+    parser.add_argument("--model-fallbacks", default=None, help="Explicit ordered model fallback list. Overrides --models when provided.")
     parser.add_argument("--agent-models", default=None)
     parser.add_argument("--planner-models", default=None)
     parser.add_argument("--coder-models", default=None)
@@ -698,6 +958,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.max_total_runs is not None:
         queue = queue[: max(0, int(args.max_total_runs))]
 
+    model_fallbacks = resolve_model_fallbacks(args)
+
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = (repo_dir / args.output_root / slugify(run_name)).resolve()
     logs_dir = run_dir / "logs"
@@ -720,6 +982,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"[sweep] run_dir={run_dir}")
     print(f"[sweep] variants={queue}")
     print(f"[sweep] submit={args.submit} kaggle_competition={args.kaggle_competition}")
+    print(f"[sweep] model_fallbacks={model_fallbacks}")
 
     round_idx = 0
     while queue:
@@ -727,28 +990,67 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         variant = queue.pop(0)
         round_idx += 1
         round_slug = f"round_{round_idx:03d}_{slugify(variant)}"
-        output_csv = outputs_dir / f"{round_slug}.csv"
-        run_log = run_dir / "run_logs" / f"{round_slug}.run_log.json"
-        stdout_log = logs_dir / f"{round_slug}.stdout.log"
-        cmd = build_run_command(args, variant, output_csv, run_log, state)
-
         print(f"\n===== {round_slug} =====")
         print("[strategy]", state.decisions[-1] if state.decisions else {"mode": "initial_sweep"})
-        print("[cmd]", " ".join(cmd))
-        if args.dry_run:
-            rc, seconds = 0, 0.0
-            stdout_log.write_text("DRY RUN\n" + " ".join(cmd), encoding="utf-8")
-        else:
-            rc, seconds = run_streaming(cmd, cwd=repo_dir, log_path=stdout_log, timeout=args.run_timeout)
 
-        run_payload = read_json(run_log) or {}
-        solver_path = Path(run_payload.get("solver", "")) if run_payload.get("solver") else None
-        ok = (rc == 0) and output_csv.exists()
-        dest_dir = success_dir if ok else failed_dir
-        copied_solver = copy_if_exists(solver_path, dest_dir, prefix=f"{round_slug}__")
-        copy_if_exists(stdout_log, dest_dir, prefix=f"{round_slug}__")
-        copy_if_exists(run_log, dest_dir, prefix=f"{round_slug}__")
-        copy_if_exists(output_csv if output_csv.exists() else None, dest_dir, prefix=f"{round_slug}__")
+        model_attempts: List[Dict[str, Any]] = []
+        successful_attempt: Optional[Dict[str, Any]] = None
+        for model_idx, model_name in enumerate(model_fallbacks, start=1):
+            model_slug = slugify(model_name, max_len=48)
+            attempt_slug = f"{round_slug}__model_{model_idx:02d}_{model_slug}"
+            output_csv = outputs_dir / f"{attempt_slug}.csv"
+            run_log = run_dir / "run_logs" / f"{attempt_slug}.run_log.json"
+            stdout_log = logs_dir / f"{attempt_slug}.stdout.log"
+            cmd = build_run_command(args, variant, output_csv, run_log, state, model_override=model_name)
+            print(f"[model-fallback] attempt {model_idx}/{len(model_fallbacks)} model={model_name}")
+            print("[cmd]", " ".join(cmd))
+            if args.dry_run:
+                rc, seconds = 0, 0.0
+                stdout_log.write_text("DRY RUN\n" + " ".join(cmd), encoding="utf-8")
+            else:
+                rc, seconds = run_streaming(cmd, cwd=repo_dir, log_path=stdout_log, timeout=args.run_timeout)
+            run_payload = read_json(run_log) or {}
+            solver_path = Path(run_payload.get("solver", "")) if run_payload.get("solver") else None
+            attempt_ok = (rc == 0) and output_csv.exists()
+            attempt = {
+                "attempt_index": model_idx,
+                "model": model_name,
+                "ok": attempt_ok,
+                "returncode": rc,
+                "runtime_seconds": seconds,
+                "cmd": cmd,
+                "stdout_log": str(stdout_log),
+                "run_log": str(run_log),
+                "run_log_summary": run_payload,
+                "output_csv": str(output_csv),
+                "solver_path": str(solver_path) if solver_path else None,
+            }
+            model_attempts.append(attempt)
+            attempt_dest = success_dir if attempt_ok else failed_dir
+            copy_if_exists(solver_path, attempt_dest, prefix=f"{attempt_slug}__")
+            copy_if_exists(stdout_log, attempt_dest, prefix=f"{attempt_slug}__")
+            copy_if_exists(run_log, attempt_dest, prefix=f"{attempt_slug}__")
+            copy_if_exists(output_csv if output_csv.exists() else None, attempt_dest, prefix=f"{attempt_slug}__")
+            if attempt_ok:
+                successful_attempt = attempt
+                print(f"[model-fallback] success with model={model_name}; remaining fallback models skipped for this prompt variant")
+                break
+            print(f"[model-fallback] failed with model={model_name}; trying next fallback if available")
+
+        chosen_attempt = successful_attempt or (model_attempts[-1] if model_attempts else {})
+        output_csv = Path(chosen_attempt.get("output_csv", outputs_dir / f"{round_slug}.csv"))
+        run_log = Path(chosen_attempt.get("run_log", run_dir / "run_logs" / f"{round_slug}.run_log.json"))
+        stdout_log = Path(chosen_attempt.get("stdout_log", logs_dir / f"{round_slug}.stdout.log"))
+        run_payload = chosen_attempt.get("run_log_summary") or {}
+        solver_path = Path(chosen_attempt.get("solver_path", "")) if chosen_attempt.get("solver_path") else None
+        copied_solver = None
+        for pattern in success_dir.glob(f"{round_slug}__model_*__*" if successful_attempt else "__never__"):
+            if solver_path and pattern.name.endswith(solver_path.name):
+                copied_solver = pattern
+                break
+        rc = int(chosen_attempt.get("returncode", 1) or 0)
+        seconds = sum(float(a.get("runtime_seconds") or 0.0) for a in model_attempts)
+        ok = successful_attempt is not None
 
         submission_stats = csv_submission_stats(output_csv if output_csv.exists() else None)
         kaggle_report: Dict[str, Any] = {"submitted": False, "skipped": True}
@@ -789,7 +1091,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "ok": ok,
             "returncode": rc,
             "runtime_seconds": seconds,
-            "cmd": cmd,
+            "model": chosen_attempt.get("model"),
+            "model_attempts": model_attempts,
+            "cmd": chosen_attempt.get("cmd"),
             "stdout_log": str(stdout_log),
             "run_log": str(run_log),
             "run_log_summary": run_payload,
@@ -815,6 +1119,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "repo_dir": str(repo_dir),
         "run_dir": str(run_dir),
         "tested_variants": [r["variant"] for r in records],
+        "model_fallbacks": model_fallbacks,
         "success_count": sum(1 for r in records if r.get("ok")),
         "failure_count": sum(1 for r in records if not r.get("ok")),
         "best_score": state.best_score,
@@ -827,6 +1132,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "successful_scripts_dir": str(success_dir),
         "failed_scripts_dir": str(failed_dir),
     }
+    analytics_report = generate_analytics(run_dir, records, state)
+    summary["analytics"] = analytics_report
     write_json(run_dir / "summary.json", summary)
     output_zip = run_dir.with_suffix(".zip")
     package_results(run_dir, output_zip)
