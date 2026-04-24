@@ -99,6 +99,91 @@ def looks_like_g4f_fallback(models: Sequence[str]) -> bool:
     return len(models) > 1 and all(str(m).startswith("g4f:") or str(m).startswith("g4f/") for m in models)
 
 
+MODEL_FAILURE_PATTERNS: Tuple[str, ...] = (
+    "ratelimiterror",
+    "rate limit",
+    "missingautherror",
+    "credentials required",
+    "requires api key",
+    "api key required",
+    "need api key",
+    "unauthorized",
+    "forbidden",
+    "provider is not working",
+    "providernotworkingerror",
+    "no working providers",
+    "all providers failed",
+    "retryprovider failed",
+    "timed out",
+    "timeout",
+    "readtimeout",
+    "connecttimeout",
+    "remote protocol error",
+    "connection error",
+    "bad gateway",
+    "service unavailable",
+    "cloudflare",
+    "captcha",
+    "blocked",
+    "empty response",
+    "did not return a python file",
+    "offline fallback",
+    "offline-baseline",
+    "falling back to baseline",
+    "baseline fallback",
+)
+
+
+def _read_text_if_exists(path: Optional[Path], max_chars: int = 200000) -> str:
+    if path is None or not path.exists():
+        return ""
+    try:
+        data = path.read_text(encoding="utf-8", errors="replace")
+    except TypeError:
+        data = path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    if len(data) > max_chars:
+        return data[-max_chars:]
+    return data
+
+
+def _collect_model_failure_text(run_payload: Dict[str, Any], stdout_log: Optional[Path]) -> str:
+    parts: List[str] = []
+    if run_payload:
+        try:
+            parts.append(json.dumps(run_payload, ensure_ascii=False, default=str))
+        except Exception:
+            parts.append(str(run_payload))
+    parts.append(_read_text_if_exists(stdout_log))
+    return "\n".join(p for p in parts if p)
+
+
+def detect_model_failure(run_payload: Dict[str, Any], stdout_log: Optional[Path]) -> Tuple[bool, List[str]]:
+    """Return True when subprocess output shows that the selected g4f model did not really work.
+
+    pipeline_cli.py can exit with rc=0 and write a CSV even when the selected g4f model
+    fails and the lower layer falls back to a known-good offline baseline. For model
+    sweeps this is a failed model attempt, so the next g4f model should be tried.
+    """
+    text = _collect_model_failure_text(run_payload, stdout_log).lower()
+    markers = [p for p in MODEL_FAILURE_PATTERNS if p in text]
+    if markers:
+        return True, markers
+
+    stages = run_payload.get("stages") if isinstance(run_payload, dict) else None
+    if isinstance(stages, dict):
+        for stage_name, stage_payload in stages.items():
+            if "generate" in str(stage_name).lower() and isinstance(stage_payload, dict):
+                status = str(stage_payload.get("status") or stage_payload.get("ok") or "").lower()
+                if status in {"false", "failed", "error"}:
+                    return True, [f"stage:{stage_name}:{status}"]
+                err = str(stage_payload.get("error") or stage_payload.get("exception") or "").lower()
+                if any(p in err for p in MODEL_FAILURE_PATTERNS):
+                    return True, [p for p in MODEL_FAILURE_PATTERNS if p in err]
+    return False, []
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -611,6 +696,10 @@ def build_run_command(
         cmd.append("--g4f-stop-at-python-fence")
     elif args.g4f_stop_at_python_fence == "off":
         cmd.append("--no-g4f-stop-at-python-fence")
+    if looks_like_g4f_fallback(resolve_model_fallbacks(args)):
+        # Let AgentLaboratory/g4f try alternate providers inside a selected model, while
+        # this runner still performs model-level fallback between model names.
+        os.environ.setdefault("AGENTLAB_G4F_PROVIDER_ALLOW_AUTO_FALLBACK", "1")
     if args.no_progress:
         cmd.append("--no-progress")
     return cmd
@@ -634,6 +723,9 @@ def flatten_metrics(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "runtime_seconds": r.get("runtime_seconds"),
                 "solver_path": r.get("solver_path"),
                 "output_csv": r.get("output_csv"),
+                "csv_exists": sub.get("exists"),
+                "model_failure_detected": any(bool(a.get("model_failure_detected")) for a in (r.get("model_attempts") or [])),
+                "model_failure_markers": ";".join(sorted({str(marker) for a in (r.get("model_attempts") or []) for marker in str(a.get("model_failure_markers") or "").split(";") if marker})),
                 "row_count": sub.get("row_count"),
                 "total_move_tokens": sub.get("total_move_tokens"),
                 "mean_move_tokens": sub.get("mean_move_tokens"),
@@ -769,6 +861,9 @@ def generate_analytics(run_dir: Path, records: List[Dict[str, Any]], state: Stra
                 "returncode": a.get("returncode"),
                 "runtime_seconds": a.get("runtime_seconds"),
                 "output_csv": a.get("output_csv"),
+                "csv_exists": a.get("csv_exists"),
+                "model_failure_detected": a.get("model_failure_detected"),
+                "model_failure_markers": a.get("model_failure_markers"),
                 "stdout_log": a.get("stdout_log"),
                 "run_log": a.get("run_log"),
             })
@@ -1011,7 +1106,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 rc, seconds = run_streaming(cmd, cwd=repo_dir, log_path=stdout_log, timeout=args.run_timeout)
             run_payload = read_json(run_log) or {}
             solver_path = Path(run_payload.get("solver", "")) if run_payload.get("solver") else None
-            attempt_ok = (rc == 0) and output_csv.exists()
+            csv_exists = output_csv.exists()
+            model_failure, model_failure_markers = detect_model_failure(run_payload, stdout_log)
+            # A CSV created by offline/baseline fallback is useful as an artifact, but it is
+            # not proof that the selected g4f model worked. Continue to the next model.
+            attempt_ok = (rc == 0) and csv_exists and not model_failure
             attempt = {
                 "attempt_index": model_idx,
                 "model": model_name,
@@ -1023,6 +1122,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "run_log": str(run_log),
                 "run_log_summary": run_payload,
                 "output_csv": str(output_csv),
+                "csv_exists": csv_exists,
+                "model_failure_detected": model_failure,
+                "model_failure_markers": ";".join(model_failure_markers),
                 "solver_path": str(solver_path) if solver_path else None,
             }
             model_attempts.append(attempt)
@@ -1035,7 +1137,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 successful_attempt = attempt
                 print(f"[model-fallback] success with model={model_name}; remaining fallback models skipped for this prompt variant")
                 break
-            print(f"[model-fallback] failed with model={model_name}; trying next fallback if available")
+            if model_failure:
+                print(f"[model-fallback] model={model_name} produced only fallback/provider failure markers={model_failure_markers}; trying next fallback if available")
+            else:
+                print(f"[model-fallback] failed with model={model_name}; trying next fallback if available")
 
         chosen_attempt = successful_attempt or (model_attempts[-1] if model_attempts else {})
         output_csv = Path(chosen_attempt.get("output_csv", outputs_dir / f"{round_slug}.csv"))

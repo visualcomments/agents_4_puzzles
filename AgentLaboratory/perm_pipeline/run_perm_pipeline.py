@@ -2457,11 +2457,15 @@ def attempt_recovery_rounds(
     validator_path: Path,
     tests: Sequence[List[int]],
     max_iters: int,
-    baseline_code: str,
+    baseline_code: Optional[str],
     generation_reports: List[str],
 ) -> Tuple[bool, Optional[str]]:
     rounds = max(0, _env_int("AGENTLAB_G4F_RECOVERY_ROUNDS", 1))
-    if rounds <= 0 or not recovery_models or not baseline_code.strip():
+    safe_baseline_code = baseline_code or ""
+    # main() passes prompt_baseline_code=None for from-scratch prompts. The old
+    # guard called baseline_code.strip() and crashed before model fallback could
+    # continue to the next g4f model.
+    if rounds <= 0 or not recovery_models or not safe_baseline_code.strip():
         return False, None
 
     recovery_iters = max(1, min(max_iters, _env_int("AGENTLAB_G4F_RECOVERY_MAX_ITERS", max_iters)))
@@ -2493,7 +2497,7 @@ def attempt_recovery_rounds(
                 validator_path=validator_path,
                 tests=tests,
                 max_iters=recovery_iters,
-                baseline_code=baseline_code,
+                baseline_code=safe_baseline_code,
                 stage_label=f"recovery round {round_idx}",
             )
             generation_reports.append(report)
