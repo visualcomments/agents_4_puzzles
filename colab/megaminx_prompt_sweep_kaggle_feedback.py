@@ -210,11 +210,43 @@ def parse_float(value: Any) -> Optional[float]:
     return val
 
 
-def read_json(path: Path) -> Optional[dict]:
+def read_json(path: Path) -> Optional[Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def normalize_run_payload(payload: Any) -> Dict[str, Any]:
+    """Return a dict-shaped run payload even when pipeline_cli writes a JSON list.
+
+    Some versions of pipeline_cli.py write run_log.json as a list of stage/event
+    records instead of a single summary dict. The sweep runner expects dict.get(),
+    so normalize the shape and keep the original list under raw_run_log_events.
+    """
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list):
+        normalized: Dict[str, Any] = {
+            "raw_run_log_type": "list",
+            "raw_run_log_len": len(payload),
+            "raw_run_log_events": payload,
+        }
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            # Keep useful top-level summary fields if any event contains them.
+            for key in ("solver", "output", "submission", "status", "ok", "competition", "prompt_variant"):
+                if key in item and key not in normalized:
+                    normalized[key] = item.get(key)
+            stages = normalized.setdefault("stages", {})
+            stage_name = item.get("stage") or item.get("name") or item.get("step")
+            if stage_name and isinstance(stages, dict):
+                stages[str(stage_name)] = item
+        return normalized
+    if payload is None:
+        return {}
+    return {"raw_run_log_type": type(payload).__name__, "raw_run_log_value": str(payload)}
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -1104,7 +1136,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stdout_log.write_text("DRY RUN\n" + " ".join(cmd), encoding="utf-8")
             else:
                 rc, seconds = run_streaming(cmd, cwd=repo_dir, log_path=stdout_log, timeout=args.run_timeout)
-            run_payload = read_json(run_log) or {}
+            run_payload = normalize_run_payload(read_json(run_log))
             solver_path = Path(run_payload.get("solver", "")) if run_payload.get("solver") else None
             csv_exists = output_csv.exists()
             model_failure, model_failure_markers = detect_model_failure(run_payload, stdout_log)
@@ -1146,7 +1178,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_csv = Path(chosen_attempt.get("output_csv", outputs_dir / f"{round_slug}.csv"))
         run_log = Path(chosen_attempt.get("run_log", run_dir / "run_logs" / f"{round_slug}.run_log.json"))
         stdout_log = Path(chosen_attempt.get("stdout_log", logs_dir / f"{round_slug}.stdout.log"))
-        run_payload = chosen_attempt.get("run_log_summary") or {}
+        run_payload = normalize_run_payload(chosen_attempt.get("run_log_summary"))
         solver_path = Path(chosen_attempt.get("solver_path", "")) if chosen_attempt.get("solver_path") else None
         copied_solver = None
         for pattern in success_dir.glob(f"{round_slug}__model_*__*" if successful_attempt else "__never__"):
