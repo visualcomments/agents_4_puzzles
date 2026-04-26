@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import hashlib
 import itertools
 import importlib
 import importlib.util
@@ -2365,28 +2366,193 @@ def _run_agent_laboratory(
     subprocess.check_call(cmd, cwd=str(ROOT), env=env)
 
 
-def _submission_path_score(submission_csv: Path) -> int:
+
+def _file_sha256(path: Optional[Path]) -> Optional[str]:
+    """Return a stable full-file SHA256 digest for guard/lineage metadata."""
+    if path is None or not path.exists() or not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _infer_submission_columns(submission_csv: Path) -> tuple[str, str]:
+    """Infer (id_column, move_column) from a submission-like CSV."""
+    _ensure_csv_field_size_limit()
     with submission_csv.open(newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or [])
-        move_field = None
-        for candidate in ('path', 'moves', 'solution'):
-            if candidate in fieldnames:
-                move_field = candidate
+    if not fieldnames:
+        raise ValueError(f'Could not read header from {submission_csv}')
+    id_field = fieldnames[0]
+    move_field: Optional[str] = None
+    for candidate in ('path', 'moves', 'solution'):
+        if candidate in fieldnames:
+            move_field = candidate
+            break
+    if move_field is None:
+        for name in fieldnames:
+            if str(name).strip().lower() not in {'id', 'initial_state_id'}:
+                move_field = name
                 break
-        if move_field is None:
-            for name in fieldnames:
-                if str(name).strip().lower() not in {'id', 'initial_state_id'}:
-                    move_field = name
-                    break
-        if move_field is None:
-            raise ValueError(f'Could not infer moves column in {submission_csv}')
+    if move_field is None:
+        raise ValueError(f'Could not infer moves column in {submission_csv}')
+    return id_field, move_field
 
-        total = 0
+
+def _split_move_path(value: Any) -> list[str]:
+    """Split a Megaminx path using the actual dot-delimited format, with whitespace fallback."""
+    text = str(value or '').strip()
+    if not text or text.upper() == 'UNSOLVED':
+        return []
+    if '.' in text:
+        return [part for part in text.split('.') if part]
+    return [part for part in text.split() if part]
+
+
+def _submission_path_digest(submission_csv: Optional[Path]) -> Optional[str]:
+    """Hash normalized id/path rows so identical submissions cannot masquerade as new work."""
+    if submission_csv is None or not submission_csv.exists():
+        return None
+    id_field, move_field = _infer_submission_columns(submission_csv)
+    h = hashlib.sha256()
+    with submission_csv.open(newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
         for row in reader:
-            value = str(row.get(move_field) or '').strip()
-            total += 0 if not value else len([part for part in value.split('.') if part])
-        return total
+            rid = str(row.get(id_field, '')).strip()
+            path_value = str(row.get(move_field, '')).strip()
+            h.update(rid.encode('utf-8'))
+            h.update(b'\x1f')
+            h.update(path_value.encode('utf-8'))
+            h.update(b'\n')
+    return h.hexdigest()
+
+
+def _submission_guard_stats(submission_csv: Optional[Path]) -> dict[str, Any]:
+    """Return row/move stats used by self-improvement acceptance and run reports."""
+    out: dict[str, Any] = {
+        'exists': bool(submission_csv and submission_csv.exists()),
+        'row_count': 0,
+        'empty_rows': 0,
+        'unsolved_rows': 0,
+        'total_move_tokens': 0,
+        'mean_move_tokens': None,
+        'max_move_tokens': 0,
+        'digest': None,
+    }
+    if submission_csv is None or not submission_csv.exists():
+        return out
+    try:
+        id_field, move_field = _infer_submission_columns(submission_csv)
+        lengths: list[int] = []
+        with submission_csv.open(newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                value = str(row.get(move_field) or '').strip()
+                out['row_count'] += 1
+                if not value:
+                    out['empty_rows'] += 1
+                if value.upper() == 'UNSOLVED':
+                    out['unsolved_rows'] += 1
+                n = len(_split_move_path(value))
+                lengths.append(n)
+                out['total_move_tokens'] += n
+        if lengths:
+            out['mean_move_tokens'] = out['total_move_tokens'] / len(lengths)
+            out['max_move_tokens'] = max(lengths)
+        out['digest'] = _submission_path_digest(submission_csv)
+        out['id_column'] = id_field
+        out['move_column'] = move_field
+    except Exception as exc:
+        out['csv_error'] = f'{type(exc).__name__}: {exc}'
+    return out
+
+
+def _write_per_row_delta(
+    *,
+    baseline_csv: Optional[Path],
+    candidate_csv: Optional[Path],
+    out_csv: Path,
+    out_json: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Write per-row move-count deltas for candidate-vs-current-best acceptance debugging.
+
+    Delta is candidate_len - baseline_len, so negative values are improvements.
+    """
+    summary: dict[str, Any] = {
+        'baseline_csv': str(baseline_csv) if baseline_csv else None,
+        'candidate_csv': str(candidate_csv) if candidate_csv else None,
+        'delta_csv': str(out_csv),
+        'rows_compared': 0,
+        'improved_rows': 0,
+        'regressed_rows': 0,
+        'unchanged_rows': 0,
+        'total_saved_moves': 0,
+        'total_added_moves': 0,
+        'net_delta_moves': 0,
+        'ok': False,
+    }
+    if baseline_csv is None or candidate_csv is None or not baseline_csv.exists() or not candidate_csv.exists():
+        summary['error'] = 'missing baseline or candidate CSV'
+        return summary
+
+    base_id, base_move = _infer_submission_columns(baseline_csv)
+    cand_id, cand_move = _infer_submission_columns(candidate_csv)
+    baseline: dict[str, tuple[int, str]] = {}
+    candidate: dict[str, tuple[int, str]] = {}
+    with baseline_csv.open(newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            rid = str(row.get(base_id, '')).strip()
+            path_value = str(row.get(base_move, '')).strip()
+            baseline[rid] = (len(_split_move_path(path_value)), path_value)
+    with candidate_csv.open(newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            rid = str(row.get(cand_id, '')).strip()
+            path_value = str(row.get(cand_move, '')).strip()
+            candidate[rid] = (len(_split_move_path(path_value)), path_value)
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=['id', 'baseline_len', 'candidate_len', 'delta', 'status'])
+        writer.writeheader()
+        for rid in sorted(set(baseline) | set(candidate)):
+            b = baseline.get(rid)
+            c = candidate.get(rid)
+            if b is None or c is None:
+                status = 'missing_candidate' if c is None else 'missing_baseline'
+                delta = None
+                b_len = b[0] if b is not None else None
+                c_len = c[0] if c is not None else None
+            else:
+                b_len, c_len = b[0], c[0]
+                delta = c_len - b_len
+                summary['rows_compared'] += 1
+                summary['net_delta_moves'] += delta
+                if delta < 0:
+                    summary['improved_rows'] += 1
+                    summary['total_saved_moves'] += -delta
+                    status = 'improved'
+                elif delta > 0:
+                    summary['regressed_rows'] += 1
+                    summary['total_added_moves'] += delta
+                    status = 'regressed'
+                else:
+                    summary['unchanged_rows'] += 1
+                    status = 'unchanged'
+            writer.writerow({'id': rid, 'baseline_len': b_len, 'candidate_len': c_len, 'delta': delta, 'status': status})
+    summary['ok'] = True
+    if out_json is not None:
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+    return summary
+
+def _submission_path_score(submission_csv: Path) -> int:
+    stats = _submission_guard_stats(submission_csv)
+    if stats.get('csv_error'):
+        raise ValueError(f"Could not score submission {submission_csv}: {stats.get('csv_error')}")
+    return int(stats.get('total_move_tokens') or 0)
 
 
 def _score_solver_with_submission(
@@ -2398,6 +2564,26 @@ def _score_solver_with_submission(
     vector_col_override: Optional[str] = None,
     max_rows: Optional[int] = None,
 ) -> int:
+    score, _ = _score_solver_with_submission_artifact(
+        spec=spec,
+        solver_path=solver_path,
+        puzzles_csv=puzzles_csv,
+        competition_format_slug=competition_format_slug,
+        vector_col_override=vector_col_override,
+        max_rows=max_rows,
+    )
+    return score
+
+
+def _score_solver_with_submission_artifact(
+    *,
+    spec: PipelineSpec,
+    solver_path: Path,
+    puzzles_csv: Path,
+    competition_format_slug: str,
+    vector_col_override: Optional[str] = None,
+    max_rows: Optional[int] = None,
+) -> tuple[int, Path]:
     temp_csv = solver_path.parent / f'.score_{solver_path.stem}.csv'
     _build_submission(
         puzzles_csv=puzzles_csv,
@@ -2409,7 +2595,7 @@ def _score_solver_with_submission(
         max_rows=max_rows,
         no_progress=True,
     )
-    return _submission_path_score(temp_csv)
+    return _submission_path_score(temp_csv), temp_csv
 
 
 def _generate_solver_with_optional_improvement(
@@ -2451,6 +2637,8 @@ def _generate_solver_with_optional_improvement(
     initial_baseline: Optional[Path] = None,
     candidate_round_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
     self_improve_prompts: bool = False,
+    reject_identical_candidates: bool = True,
+    write_per_row_delta: bool = True,
 ) -> dict[str, Any]:
     smoke_vectors = _resolve_smoke_vectors(spec)
     scoring_enabled = bool(keep_improving and puzzles_csv_for_score is not None)
@@ -2459,11 +2647,14 @@ def _generate_solver_with_optional_improvement(
     baseline_for_round = baseline_origin
     best_score: Optional[int] = None
     best_metric: Optional[dict[str, Any]] = None
+    best_submission_csv: Optional[Path] = None
+    best_solver_digest: Optional[str] = _file_sha256(baseline_origin)
+    best_submission_digest: Optional[str] = None
     score_history: list[dict[str, Any]] = []
 
     if scoring_enabled:
         try:
-            best_score = _score_solver_with_submission(
+            best_score, best_submission_csv = _score_solver_with_submission_artifact(
                 spec=spec,
                 solver_path=baseline_origin,
                 puzzles_csv=puzzles_csv_for_score,
@@ -2471,6 +2662,7 @@ def _generate_solver_with_optional_improvement(
                 vector_col_override=vector_col_override,
                 max_rows=max_rows,
             )
+            best_submission_digest = _submission_path_digest(best_submission_csv)
             best_metric = _adaptive_metric_from_round(local_score=best_score, round_result=None)
             print(f'[improve] baseline local score = {best_score}', flush=True)
         except Exception as e:
@@ -2549,8 +2741,12 @@ def _generate_solver_with_optional_improvement(
                     submitted_rounds.append(round_idx)
 
             candidate_score: Optional[int] = None
+            candidate_submission_csv: Optional[Path] = None
+            candidate_submission_digest: Optional[str] = None
+            candidate_solver_digest = _file_sha256(candidate_path)
+            per_row_delta_summary: Optional[dict[str, Any]] = None
             if scoring_enabled and puzzles_csv_for_score is not None:
-                candidate_score = _score_solver_with_submission(
+                candidate_score, candidate_submission_csv = _score_solver_with_submission_artifact(
                     spec=spec,
                     solver_path=candidate_path,
                     puzzles_csv=puzzles_csv_for_score,
@@ -2558,7 +2754,34 @@ def _generate_solver_with_optional_improvement(
                     vector_col_override=vector_col_override,
                     max_rows=max_rows,
                 )
+                candidate_submission_digest = _submission_path_digest(candidate_submission_csv)
                 print(f'[improve] round {round_idx}: local score = {candidate_score}', flush=True)
+                if write_per_row_delta and best_submission_csv is not None and candidate_submission_csv is not None:
+                    delta_csv = candidate_path.parent / f'{candidate_path.stem}.round{round_idx}.per_row_delta.csv'
+                    delta_json = candidate_path.parent / f'{candidate_path.stem}.round{round_idx}.per_row_delta.summary.json'
+                    per_row_delta_summary = _write_per_row_delta(
+                        baseline_csv=best_submission_csv,
+                        candidate_csv=candidate_submission_csv,
+                        out_csv=delta_csv,
+                        out_json=delta_json,
+                    )
+                    if per_row_delta_summary.get('ok'):
+                        print(
+                            f"[improve] round {round_idx}: per-row delta improved={per_row_delta_summary.get('improved_rows')} "
+                            f"regressed={per_row_delta_summary.get('regressed_rows')} net_delta={per_row_delta_summary.get('net_delta_moves')}",
+                            flush=True,
+                        )
+
+            novelty_report = {
+                'reject_identical_candidates': bool(reject_identical_candidates),
+                'candidate_solver_sha256': candidate_solver_digest,
+                'baseline_solver_sha256': best_solver_digest,
+                'candidate_submission_digest': candidate_submission_digest,
+                'baseline_submission_digest': best_submission_digest,
+                'identical_solver': bool(candidate_solver_digest and best_solver_digest and candidate_solver_digest == best_solver_digest),
+                'identical_submission': bool(candidate_submission_digest and best_submission_digest and candidate_submission_digest == best_submission_digest),
+                'per_row_delta': per_row_delta_summary,
+            }
 
             if candidate_round_hook is not None:
                 try:
@@ -2568,6 +2791,10 @@ def _generate_solver_with_optional_improvement(
                         'candidate_score': candidate_score,
                         'post_validation': round_hook_result,
                         'baseline_path': str(baseline_for_round),
+                        'candidate_submission_csv': str(candidate_submission_csv) if candidate_submission_csv else None,
+                        'candidate_solver_sha256': candidate_solver_digest,
+                        'candidate_submission_digest': candidate_submission_digest,
+                        'novelty_report': novelty_report,
                     })
                 except KeyboardInterrupt:
                     raise
@@ -2577,12 +2804,22 @@ def _generate_solver_with_optional_improvement(
             candidate_metric = _adaptive_metric_from_round(local_score=candidate_score, round_result=round_hook_result)
 
             accepted = False
+            rejection_reasons: list[str] = []
+            if reject_identical_candidates and keep_improving:
+                if novelty_report.get('identical_solver'):
+                    rejection_reasons.append('no_novelty_identical_solver')
+                if novelty_report.get('identical_submission'):
+                    rejection_reasons.append('no_novelty_identical_submission')
+                if per_row_delta_summary and per_row_delta_summary.get('ok') and int(per_row_delta_summary.get('improved_rows') or 0) <= 0:
+                    rejection_reasons.append('no_per_row_improvement')
             if not keep_improving:
                 accepted = True
             elif scoring_enabled:
                 accepted = _is_better_metric(best_metric, candidate_metric)
             else:
-                accepted = True
+                accepted = not rejection_reasons
+            if rejection_reasons:
+                accepted = False
 
             score_history.append({
                 'round': round_idx,
@@ -2591,6 +2828,9 @@ def _generate_solver_with_optional_improvement(
                 'accepted': accepted,
                 'path': str(candidate_path),
                 'post_validation': round_hook_result,
+                'novelty_report': novelty_report,
+                'rejection_reasons': rejection_reasons,
+                'failure_kind': rejection_reasons[0] if rejection_reasons else (None if accepted else 'score_not_improved'),
             })
 
             if accepted:
@@ -2602,6 +2842,9 @@ def _generate_solver_with_optional_improvement(
                 if scoring_enabled:
                     best_score = candidate_score
                     best_metric = candidate_metric
+                    best_submission_csv = candidate_submission_csv
+                    best_solver_digest = candidate_solver_digest
+                    best_submission_digest = candidate_submission_digest
                     metric_source = (candidate_metric or {}).get('source')
                     metric_value = (candidate_metric or {}).get('value')
                     print(f'[improve] accepted round {round_idx} as new best {metric_source}={metric_value}.', flush=True)
@@ -2610,7 +2853,8 @@ def _generate_solver_with_optional_improvement(
             elif scoring_enabled:
                 current_metric_source = (best_metric or {}).get('source')
                 current_metric_value = (best_metric or {}).get('value')
-                print(f'[improve] round {round_idx} did not improve {current_metric_source}={current_metric_value}; keeping round {best_round} output and continuing.', flush=True)
+                reason_text = ';'.join(rejection_reasons) if rejection_reasons else 'score_not_improved'
+                print(f'[improve] round {round_idx} rejected ({reason_text}); current best {current_metric_source}={current_metric_value}; keeping round {best_round} output and continuing.', flush=True)
         except KeyboardInterrupt:
             raise
         except SystemExit as e:
@@ -2654,6 +2898,13 @@ def _generate_solver_with_optional_improvement(
         'submitted_rounds': submitted_rounds,
         'selected_round_already_submitted': best_round in submitted_rounds if best_round is not None else False,
         'initial_baseline': str(baseline_origin),
+        'best_solver_sha256': best_solver_digest,
+        'best_submission_digest': best_submission_digest,
+        'best_submission_csv': str(best_submission_csv) if best_submission_csv else None,
+        'strict_guards': {
+            'reject_identical_candidates': bool(reject_identical_candidates),
+            'write_per_row_delta': bool(write_per_row_delta),
+        },
     }
 
 
@@ -2927,6 +3178,14 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         if not adaptive_baseline_info.get('enabled'):
             return
         solver_candidate = Path(str(payload['candidate_path']))
+        novelty = payload.get('novelty_report') if isinstance(payload.get('novelty_report'), dict) else {}
+        if novelty.get('identical_solver') or novelty.get('identical_submission'):
+            print('[adaptive-baseline] not promoting: identical solver/submission fingerprint', flush=True)
+            return
+        delta = novelty.get('per_row_delta') if isinstance(novelty.get('per_row_delta'), dict) else {}
+        if delta.get('ok') and int(delta.get('improved_rows') or 0) <= 0:
+            print('[adaptive-baseline] not promoting: no per-row improvement', flush=True)
+            return
         manifest = _persist_adaptive_baseline(
             spec=spec,
             prompt_file=prompt_file,
@@ -2981,6 +3240,8 @@ def cmd_generate_solver(args: argparse.Namespace) -> None:
         initial_baseline=effective_baseline,
         candidate_round_hook=_candidate_round_hook if adaptive_baseline_info.get('enabled') else None,
         self_improve_prompts=getattr(args, 'self_improve_prompts', False),
+        reject_identical_candidates=getattr(args, 'reject_identical_candidates', True),
+        write_per_row_delta=getattr(args, 'write_per_row_delta', True),
     )
     if args.keep_improving:
         print(f"[improve] best_round={result.get('best_round')} best_score={result.get('best_score')}", flush=True)
@@ -3340,6 +3601,14 @@ def cmd_run(args: argparse.Namespace) -> None:
     def _candidate_round_hook(payload: dict[str, Any]) -> None:
         if not adaptive_baseline_info.get('enabled') or prompt_file is None:
             return
+        novelty = payload.get('novelty_report') if isinstance(payload.get('novelty_report'), dict) else {}
+        if novelty.get('identical_solver') or novelty.get('identical_submission'):
+            print('[adaptive-baseline] not promoting: identical solver/submission fingerprint', flush=True)
+            return
+        delta = novelty.get('per_row_delta') if isinstance(novelty.get('per_row_delta'), dict) else {}
+        if delta.get('ok') and int(delta.get('improved_rows') or 0) <= 0:
+            print('[adaptive-baseline] not promoting: no per-row improvement', flush=True)
+            return
         manifest = _persist_adaptive_baseline(
             spec=spec,
             prompt_file=prompt_file,
@@ -3478,6 +3747,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 initial_baseline=effective_baseline,
                 candidate_round_hook=_candidate_round_hook if adaptive_baseline_info.get('enabled') else None,
                 self_improve_prompts=getattr(args, 'self_improve_prompts', False),
+                reject_identical_candidates=getattr(args, 'reject_identical_candidates', True),
+                write_per_row_delta=getattr(args, 'write_per_row_delta', True),
             )
             report['stages']['generate_solver']['improvement'] = improvement_result
             if per_round_submit_reports:
@@ -3561,6 +3832,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                     **submit_availability,
                 }
                 print(f"[kaggle] skipping final live submit: {submit_availability.get('reason')}", flush=True)
+                if getattr(args, 'require_submit_success', True):
+                    raise RuntimeError(f"Kaggle submit was required but unavailable: {submit_availability.get('reason')}")
             elif submit_during_improvement and improvement_result is not None and improvement_result.get('selected_round_already_submitted'):
                 report["kaggle_submit"] = {
                     "mode": "already_submitted_in_round",
@@ -3596,6 +3869,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 report["stages"]["submit_kaggle"]["end"] = time.time()
                 report["stages"]["submit_kaggle"]["seconds"] = report["stages"]["submit_kaggle"]["end"] - report["stages"]["submit_kaggle"]["start"]
                 _stage_done("submit to Kaggle", t3)
+                if getattr(args, 'require_submit_success', True) and not bool(kaggle_submit_report.get('submitted') or kaggle_submit_report.get('status')):
+                    raise RuntimeError(f"Kaggle submit was required but not confirmed: {kaggle_submit_report.get('error') or kaggle_submit_report}")
 
         report["status"] = "ok"
         print("[run] Done.")
@@ -3716,7 +3991,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--competition", required=True, help="Competition slug / pipeline key")
     sp.add_argument("--out", required=True, help="Output path for generated solver")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
-    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid", "neighbour_model_hybrid", "score_guarded", "algorithmic_population", "portfolio_orchestrated", "hard_row_routed", "exact_score_population"], help="Select a competition prompt bundle variant when available")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid", "neighbour_model_hybrid", "score_guarded", "algorithmic_population", "portfolio_orchestrated", "hard_row_routed", "exact_score_population", "strict_self_improvement"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override AgentLaboratory custom prompts JSON")
     sp.add_argument(
         "--models",
@@ -3757,6 +4032,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--keep-improving", action="store_true", help="Do not stop after the first validated solver; keep running additional locally scored improvement rounds.")
     sp.add_argument("--improvement-rounds", type=int, default=3, help="How many validated generation rounds to run when --keep-improving is enabled.")
     sp.add_argument("--self-improve-prompts", action="store_true", help="For competition-specific pipelines that support it, synthesize a stronger round-specific prompt bundle from the previous accepted solver before each new improvement round.")
+    sp.add_argument("--reject-identical-candidates", action=argparse.BooleanOptionalAction, default=True, help="Reject keep-improving candidates whose solver/submission fingerprint is identical to the current best artifact.")
+    sp.add_argument("--write-per-row-delta", action=argparse.BooleanOptionalAction, default=True, help="Write per-row candidate-vs-best move-count deltas for every locally scored improvement round.")
     sp.add_argument("--allow-baseline", action="store_true")
     sp.add_argument("--baseline", default=None, help="Optional explicit baseline solve_module.py override used for prompt grounding, fallback, and --no-llm.")
     sp.add_argument("--no-llm", action="store_true", help="Skip LLM: just copy baseline")
@@ -3799,7 +4076,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--puzzles", required=False, default=None, help="Input puzzles/test CSV (optional; uses bundled competitions/<slug>/data/test.csv if omitted)")
     sp.add_argument("--output", required=True, help="Submission CSV output")
     sp.add_argument("--prompt-file", default=None, help="Override user prompt file")
-    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid", "neighbour_model_hybrid", "score_guarded", "algorithmic_population", "portfolio_orchestrated", "hard_row_routed", "exact_score_population"], help="Select a competition prompt bundle variant when available")
+    sp.add_argument("--prompt-variant", default=None, choices=["regular", "improved", "dataset_adapted", "structured", "heuristic_boosted", "master_hybrid", "neighbour_model_hybrid", "score_guarded", "algorithmic_population", "portfolio_orchestrated", "hard_row_routed", "exact_score_population", "strict_self_improvement"], help="Select a competition prompt bundle variant when available")
     sp.add_argument("--custom-prompts", default=None, help="Override custom prompts JSON")
     sp.add_argument(
         "--models",
@@ -3840,6 +4117,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--keep-improving", action="store_true", help="Do not stop after the first validated solver; keep running additional locally scored improvement rounds.")
     sp.add_argument("--improvement-rounds", type=int, default=3, help="How many validated generation rounds to run when --keep-improving is enabled.")
     sp.add_argument("--self-improve-prompts", action="store_true", help="For competition-specific pipelines that support it, synthesize a stronger round-specific prompt bundle from the previous accepted solver before each new improvement round.")
+    sp.add_argument("--reject-identical-candidates", action=argparse.BooleanOptionalAction, default=True, help="Reject keep-improving candidates whose solver/submission fingerprint is identical to the current best artifact.")
+    sp.add_argument("--write-per-row-delta", action=argparse.BooleanOptionalAction, default=True, help="Write per-row candidate-vs-best move-count deltas for every locally scored improvement round.")
     sp.add_argument("--allow-baseline", action="store_true")
     sp.add_argument("--baseline", default=None, help="Optional explicit baseline solve_module.py override used for prompt grounding, fallback, and --no-llm.")
     sp.add_argument("--no-llm", action="store_true")
@@ -3848,6 +4127,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-rows", type=int, default=None)
     sp.add_argument("--no-progress", action="store_true", help="Disable progress bar")
     sp.add_argument("--submit", action="store_true")
+    sp.add_argument("--require-submit-success", action=argparse.BooleanOptionalAction, default=True, help="When --submit is enabled, fail the run unless Kaggle upload is confirmed.")
     sp.add_argument("--message", default=None, help="Kaggle submission message")
     sp.add_argument("--kaggle-json", default=None, help="Path to a Kaggle credentials file (legacy kaggle.json or access_token). If set, credentials are loaded for both API and CLI submission paths.")
     sp.add_argument("--kaggle-config-dir", default=None, help="Optional directory to place a temporary kaggle.json copy")

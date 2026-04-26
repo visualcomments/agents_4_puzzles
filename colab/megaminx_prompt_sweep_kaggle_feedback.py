@@ -134,6 +134,29 @@ MODEL_FAILURE_PATTERNS: Tuple[str, ...] = (
 )
 
 
+# Fallback artifacts must remain failed attempts even when the lower layer exits with rc=0
+# and creates a CSV. Keep these markers specific so a legitimate solver may still use
+# the word "fallback" internally for safe in-algorithm rollback logic.
+FALLBACK_ARTIFACT_PATTERNS: Tuple[str, ...] = (
+    "sample_submission fallback",
+    "sample submission fallback",
+    "using bundled sample submission",
+    "copied sample_submission",
+    "copied sample submission",
+    "fallback to sample_submission",
+    "fallback to sample submission",
+    "known-good offline baseline",
+    "known-good baseline",
+    "reference baseline fallback",
+    "offline baseline fallback",
+    "llm generation failed",
+    "llm_generation_failed",
+    "generation failed; using baseline",
+    "using fallback baseline",
+    "emergency fallback",
+)
+
+
 def _read_text_if_exists(path: Optional[Path], max_chars: int = 200000) -> str:
     if path is None or not path.exists():
         return ""
@@ -182,6 +205,63 @@ def detect_model_failure(run_payload: Dict[str, Any], stdout_log: Optional[Path]
                 if any(p in err for p in MODEL_FAILURE_PATTERNS):
                     return True, [p for p in MODEL_FAILURE_PATTERNS if p in err]
     return False, []
+
+
+def _safe_int_metric(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def classify_generated_attempt_success(
+    *,
+    rc: int,
+    csv_exists: bool,
+    solver_path: Optional[Path],
+    model_failure: bool,
+    model_failure_markers: List[str],
+    submission_stats: Dict[str, Any],
+    run_payload: Dict[str, Any],
+    stdout_log: Optional[Path],
+) -> Tuple[bool, List[str]]:
+    """Classify a prompt/model attempt using artifact quality, not just process exit code.
+
+    A successful prompt must generate an importable solver artifact and a non-empty
+    submission without UNSOLVED/blank rows. Any provider, baseline, or sample-submission
+    fallback remains a failed attempt and is copied to failed_scripts.
+    """
+    reasons: List[str] = []
+    if rc != 0:
+        reasons.append(f"nonzero_returncode:{rc}")
+    if not csv_exists:
+        reasons.append("missing_output_csv")
+    if model_failure:
+        joined = ";".join(model_failure_markers) if model_failure_markers else "unknown"
+        reasons.append(f"model_failure_or_lower_layer_fallback:{joined}")
+    if solver_path is None or not solver_path.exists():
+        reasons.append("missing_generated_solver")
+
+    rows = _safe_int_metric(submission_stats.get("row_count"))
+    empty_rows = _safe_int_metric(submission_stats.get("empty_rows")) or 0
+    unsolved_rows = _safe_int_metric(submission_stats.get("unsolved_rows")) or 0
+    if rows is None or rows <= 0:
+        reasons.append("empty_or_unreadable_submission")
+    if empty_rows > 0:
+        reasons.append(f"submission_has_empty_rows:{empty_rows}")
+    if unsolved_rows > 0:
+        reasons.append(f"submission_has_unsolved_rows:{unsolved_rows}")
+    if submission_stats.get("csv_error"):
+        reasons.append(f"submission_csv_error:{submission_stats.get('csv_error')}")
+
+    artifact_text = _collect_model_failure_text(run_payload, stdout_log).lower()
+    artifact_markers = [p for p in FALLBACK_ARTIFACT_PATTERNS if p in artifact_text]
+    if artifact_markers:
+        reasons.append("fallback_artifact_markers:" + ";".join(artifact_markers))
+
+    return (len(reasons) == 0), reasons
 
 
 def utc_now() -> str:
@@ -1062,6 +1142,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--g4f-request-timeout", type=float, default=None)
     parser.add_argument("--g4f-stop-at-python-fence", choices=["auto", "on", "off"], default="auto")
     parser.add_argument("--submit", action="store_true", help="Submit every successful prompt output to Kaggle.")
+    parser.add_argument("--require-submit-success", action=argparse.BooleanOptionalAction, default=True, help="When --submit is enabled, classify a round as successful only if Kaggle upload is confirmed.")
     parser.add_argument("--submit-via", choices=["cli", "api", "auto"], default="cli")
     parser.add_argument("--kaggle-json", default=None)
     parser.add_argument("--score-polls", type=int, default=6)
@@ -1140,9 +1221,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             solver_path = Path(run_payload.get("solver", "")) if run_payload.get("solver") else None
             csv_exists = output_csv.exists()
             model_failure, model_failure_markers = detect_model_failure(run_payload, stdout_log)
-            # A CSV created by offline/baseline fallback is useful as an artifact, but it is
-            # not proof that the selected g4f model worked. Continue to the next model.
-            attempt_ok = (rc == 0) and csv_exists and not model_failure
+            attempt_submission_stats = csv_submission_stats(output_csv if csv_exists else None)
+            # A CSV created by offline/baseline/sample-submission fallback is useful as an
+            # artifact, but it is not proof that the selected model generated a valid solver.
+            # Keep those attempts failed and continue to the next fallback model.
+            attempt_ok, attempt_failure_reasons = classify_generated_attempt_success(
+                rc=rc,
+                csv_exists=csv_exists,
+                solver_path=solver_path,
+                model_failure=model_failure,
+                model_failure_markers=model_failure_markers,
+                submission_stats=attempt_submission_stats,
+                run_payload=run_payload,
+                stdout_log=stdout_log,
+            )
             attempt = {
                 "attempt_index": model_idx,
                 "model": model_name,
@@ -1157,6 +1249,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "csv_exists": csv_exists,
                 "model_failure_detected": model_failure,
                 "model_failure_markers": ";".join(model_failure_markers),
+                "attempt_failure_reasons": attempt_failure_reasons,
+                "attempt_submission_stats": attempt_submission_stats,
                 "solver_path": str(solver_path) if solver_path else None,
             }
             model_attempts.append(attempt)
@@ -1172,7 +1266,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if model_failure:
                 print(f"[model-fallback] model={model_name} produced only fallback/provider failure markers={model_failure_markers}; trying next fallback if available")
             else:
-                print(f"[model-fallback] failed with model={model_name}; trying next fallback if available")
+                print(f"[model-fallback] failed with model={model_name}; reasons={attempt_failure_reasons}; trying next fallback if available")
 
         chosen_attempt = successful_attempt or (model_attempts[-1] if model_attempts else {})
         output_csv = Path(chosen_attempt.get("output_csv", outputs_dir / f"{round_slug}.csv"))
@@ -1192,6 +1286,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         submission_stats = csv_submission_stats(output_csv if output_csv.exists() else None)
         kaggle_report: Dict[str, Any] = {"submitted": False, "skipped": True}
         kaggle_score: Dict[str, Any] = {"score": None, "status": "not_submitted"}
+        submit_required_failure: Optional[str] = None
         if ok and args.submit:
             message = f"{args.message_prefix} | {round_slug} | {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
             submit_log = logs_dir / f"{round_slug}.kaggle_submit.log"
@@ -1216,6 +1311,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     polls=args.score_polls,
                     sleep_seconds=args.score_poll_sleep,
                 )
+        if ok and args.submit and args.require_submit_success and not kaggle_report.get("submitted"):
+            submit_required_failure = "kaggle_submit_required_but_not_confirmed"
+            ok = False
+            copy_if_exists(solver_path, failed_dir, prefix=f"{round_slug}__submit_failed__")
+            copy_if_exists(stdout_log, failed_dir, prefix=f"{round_slug}__submit_failed__")
+            copy_if_exists(run_log, failed_dir, prefix=f"{round_slug}__submit_failed__")
+            copy_if_exists(output_csv if output_csv.exists() else None, failed_dir, prefix=f"{round_slug}__submit_failed__")
+            print("[kaggle] submit was required but was not confirmed; classifying this round as failed", flush=True)
         score = kaggle_score.get("score") if isinstance(kaggle_score, dict) else None
         decision = state.update(round_idx=round_idx, variant=variant, ok=ok, score=parse_float(score))
         if state.breakthrough_pressure > 0:
@@ -1240,6 +1343,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "copied_solver": str(copied_solver) if copied_solver else None,
             "kaggle": kaggle_report,
             "kaggle_score": kaggle_score,
+            "submit_required_failure": submit_required_failure,
             "strategy_decision": decision,
             "remaining_queue_after_decision": reorder_queue(list(queue), state),
         }
@@ -1259,6 +1363,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "model_fallbacks": model_fallbacks,
         "success_count": sum(1 for r in records if r.get("ok")),
         "failure_count": sum(1 for r in records if not r.get("ok")),
+        "submit_required": bool(args.submit and args.require_submit_success),
+        "submitted_success_count": sum(1 for r in records if isinstance(r.get("kaggle"), dict) and r["kaggle"].get("submitted")),
         "best_score": state.best_score,
         "best_variant": state.best_variant,
         "best_round": state.best_round,

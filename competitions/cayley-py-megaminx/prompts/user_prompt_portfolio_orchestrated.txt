@@ -163,3 +163,11 @@ JSON EXAMPLE:
   "code": "from __future__ import annotations\n\nimport json\n\n\ndef solve(vec):\n    return [], list(vec)\n"
 }
 - The produced code must be self-contained and runnable.
+
+## Success gate and anti-fallback requirements (added 2026-04-26)
+- A round is successful only when you generate a real, importable solver script plus a valid non-empty Kaggle submission CSV. Fallback artifacts, copied `sample_submission.csv`, offline baseline placeholders, `UNSOLVED` rows, empty move strings, or provider-failure recovery outputs are failed attempts and must not be described as success.
+- Keep the known-good exact lookup / exact replay path first. Then add only rollback-safe improvements: bounded exact local rewrites, deterministic candidate portfolios, semantic replay guards, and score-regression checks.
+- Do not trade correctness for ambition. If a heuristic cannot be replay-verified on the official CayleyPy move algebra, reject it and keep the best verified candidate for that row.
+- Preserve the required script contract: official legal moves only, deterministic output, compile/import cleanly, generate `submission.csv`, and keep stdout JSON parseable for the sweep pipeline.
+- Never emit code that silently falls back to sample submissions, bundled baseline CSVs, or placeholder `UNSOLVED` records. If generation is uncertain, produce the smallest compile-valid solver with exact lookup and verified local optimizer rather than a broken large rewrite.
+

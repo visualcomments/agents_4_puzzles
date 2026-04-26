@@ -215,6 +215,34 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
     priority=103,
 ),
 
+"no_novelty_rejection": Directive(
+    key="no_novelty_rejection",
+    title="No-novelty rejection",
+    instruction=(
+        "Produce a candidate that changes a real optimization lane, not only comments, wrappers, lookup replay, or optimized_submission copying; the outer loop rejects identical solver hashes and identical submission digests."
+    ),
+    rationale="The failed sweep repeatedly produced byte-identical scripts and identical submissions, so prompt evolution must explicitly demand measurable novelty.",
+    priority=112,
+),
+"per_row_delta_acceptance": Directive(
+    key="per_row_delta_acceptance",
+    title="Per-row delta acceptance",
+    instruction=(
+        "Design the solver so its contribution can be evaluated row-by-row; aim for at least one exact-valid improved row with zero regressions, and make rollback deterministic for unchanged/regressed rows."
+    ),
+    rationale="A full-score tie hides whether the candidate made any useful row-level contribution; per-row deltas make improvement executable and auditable.",
+    priority=111,
+),
+"provider_preflight_no_fallback": Directive(
+    key="provider_preflight_no_fallback",
+    title="Provider preflight and no fallback promotion",
+    instruction=(
+        "Do not convert provider failure, timeout, sample-submission fallback, or offline baseline recovery into a successful solver; fail explicitly when generation did not produce a new exact-valid algorithm."
+    ),
+    rationale="The failed archive contained rc=0 fallback artifacts from provider failures; these must remain failed attempts and should not guide algorithmic promotion.",
+    priority=110,
+),
+
 }
 
 
@@ -258,6 +286,10 @@ def _error_bucket(entry: Dict[str, Any]) -> str | None:
         return "validation"
     if any(token in text for token in ("syntax", "import", "traceback", "exception", "compile", "typeerror", "nameerror")):
         return "runtime"
+    if any(token in text for token in ("no_novelty", "identical", "same submission", "zero improved rows", "no_per_row_improvement")):
+        return "no_novelty"
+    if any(token in text for token in ("credentials required", "provider", "timeout", "offline fallback", "sample_submission fallback")):
+        return "provider_or_fallback"
     return "other"
 
 
@@ -271,6 +303,8 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
         "validation_failures": 0,
         "runtime_failures": 0,
         "other_failures": 0,
+        "no_novelty_failures": 0,
+        "provider_or_fallback_failures": 0,
         "validated_not_selected": 0,
         "plateau": False,
         "score_regressions": 0,
@@ -301,6 +335,10 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
                 signals["validation_failures"] += 1
             elif bucket == "runtime":
                 signals["runtime_failures"] += 1
+            elif bucket == "no_novelty":
+                signals["no_novelty_failures"] += 1
+            elif bucket == "provider_or_fallback":
+                signals["provider_or_fallback_failures"] += 1
             else:
                 signals["other_failures"] += 1
             continue
@@ -348,18 +386,23 @@ def select_directives(
     if plateau or round_idx >= 2:
         add("prompt_population_search")
         add("exact_evaluator_shard")
+        add("provider_preflight_no_fallback")
         add("solver_archive_lineage")
         add("patch_fresh_lane_split")
         add("pareto_candidate_selection")
         add("portfolio_orchestration")
         add("exact_metric_acceptance")
         add("shadow_split_benchmarking")
+        add("no_novelty_rejection")
+        add("per_row_delta_acceptance")
 
     if history_signals.get("plateau"):
         add("policy_ablation_search")
         add("score_regression_guard")
         add("semantic_equivalence_replay")
         add("hard_row_routing")
+        add("no_novelty_rejection")
+        add("per_row_delta_acceptance")
         add("portfolio_orchestration")
         add("exact_metric_acceptance")
     if history_signals.get("validation_failures") or history_signals.get("runtime_failures"):
