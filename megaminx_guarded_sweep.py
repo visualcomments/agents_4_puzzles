@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Strict Megaminx prompt sweep runner.
 
-This wrapper runs pipeline_cli.py with the self-improvement guards added in this
-archive:
+This wrapper auto-installs https://github.com/visualcomments/agents_4_puzzles
+when it is launched outside a local repo checkout, then runs pipeline_cli.py with
+the self-improvement guards added in this archive:
 - provider/Kaggle preflight before submit runs;
 - no fallback/sample/offline baseline counted as success;
 - no promotion for identical solver/submission fingerprints;
 - per-row delta artifacts for every locally scored improvement round;
 - Kaggle submit required to succeed when --submit is used.
 
-Example:
+Example from an empty directory:
+    python megaminx_guarded_sweep.py \
+      --install-dir ./agents_4_puzzles \
+
+Example inside an existing repo:
     python megaminx_guarded_sweep.py \
       --competition cayley-py-megaminx \
       --variants strict_self_improvement,score_guarded \
@@ -35,6 +40,9 @@ from typing import Any, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent
 PYTHON = sys.executable
+DEFAULT_REPO_URL = "https://github.com/visualcomments/agents_4_puzzles.git"
+DEFAULT_INSTALL_DIR = "agents_4_puzzles"
+
 
 FALLBACK_MARKERS = (
     "sample_submission fallback",
@@ -68,6 +76,90 @@ def read_text(path: Optional[Path], max_chars: int = 300000) -> str:
         return ""
     text = path.read_text(encoding="utf-8", errors="replace")
     return text[-max_chars:] if len(text) > max_chars else text
+
+
+def normalize_run_report(raw: Any) -> dict[str, Any]:
+    """Normalize pipeline_cli run-log payloads to a single dict.
+
+    pipeline_cli.py may write run_log.json either as a single JSON object or
+    as a JSON list of event/report objects. The guarded sweep runner expects
+    dict-like access, so list payloads are folded into one report while keeping
+    solver/output paths, stages, and Kaggle submit diagnostics.
+    """
+    if isinstance(raw, dict):
+        return raw
+
+    if isinstance(raw, list):
+        dicts = [x for x in raw if isinstance(x, dict)]
+        if not dicts:
+            return {
+                "status": "error",
+                "error": {
+                    "type": "RunLogShapeError",
+                    "message": "run_log.json was a list but contained no dict events",
+                },
+                "_run_log_shape": "list",
+                "_run_log_event_count": len(raw),
+            }
+
+        primary = next(
+            (
+                d for d in dicts
+                if any(k in d for k in ("solver", "output_csv", "stages", "files", "kaggle_submit"))
+            ),
+            dicts[-1],
+        )
+        out = dict(primary)
+
+        for event in dicts:
+            for key, value in event.items():
+                if value in (None, "", [], {}):
+                    continue
+                if key not in out or out.get(key) in (None, "", [], {}):
+                    out[key] = value
+                elif isinstance(out.get(key), dict) and isinstance(value, dict):
+                    merged = dict(out[key])
+                    merged.update(value)
+                    out[key] = merged
+
+        out["_run_log_shape"] = "list"
+        out["_run_log_event_count"] = len(raw)
+        return out
+
+    return {
+        "status": "error",
+        "error": {
+            "type": "RunLogShapeError",
+            "message": f"run_log.json had unsupported top-level type: {type(raw).__name__}",
+        },
+        "_run_log_shape": type(raw).__name__,
+    }
+
+
+def load_run_report(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return normalize_run_report(raw)
+    except Exception as exc:
+        return {"status": "error", "error": {"type": type(exc).__name__, "message": str(exc)}}
+
+
+def report_path(report: dict[str, Any], key: str) -> Optional[Path]:
+    value = report.get(key)
+    if not value:
+        files = report.get("files")
+        if isinstance(files, dict):
+            item = files.get(key)
+            if isinstance(item, dict):
+                value = item.get("path")
+            elif isinstance(item, str):
+                value = item
+    if not value:
+        return None
+    try:
+        return Path(str(value))
+    except Exception:
+        return None
 
 
 def sha256_file(path: Optional[Path]) -> Optional[str]:
@@ -191,6 +283,121 @@ def classify_attempt(*, rc: int, stdout: str, run_report: dict[str, Any], submis
     return len(reasons) == 0, reasons
 
 
+def has_python_module(module_name: str) -> bool:
+    """Return True when module_name can be imported by the current Python."""
+    try:
+        probe = subprocess.run(
+            [PYTHON, "-c", f"import {module_name}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=20,
+        )
+        return probe.returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"[setup] warning: import probe timed out for module {module_name}")
+        return False
+
+
+def run_setup_cmd(cmd: list[str], *, cwd: Optional[Path] = None) -> None:
+    print("[setup] " + " ".join(cmd))
+    proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True)
+    if proc.returncode != 0:
+        raise SystemExit(f"setup command failed with rc={proc.returncode}: {' '.join(cmd)}")
+
+
+def looks_like_repo_root(path: Path) -> bool:
+    return (path / "pipeline_cli.py").exists() and (path / "competitions").exists()
+
+
+def git_clone_or_update(*, repo_url: str, install_dir: Path, branch: str, force_reinstall: bool, update_repo: bool) -> Path:
+    install_dir = install_dir.expanduser().resolve()
+    if force_reinstall and install_dir.exists():
+        print(f"[setup] removing existing install-dir: {install_dir}")
+        shutil.rmtree(install_dir)
+    if not install_dir.exists():
+        cmd = ["git", "clone", "--depth", "1"]
+        if branch:
+            cmd.extend(["--branch", branch])
+        cmd.extend([repo_url, str(install_dir)])
+        run_setup_cmd(cmd)
+    elif looks_like_repo_root(install_dir):
+        if update_repo and (install_dir / ".git").exists():
+            run_setup_cmd(["git", "pull", "--ff-only"], cwd=install_dir)
+    else:
+        raise SystemExit(
+            f"install-dir exists but is not an agents_4_puzzles repo: {install_dir}. "
+            "Pass --force-reinstall or choose another --install-dir."
+        )
+    if not looks_like_repo_root(install_dir):
+        raise SystemExit(f"cloned directory does not look like agents_4_puzzles repo: {install_dir}")
+    return install_dir
+
+
+def maybe_install_dependencies(args: argparse.Namespace, repo: Path) -> None:
+    mode = str(getattr(args, "install_deps", "auto") or "auto")
+    if mode == "none":
+        return
+    if mode == "full":
+        req = repo / "requirements-full.txt"
+        if req.exists():
+            run_setup_cmd([PYTHON, "-m", "pip", "install", "-r", str(req)], cwd=repo)
+        else:
+            run_setup_cmd([PYTHON, "-m", "pip", "install", "kaggle", "g4f"], cwd=repo)
+        return
+    # auto mode: install only packages that this run likely needs and that are missing.
+    packages: list[str] = []
+    models = parse_csv_list(str(getattr(args, "models", "")))
+    wants_g4f = any(m.lower().startswith("g4f:") for m in models)
+    wants_kaggle = bool(getattr(args, "submit", False) or getattr(args, "kaggle_json", ""))
+    if wants_kaggle and not has_python_module("kaggle"):
+        packages.append("kaggle")
+    if wants_g4f and not has_python_module("g4f") and not (repo / "gpt4free").exists():
+        packages.append("g4f")
+    if packages:
+        run_setup_cmd([PYTHON, "-m", "pip", "install", *packages], cwd=repo)
+
+
+def copy_local_guarded_runner(repo: Path) -> None:
+    """Copy this runner into the cloned repo for reproducibility, if needed."""
+    src = Path(__file__).resolve()
+    dst = repo / src.name
+    try:
+        if src.resolve() != dst.resolve():
+            shutil.copy2(src, dst)
+            print(f"[setup] copied runner to {dst}")
+    except Exception as exc:
+        print(f"[setup] warning: could not copy runner into repo: {exc}")
+
+
+def ensure_repository(args: argparse.Namespace) -> Path:
+    """Resolve or clone the agents_4_puzzles repo before running the sweep."""
+    explicit_repo = str(getattr(args, "repo_dir", "") or "").strip()
+    if explicit_repo:
+        repo = Path(explicit_repo).expanduser().resolve()
+        if not looks_like_repo_root(repo):
+            raise SystemExit(f"--repo-dir does not look like agents_4_puzzles repo: {repo}")
+        maybe_install_dependencies(args, repo)
+        return repo
+
+    # If the script is already inside a repo checkout, prefer that checkout.
+    if looks_like_repo_root(REPO_ROOT):
+        repo = REPO_ROOT.resolve()
+        maybe_install_dependencies(args, repo)
+        return repo
+
+    repo = git_clone_or_update(
+        repo_url=str(getattr(args, "repo_url", DEFAULT_REPO_URL) or DEFAULT_REPO_URL),
+        install_dir=Path(str(getattr(args, "install_dir", DEFAULT_INSTALL_DIR) or DEFAULT_INSTALL_DIR)),
+        branch=str(getattr(args, "branch", "") or ""),
+        force_reinstall=bool(getattr(args, "force_reinstall", False)),
+        update_repo=bool(getattr(args, "update_repo", True)),
+    )
+    maybe_install_dependencies(args, repo)
+    copy_local_guarded_runner(repo)
+    return repo
+
+
 def run_cmd(cmd: list[str], *, cwd: Path, log_path: Path, timeout: Optional[int]) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log:
@@ -215,7 +422,13 @@ def parse_csv_list(value: str) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run strict guarded Megaminx prompt sweep")
-    p.add_argument("--repo-dir", default=str(REPO_ROOT))
+    p.add_argument("--repo-dir", default="", help="Existing agents_4_puzzles repo. If omitted, use current repo or auto-clone --repo-url into --install-dir.")
+    p.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="Git URL to clone when no local repo is found.")
+    p.add_argument("--install-dir", default=DEFAULT_INSTALL_DIR, help="Where to clone the repo when --repo-dir is omitted and the script is not inside a repo.")
+    p.add_argument("--branch", default="", help="Optional branch/tag to clone.")
+    p.add_argument("--force-reinstall", action="store_true", help="Delete --install-dir and clone it again.")
+    p.add_argument("--update-repo", action=argparse.BooleanOptionalAction, default=True, help="Run git pull --ff-only for an existing git checkout in --install-dir.")
+    p.add_argument("--install-deps", choices=["auto", "none", "full"], default="auto", help="Dependency install mode. auto installs only missing kaggle/g4f when needed.")
     p.add_argument("--competition", default="cayley-py-megaminx")
     p.add_argument("--variants", default="strict_self_improvement,score_guarded,hard_row_routed,exact_score_population")
     p.add_argument("--models", default="g4f:gpt-4o-mini")
@@ -237,7 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    repo = Path(args.repo_dir).resolve()
+    repo = ensure_repository(args)
     run_dir = (repo / args.output_root / args.run_name).resolve()
     logs = run_dir / "logs"
     subs = run_dir / "submissions"
@@ -301,11 +514,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             seconds = time.time() - started
             report: dict[str, Any] = {}
             if run_log.exists():
-                try:
-                    report = json.loads(run_log.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    report = {"status": "error", "error": {"type": type(exc).__name__, "message": str(exc)}}
-            solver_path = Path(report.get("solver", "")) if report.get("solver") else None
+                report = load_run_report(run_log)
+            solver_path = report_path(report, "solver")
             ok, reasons = classify_attempt(
                 rc=rc,
                 stdout=read_text(stdout_log),
