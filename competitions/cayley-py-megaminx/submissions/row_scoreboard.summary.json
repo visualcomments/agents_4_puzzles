@@ -1,9 +1,0 @@
-{
-  "rows": 5,
-  "score": 150,
-  "min_len": 10,
-  "median_len": 30,
-  "p90_len": 50,
-  "p95_len": 50,
-  "max_len": 50
-}

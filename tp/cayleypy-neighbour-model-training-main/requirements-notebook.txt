@@ -1,6 +1,0 @@
-# Optional extras for `notebooks/compare_models.ipynb`
--r requirements.txt
-
-pandas>=2.2
-numpy>=1.26
-matplotlib>=3.8

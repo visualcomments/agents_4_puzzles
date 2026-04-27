@@ -1,5 +1,0 @@
-{
-  "planner": "You are solving CayleyPy RapaportM2. Produce a polynomial-time plan only. First allow an exact bundled-data lookup baseline when the vector matches bundled test data; otherwise use only legal moves I, S, K and the constructive cycle-order insertion-sort method. No BFS/DFS/A* and never invent other move symbols.",
-  "coder": "Write a self-contained solve_module.py for RapaportM2. Preserve solve(vec)->(moves, sorted_array) and script-mode JSON output. Every emitted move must be exactly one of I, S, K. Prefer: (1) exact lookup from bundled test/sample files when present, (2) otherwise the constructive cycle-order algorithm using C = S then K and conjugation P + [I] + reverse(P). Return exactly one complete Python file inside one ```python``` block and nothing else.",
-  "fixer": "Fix the RapaportM2 solver but keep it polynomial-time and contract-safe. Preserve exact move tokens I, S, K only, and keep any bundled-data lookup or cycle-order constructive logic intact. Return exactly one complete Python file inside one ```python``` block. Prefer a minimal patch."
-}

@@ -1,2 +1,0 @@
-Extract close to the drive root, e.g. C:\a4p\
-This archive was repacked with shorter internal paths for Windows.

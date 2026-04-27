@@ -1,3 +1,0 @@
-# Intentionally left without Git LFS tracking.
-# Real neighbour-model checkpoints are fetched on demand via:
-#   python scripts/fetch_megaminx_neighbour_weights.py
