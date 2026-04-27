@@ -1,0 +1,93 @@
+We are solving the Kaggle competition "CayleyPy Megaminx Solve Optimally":
+https://www.kaggle.com/competitions/cayley-py-megaminx
+
+I need a Python module `solve_module.py` that preserves the exact bundled-state lookup pipeline and upgrades the path optimizer using ideas adapted from several inspected Megaminx datasets.
+
+PRIMARY GOAL
+Produce the best bundled-data score you can while keeping the solver fully deterministic, standard-library only, and competition-contract safe.
+
+ABSOLUTE REQUIREMENTS
+- Start from the exact best-tested bundled-data baseline code below and improve it rather than replacing it with a risky generic solver.
+- Preserve `solve(vec) -> (moves, sorted_array)`.
+- Preserve script mode:
+  `python solve_module.py "[1,2,3]"`
+  -> `{"moves": [...], "sorted_array": [...]}`
+- Use ONLY official move names from `puzzle_info.json`.
+- Do NOT invent moves or rename generators internally.
+- Returned `sorted_array` must be the actual state obtained by replaying the returned moves.
+- Keep exact bundled lookup compatibility with:
+  - `optimized_lookup.json` if present,
+  - bundled optimized submission if present,
+  - otherwise deterministic rebuilding from `sample_submission.csv`.
+
+COMPETITION CONTEXT
+- State vectors have length 120.
+- The solved state is `central_state` from `puzzle_info.json`.
+- All legal moves are order-5 Megaminx face turns and their inverses from `puzzle_info.json`.
+- Submission paths are dot-separated move names.
+- The Kaggle score is the total number of moves across all 1001 test states.
+- `sample_submission.csv` is valid but strongly non-optimal, so exact path rewriting over the provided valid paths is a correct strategy.
+
+DATASET-ADAPTED IDEAS TO USE
+1. From meet-in-the-middle / hash-table Megaminx solvers:
+   - use a stronger fixed-depth exact local effect table;
+   - use deterministic lookup of shortest short words;
+   - keep the precomputation radius constant.
+
+2. From pruning-table / coordinate-based last-layer solvers:
+   - prefer compact cached representations of local move effects;
+   - avoid recomputing composed permutations repeatedly;
+   - prune obvious inverse backtracking while building short exact tables.
+
+3. From dodecahedron cycle-based simulators:
+   - respect the true order-5 face structure;
+   - derive commutation only from the official permutations in `puzzle_info.json`;
+   - use that commutation graph for canonicalization.
+
+RECOMMENDED IMPROVEMENTS
+- fixed-radius exact short-word table at depth 5 if practical;
+- stronger commuting normalization using the official generator commutation graph;
+- bounded-window dynamic programming over local segments;
+- multiple optimization passes until convergence or a small fixed pass limit;
+- caching of permutation bytes and exact short words;
+- preserve exact bundled validity first, then improve path compression.
+
+FORBIDDEN APPROACHES
+- replacing the bundled-data solver with a generic heuristic that can fail on bundled rows;
+- BFS / DFS / A* / IDA* / beam search whose depth grows with the instance;
+- whole-state-space search;
+- returning `UNSOLVED` for bundled rows that the baseline solves;
+- non-deterministic or provider-dependent behaviour.
+
+IMPLEMENTATION STYLE
+- Keep the code readable and well-factored.
+- Standard library only.
+- Prefer exact local equivalence replacement over speculative heuristics.
+- Preserve backwards compatibility with the existing competition folder layout.
+
+STRICT OUTPUT REQUIREMENTS:
+- Return exactly one JSON object and no prose outside JSON.
+- The JSON object must contain exactly these keys: version, artifact_type, language, filename, code.
+- Set version='code_response.v2', artifact_type='python_module', language='python', filename='solve_module.py'.
+- Put the entire Python file only inside the code string.
+- Do not wrap the code in markdown fences inside the JSON string.
+- Do not include explanations, bullet points, extra keys, or commentary before or after the JSON object.
+- Inside the code, omit comments and docstrings unless they are absolutely necessary.
+- Preserve the public solve(vec) entrypoint and the script-mode JSON stdout contract with keys moves and sorted_array.
+JSON EXAMPLE:
+{
+  "version": "code_response.v2",
+  "artifact_type": "python_module",
+  "language": "python",
+  "filename": "solve_module.py",
+  "code": "from __future__ import annotations\\n\\nimport json\\n\\n\\ndef solve(vec):\\n    return [], list(vec)\\n"
+}
+- The produced code must be self-contained and runnable.
+
+## Success gate and anti-fallback requirements (added 2026-04-26)
+- A round is successful only when you generate a real, importable solver script plus a valid non-empty Kaggle submission CSV. Fallback artifacts, copied `sample_submission.csv`, offline baseline placeholders, `UNSOLVED` rows, empty move strings, or provider-failure recovery outputs are failed attempts and must not be described as success.
+- Keep the known-good exact lookup / exact replay path first. Then add only rollback-safe improvements: bounded exact local rewrites, deterministic candidate portfolios, semantic replay guards, and score-regression checks.
+- Do not trade correctness for ambition. If a heuristic cannot be replay-verified on the official CayleyPy move algebra, reject it and keep the best verified candidate for that row.
+- Preserve the required script contract: official legal moves only, deterministic output, compile/import cleanly, generate `submission.csv`, and keep stdout JSON parseable for the sweep pipeline.
+- Never emit code that silently falls back to sample submissions, bundled baseline CSVs, or placeholder `UNSOLVED` records. If generation is uncertain, produce the smallest compile-valid solver with exact lookup and verified local optimizer rather than a broken large rewrite.
+

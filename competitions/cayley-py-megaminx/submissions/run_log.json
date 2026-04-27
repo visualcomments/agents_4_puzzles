@@ -1,0 +1,313 @@
+[
+  {
+    "ts": "2026-03-22T15:32:43.759918",
+    "cmd": "run",
+    "pipeline": "cayley-py-megaminx",
+    "competition": "cayley-py-megaminx",
+    "format": "cayley-py-megaminx",
+    "puzzles_csv": "/mnt/data/repo_final/competitions/cayley-py-megaminx/data/test.csv",
+    "output_csv": "/mnt/data/repo_final/competitions/cayley-py-megaminx/submissions/_smoke_submission.csv",
+    "solver": "/mnt/data/repo_final/generated/solve_cayley-py-megaminx_20260322_153243.py",
+    "args": {
+      "no_llm": true,
+      "models": "gpt-4o-mini",
+      "agent_models": null,
+      "planner_models": null,
+      "coder_models": null,
+      "fixer_models": null,
+      "search_mode": "hybrid",
+      "plan_beam_width": 3,
+      "frontier_width": 6,
+      "archive_size": 6,
+      "refine_rounds": 1,
+      "max_iters": 8,
+      "print_generation": false,
+      "print_generation_max_chars": null,
+      "g4f_async": null,
+      "max_response_chars": null,
+      "g4f_request_timeout": null,
+      "g4f_stop_at_python_fence": null,
+      "vector_col": null,
+      "max_rows": null,
+      "submit": false,
+      "submit_via": "auto",
+      "submit_competition": null
+    },
+    "stages": {
+      "generate_solver": {
+        "start": 1774193563.7895744,
+        "end": 1774193563.7922192,
+        "seconds": 0.002644777297973633
+      },
+      "validate_solver": {
+        "start": 1774193563.7923005,
+        "end": 1774193580.6855805,
+        "seconds": 16.893280029296875
+      },
+      "build_submission": {
+        "start": 1774193580.6860287,
+        "end": 1774193582.4985082,
+        "seconds": 1.8124794960021973
+      },
+      "content_check": {
+        "start": 1774193582.505243,
+        "end": 1774193582.6465778,
+        "seconds": 0.14133477210998535
+      }
+    },
+    "move_validation": {
+      "move_column": "path",
+      "allowed_moves": [
+        "-B",
+        "-BL",
+        "-BR",
+        "-D",
+        "-DL",
+        "-DR",
+        "-F",
+        "-FL",
+        "-FR",
+        "-L",
+        "-R",
+        "-U",
+        "B",
+        "BL",
+        "BR",
+        "D",
+        "DL",
+        "DR",
+        "F",
+        "FL",
+        "FR",
+        "L",
+        "R",
+        "U"
+      ],
+      "rows_checked": 1001,
+      "rows_with_moves": 1001,
+      "max_tokens_in_row": 839
+    },
+    "status": "ok",
+    "files": {
+      "puzzles_csv": {
+        "path": "/mnt/data/repo_final/competitions/cayley-py-megaminx/data/test.csv",
+        "exists": true,
+        "bytes": 376298,
+        "mtime": "2026-03-21T19:46:20",
+        "columns": [
+          "initial_state_id",
+          "initial_state"
+        ],
+        "rows": 1001
+      },
+      "output_csv": {
+        "path": "/mnt/data/repo_final/competitions/cayley-py-megaminx/submissions/_smoke_submission.csv",
+        "exists": true,
+        "bytes": 1247639,
+        "mtime": "2026-03-22T15:33:02.497979",
+        "columns": [
+          "initial_state_id",
+          "path"
+        ],
+        "rows": 1001
+      },
+      "solver": {
+        "path": "/mnt/data/repo_final/generated/solve_cayley-py-megaminx_20260322_153243.py",
+        "exists": true,
+        "bytes": 11501,
+        "mtime": "2026-03-22T15:32:43.791095"
+      },
+      "sample_submission_csv": {
+        "path": "/mnt/data/repo_final/_cache/competition_bundle_schema/cayley-py-megaminx/sample_submission.csv",
+        "exists": true,
+        "bytes": 1505744,
+        "mtime": "2026-03-22T15:33:00.728327",
+        "columns": [
+          "initial_state_id",
+          "path"
+        ],
+        "rows": 1001
+      }
+    }
+  },
+  {
+    "ts": "2026-03-23T07:38:39.025931",
+    "cmd": "run",
+    "pipeline": "cayley-py-megaminx",
+    "competition": "cayley-py-megaminx",
+    "format": "cayley-py-megaminx",
+    "puzzles_csv": "/content/agents_4_puzzles/competitions/cayley-py-megaminx/data/test.csv",
+    "output_csv": "competitions/cayley-py-megaminx/submissions/submission_best.csv",
+    "solver": "/content/agents_4_puzzles/generated/solve_cayley-py-megaminx_20260323_073839.py",
+    "args": {
+      "no_llm": false,
+      "models": "gpt-4o-mini",
+      "agent_models": "planner=gemini-2.5-flash;coder=gemini-2.5-flash;fixer=gemini-2.5-flash",
+      "planner_models": null,
+      "coder_models": null,
+      "fixer_models": null,
+      "search_mode": "hybrid",
+      "plan_beam_width": 40,
+      "frontier_width": 120,
+      "archive_size": 200,
+      "refine_rounds": 30,
+      "max_iters": 100000,
+      "print_generation": true,
+      "print_generation_max_chars": 16000,
+      "g4f_async": true,
+      "max_response_chars": null,
+      "g4f_request_timeout": 120.0,
+      "g4f_stop_at_python_fence": true,
+      "vector_col": null,
+      "max_rows": null,
+      "submit": true,
+      "submit_via": "auto",
+      "submit_competition": "cayley-py-megaminx"
+    },
+    "stages": {
+      "generate_solver": {
+        "start": 1774251519.0424657,
+        "end": 1774253236.9467664,
+        "seconds": 1717.9043006896973
+      },
+      "validate_solver": {
+        "start": 1774253236.9470732,
+        "end": 1774253237.4415283,
+        "seconds": 0.49445509910583496
+      },
+      "build_submission": {
+        "start": 1774253237.4417593,
+        "end": 1774253239.0049288,
+        "seconds": 1.5631694793701172
+      },
+      "content_check": {
+        "start": 1774253239.0080323,
+        "end": 1774253239.1062372,
+        "seconds": 0.0982048511505127
+      },
+      "schema_check": {
+        "start": 1774253239.1174529,
+        "end": 1774253239.1541514,
+        "seconds": 0.03669857978820801
+      },
+      "submit_kaggle": {
+        "start": 1774253239.1544569,
+        "end": 1774253266.464895,
+        "seconds": 27.31043815612793
+      }
+    },
+    "move_validation": {
+      "move_column": "path",
+      "allowed_moves": [
+        "-B",
+        "-BL",
+        "-BR",
+        "-D",
+        "-DL",
+        "-DR",
+        "-F",
+        "-FL",
+        "-FR",
+        "-L",
+        "-R",
+        "-U",
+        "B",
+        "BL",
+        "BR",
+        "D",
+        "DL",
+        "DR",
+        "F",
+        "FL",
+        "FR",
+        "L",
+        "R",
+        "U"
+      ],
+      "rows_checked": 1001,
+      "rows_with_moves": 1001,
+      "max_tokens_in_row": 839
+    },
+    "schema": {
+      "sample": "/content/agents_4_puzzles/_cache/competition_bundle_schema/cayley-py-megaminx/sample_submission.csv",
+      "columns": [
+        "initial_state_id",
+        "path"
+      ],
+      "rows": 1001,
+      "unique_ids": 1001,
+      "duplicate_ids": 0
+    },
+    "kaggle_submit": {
+      "mode": "api",
+      "preflight": {
+        "mode": "api",
+        "competition": "cayley-py-megaminx",
+        "client_version": "2.0.0",
+        "access": {
+          "competition": "cayley-py-megaminx",
+          "can_list_files": true,
+          "can_list_submissions": true,
+          "rules_accepted_or_joined": true,
+          "files_error": "object of type 'ApiListDataFilesResponse' has no len()",
+          "submission_count": 20
+        }
+      },
+      "status": {
+        "description": "heuristic_boosted hybrid monotonic prompt refinement",
+        "error_description": "",
+        "file_name": "submission_best.csv",
+        "private_score": "",
+        "public_score": "414305",
+        "ref": 51161005,
+        "submitted_by": "visualcomments",
+        "submitted_by_ref": "visualcomments",
+        "team_name": "Anton Kostin",
+        "total_bytes": 1247639,
+        "url": "/submissions/51161005/51161005.raw"
+      }
+    },
+    "status": "ok",
+    "files": {
+      "puzzles_csv": {
+        "path": "/content/agents_4_puzzles/competitions/cayley-py-megaminx/data/test.csv",
+        "exists": true,
+        "bytes": 376298,
+        "mtime": "2026-03-23T07:38:17.331249",
+        "columns": [
+          "initial_state_id",
+          "initial_state"
+        ],
+        "rows": 1001
+      },
+      "output_csv": {
+        "path": "competitions/cayley-py-megaminx/submissions/submission_best.csv",
+        "exists": true,
+        "bytes": 1247639,
+        "mtime": "2026-03-23T08:07:19.003261",
+        "columns": [
+          "initial_state_id",
+          "path"
+        ],
+        "rows": 1001
+      },
+      "solver": {
+        "path": "/content/agents_4_puzzles/generated/solve_cayley-py-megaminx_20260323_073839.py",
+        "exists": true,
+        "bytes": 11501,
+        "mtime": "2026-03-23T08:07:16.647082"
+      },
+      "sample_submission_csv": {
+        "path": "/content/agents_4_puzzles/_cache/competition_bundle_schema/cayley-py-megaminx/sample_submission.csv",
+        "exists": true,
+        "bytes": 1505744,
+        "mtime": "2026-03-23T08:07:19.115269",
+        "columns": [
+          "initial_state_id",
+          "path"
+        ],
+        "rows": 1001
+      }
+    }
+  }
+]

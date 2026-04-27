@@ -1,0 +1,6 @@
+{
+  "strategy_family": "bounded_window_dp",
+  "label": "Variant B / bounded-window DP rewrite",
+  "goal": "Keep per-row runtime polynomial by improving fixed-window local optimization passes only.",
+  "edit_targets": ["_optimize_local_windows", "_optimize_word", "_compose_words"]
+}

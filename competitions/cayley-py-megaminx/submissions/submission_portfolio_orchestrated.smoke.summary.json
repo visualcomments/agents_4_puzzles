@@ -1,0 +1,9 @@
+{
+  "rows": 1001,
+  "score": 414305,
+  "min_len": 1,
+  "median_len": 412,
+  "p90_len": 741,
+  "p95_len": 786,
+  "max_len": 839
+}

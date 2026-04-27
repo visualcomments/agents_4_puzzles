@@ -1,0 +1,24 @@
+Structured prompt pipeline validation
+Date: 2026-03-22
+
+[1] Targeted pytest
+......................................                                   [100%]
+38 passed in 4.19s
+
+[2] Structured CLI smoke
+[recovery] enabled: rounds=1, max_iters=2, sleep_s=1.5
+[models] planner=local:planner-model, coder=local:coder-model, fixer=local:fixer-model
+[planner] selected model: local:planner-model
+models:   0%|          | 0/1 [00:00<?, ?model/s]models:   0%|          | 0/1 [00:00<?, ?model/s, model 0/1]models:   0%|          | 0/1 [00:00<?, ?model/s, model 1/1: local:coder-model]                                                                              models:   0%|          | 0/1 [00:00<?, ?model/s, model 1/1: local:coder-model][coder] trying model: local:coder-model
+
+fix local:coder-model:   0%|          | 0/1 [00:00<?, ?iter/s][A
+fix local:coder-model:   0%|          | 0/1 [00:00<?, ?iter/s, iter 0/1][A
+fix local:coder-model:   0%|          | 0/1 [00:00<?, ?iter/s, iter 1/1][A                                                                              
+                                                                        [Amodels:   0%|          | 0/1 [00:00<?, ?model/s, model 1/1: local:coder-model]
+fix local:coder-model:   0%|          | 0/1 [00:00<?, ?iter/s, iter 1/1][A
+                                                                        [Amodels: 100%|██████████| 1/1 [00:10<00:00, 10.59s/model, model 1/1: local:coder-model]                                                                                      models: 100%|██████████| 1/1 [00:10<00:00, 10.59s/model, model 1/1: local:coder-model]models: 100%|██████████| 1/1 [00:10<00:00, 10.59s/model, model 1/1: local:coder-model]
+[fixer] iteration 1 trying model: local:fixer-model
+[+] local:coder-model: validated after fixer iteration 1. Saved to /tmp/agentlab_smoke_s9g1m5px/generated_solver.py
+SMOKE_OK
+/tmp/agentlab_smoke_s9g1m5px/generated_solver.py
+CALLS=3

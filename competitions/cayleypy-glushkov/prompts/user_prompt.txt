@@ -1,0 +1,37 @@
+We are solving the CayleyPy V.M. Glushkov permutations problem Kaggle competition.
+Reference: https://www.kaggle.com/competitions/cayleypy-glushkov
+
+TASK
+Write solve_module.py that sorts a permutation using ONLY the legal moves L and X.
+
+LEGAL MOVES
+- L: left cyclic shift by 1
+- X: swap positions 0 and 1
+
+INPUT / OUTPUT CONTRACT
+- Implement solve(vec) -> (moves, sorted_array)
+- moves must be list[str] containing only "L" and "X", or the string "UNSOLVED"
+- sorted_array must be the final array after applying the moves
+- Script mode must print JSON: {"moves": ..., "sorted_array": ...}
+
+ALGORITHM REQUIREMENTS
+- Polynomial time only.
+- No BFS / DFS / A* / exhaustive search.
+- No built-in sorting for the core algorithm.
+- Implement the cyclic shift with a loop, not with slicing tricks.
+
+RECOMMENDED IMPLEMENTATION ORDER
+1. If bundled test.csv + sample_submission.csv exist, you may first build an exact lookup baseline:
+       permutation string -> valid path
+   Return that exact path for exact matches.
+2. Otherwise implement the constructive adjacent-swap method:
+   - adjacent swap at index i is achieved by L^i, then X, then L^{n-i}
+   - use this to implement insertion sort or selection sort
+3. This gives a constructive polynomial-time solver.
+
+IMPLEMENTATION DETAILS
+- Work on a copy of vec.
+- Append moves immediately after performing them.
+- Verify that sorted_array equals the state produced by the returned moves.
+- Return exactly one complete Python file inside one ```python``` block.
+- Do not add explanations outside the code block.

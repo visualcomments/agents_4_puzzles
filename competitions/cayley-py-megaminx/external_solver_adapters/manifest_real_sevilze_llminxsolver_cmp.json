@@ -1,0 +1,49 @@
+{
+  "label": "real_sevilze_llminxsolver_cmp",
+  "allow_failure": true,
+  "state_adapter": "llminx_last_layer",
+  "repo": {
+    "url": "https://github.com/Sevilze/llminxsolver-cmp.git",
+    "ref": "v1.4.0",
+    "checkout_dir": "{repo_root}/external_real/Sevilze_llminxsolver-cmp",
+    "refresh": false,
+    "allow_failure": true,
+    "build_steps": [
+      {
+        "cmd": ["bash", "-lc", "test -f llminxsolver-rs/Cargo.toml && cargo metadata --format-version 1 --no-deps >/dev/null 2>&1 || true"],
+        "cwd": "{external_repo}",
+        "timeout_seconds": 600,
+        "optional": true
+      }
+    ]
+  },
+  "generator": {
+    "type": "command",
+    "command": [
+      "python3",
+      "{comp_dir}/external_solver_adapters/wrappers/run_llminxsolver_wrapper.py",
+      "--repo",
+      "{external_repo}",
+      "--test-csv",
+      "{test_csv}",
+      "--out",
+      "{output_csv}",
+      "--summary-out",
+      "{work_dir}/real_sevilze_llminxsolver_cmp.wrapper.summary.json"
+    ],
+    "cwd": "{repo_root}",
+    "timeout_seconds": 1800,
+    "output_mode": "file",
+    "output_format": "submission_csv",
+    "output_path": "{output_csv}",
+    "allow_failure": true
+  },
+  "row_key": "initial_state_id",
+  "path_key": "path",
+  "order": 5,
+  "move_aliases": {
+    "U'": "-U",
+    "D'": "-D"
+  },
+  "face_aliases": {}
+}

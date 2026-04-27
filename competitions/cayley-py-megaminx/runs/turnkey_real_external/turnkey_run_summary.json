@@ -1,0 +1,21 @@
+{
+  "baseline_submission": "/mnt/data/workfix/repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/submissions/optimized_submission.csv",
+  "test_csv": "/mnt/data/workfix/repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/data/test.csv",
+  "work_dir": "/mnt/data/workfix/repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/runs/turnkey_real_external",
+  "candidate_specs": [
+    "bundled=/mnt/data/workfix/repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/submissions/optimized_submission.csv",
+    "routed=/mnt/data/workfix/repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/runs/turnkey_real_external/submission_hard_row_routed.csv"
+  ],
+  "candidate_eval_out": "/mnt/data/workfix/repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/runs/turnkey_real_external/prompt_population.results.json",
+  "final_submission": "/mnt/data/workfix/repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/runs/turnkey_real_external/submission_portfolio_external_real.csv",
+  "final_summary": {
+    "rows": 1001,
+    "score": 414305,
+    "min_len": 1,
+    "median_len": 412,
+    "p90_len": 741,
+    "p95_len": 786,
+    "max_len": 839
+  },
+  "external_adapter_summaries": []
+}

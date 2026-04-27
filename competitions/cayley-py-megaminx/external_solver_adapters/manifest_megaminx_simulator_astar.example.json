@@ -1,0 +1,28 @@
+{
+  "label": "megaminx_simulator_astar_bundle",
+  "generator": {
+    "type": "command",
+    "command": [
+      "python3",
+      "{comp_dir}/external_solver_adapters/wrappers/run_megaminx_simulator_astar_wrapper.py",
+      "--repo",
+      "{repo_root}/external/Megaminx-Simulator-AStar-main",
+      "--test-csv",
+      "{test_csv}",
+      "--out",
+      "{output_csv}",
+      "--summary-out",
+      "{work_dir}/megaminx_simulator_astar.summary.json"
+    ],
+    "cwd": "{repo_root}",
+    "timeout_seconds": 240,
+    "output_mode": "file",
+    "output_format": "submission_csv",
+    "output_path": "{output_csv}"
+  },
+  "row_key": "initial_state_id",
+  "path_key": "path",
+  "order": 5,
+  "move_aliases": {},
+  "face_aliases": {}
+}

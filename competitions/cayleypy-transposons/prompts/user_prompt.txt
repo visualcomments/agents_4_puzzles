@@ -1,0 +1,39 @@
+We are solving the Kaggle competition "CayleyPy Transposons Math (DNA jumping elements)".
+Reference: https://www.kaggle.com/competitions/cayleypy-transposons
+
+PROBLEM SUMMARY
+- State: a permutation vector.
+- Goal: transform the input state into the central solved state from competitions/cayleypy-transposons/data/graphs_info.json for n = len(vec).
+- Legal moves are the generator names from graphs_info.json and look like T[i,j,k].
+- Kaggle submissions use dot-separated move names.
+
+INPUT / OUTPUT CONTRACT
+- Implement solve(vec) -> (moves, sorted_array)
+- moves must be either list[str] of legal generator names or the string "UNSOLVED"
+- sorted_array must be the final state after applying the moves
+- Script mode must print JSON: {"moves": ..., "sorted_array": ...}
+
+ALGORITHM REQUIREMENTS
+- Polynomial time only.
+- No BFS / DFS / A* / exhaustive graph search.
+- Constant-depth lookahead over the fixed generator list is allowed.
+- Never invent moves; use only generator names from graphs_info.json for the current n.
+
+RECOMMENDED IMPLEMENTATION ORDER
+1. If bundled test.csv + sample_submission.csv exist, build an exact lookup baseline:
+       initial_state string -> valid path
+   Return that path for exact matches.
+2. For unseen states, load graphs_info.json for n = len(vec), then implement a bounded-lookahead greedy fallback:
+   - read central_state and generators
+   - implement apply_perm(state, perm) and apply_moves(state, moves)
+   - score states using polynomial-time metrics such as matched positions / total mismatches / simple displacement measures
+   - evaluate all legal 1-move candidates and optionally 2-move macros
+   - repeatedly choose the best improving candidate
+3. If no progress occurs after a bounded number of polynomial steps, return "UNSOLVED".
+
+IMPLEMENTATION DETAILS
+- Standard library only.
+- Work on a copy of vec.
+- Verify that sorted_array equals the state produced by the returned moves.
+- Return exactly one complete Python file inside one ```python``` block.
+- Do not add explanations outside the code block.

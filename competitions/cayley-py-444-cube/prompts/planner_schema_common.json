@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "required": [
+    "strategy_family",
+    "goal",
+    "edit_targets",
+    "must_preserve",
+    "complexity_claim",
+    "proposed_changes",
+    "validation_plan",
+    "forbidden"
+  ],
+  "properties": {
+    "strategy_family": {"type": "string"},
+    "goal": {"type": "string"},
+    "edit_targets": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "must_preserve": {"type": "array", "items": {"type": "string"}, "minItems": 3},
+    "complexity_claim": {
+      "type": "object",
+      "required": ["precompute", "per_row", "why_polynomial"],
+      "properties": {
+        "precompute": {"type": "string"},
+        "per_row": {"type": "string"},
+        "why_polynomial": {"type": "string"}
+      }
+    },
+    "proposed_changes": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+    "validation_plan": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+    "forbidden": {"type": "array", "items": {"type": "string"}, "minItems": 3},
+    "patch_scope": {"type": "string"},
+    "notes": {"type": "string"}
+  },
+  "additionalProperties": true
+}

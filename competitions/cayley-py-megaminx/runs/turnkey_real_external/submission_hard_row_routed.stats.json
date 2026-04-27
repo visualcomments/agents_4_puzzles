@@ -1,0 +1,18 @@
+{
+  "top_k": 5,
+  "baseline_score": 414305,
+  "final_score": 414305,
+  "score_delta": 0,
+  "rows_improved": 0,
+  "total_saved_moves": 0,
+  "elapsed_ms_total": 17007.296,
+  "cayleypy_enabled": false,
+  "backend_preference": "internal",
+  "profile_mode": "compact",
+  "hard_row_wrapper": {
+    "top_k": 5,
+    "saved_moves_per_cpu_hour": 0.0,
+    "elapsed_seconds": 17.02293978,
+    "summary_score": 414305
+  }
+}
