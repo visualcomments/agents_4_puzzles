@@ -1,32 +1,33 @@
-# 444-cube prompt sweep with Kaggle feedback
+# 444-cube prompt sweep runbook
 
-Standalone launcher:
+Use the checked standalone launcher with the checked repository archive.
+
+## Smoke syntax/help check
 
 ```bash
-python cube444_prompt_sweep_pipeline.py \
-  --source-mode local_zip_path \
-  --archive-path agents_4_puzzles_444_prompt_sweep_pipeline.zip \
-  --kaggle-credential-mode existing_path \
-  --kaggle-json-path ~/.kaggle/kaggle.json
+python cube444_prompt_sweep_pipeline_checked.py --help
 ```
 
-Fast local smoke run without Kaggle upload:
+## Full run with inline Kaggle credentials
 
 ```bash
-python cube444_prompt_sweep_pipeline.py \
+python cube444_prompt_sweep_pipeline_checked.py \
   --source-mode local_zip_path \
-  --archive-path agents_4_puzzles_444_prompt_sweep_pipeline.zip \
+  --archive-path agents_4_puzzles_444_prompt_sweep_pipeline_checked.zip \
+  --kaggle-credential-mode inline_json \
+  --kaggle-json-inline '{"username":"YOUR_KAGGLE_USERNAME","key":"YOUR_KAGGLE_KEY"}' \
+  --run-name cube444_full_prompt_sweep_checked
+```
+
+## Safer smoke run without live Kaggle submit
+
+```bash
+python cube444_prompt_sweep_pipeline_checked.py \
+  --source-mode local_zip_path \
+  --archive-path agents_4_puzzles_444_prompt_sweep_pipeline_checked.zip \
   --no-submit-to-kaggle \
   --max-total-runs 2 \
-  --max-rows 5 \
-  --run-name cube444_smoke
+  --run-name cube444_prompt_sweep_smoke
 ```
 
-What was added over the original archive:
-
-- full prompt-variant package for `competitions/cayley-py-444-cube/prompts/`;
-- `colab/cube444_prompt_sweep_kaggle_feedback.py`;
-- root-level `cube444_prompt_sweep_pipeline.py`;
-- this runbook.
-
-The runner keeps the Megaminx sweep behavior: model fallback, prompt variant sweep, strict success/failure classification, Kaggle submission polling, strategy feedback, successful/failed script manifests, and analytics artifacts.
+Important: strict generated-script validation rejects `UNSOLVED`, blank paths, invalid move tokens, and paths that do not replay to `central_state`.

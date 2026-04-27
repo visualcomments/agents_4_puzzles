@@ -1,177 +1,53 @@
-We are solving the Kaggle competition "CayleyPy 444 Cube Solve Optimally":
-https://www.kaggle.com/competitions/cayley-py-444-cube
+You are generating a solver for Kaggle competition cayley-py-444-cube.
 
-I need a Python module `solve_module.py` that preserves the exact bundled-state lookup pipeline and upgrades the 444-cube local optimizer with the strongest score-guarded deterministic hybrid word-rewriting strategy that still remains competition-safe.
+Competition facts from the official bundled files:
+- Puzzle name: 4x4x4.
+- Input file: competitions/cayley-py-444-cube/data/test.csv.
+- Test rows: 1043.
+- State column: initial_state.
+- State vector length: 96.
+- Solved target: central_state from puzzle_info.json, not sorted(range(n)).
+- Generator count: 24.
+- Legal moves are exactly the keys in puzzle_info.json generators:
+  f0, -f0, f1, -f1, f2, -f2, f3, -f3, r0, -r0, r1, -r1, r2, -r2, r3, -r3, d0, -d0, d1, -d1, d2, -d2, d3, -d3
+- Submission schema: initial_state_id,path.
+- path is a dot-separated sequence of legal move names such as f1.-d3.r0.
+- A valid path must transform the row initial_state to central_state under permutation convention new[i] = old[perm[i]].
+- The objective is to minimize total move count while preserving validity.
 
-PRIMARY GOAL
-Produce the best bundled-data score you can while keeping the solver fully deterministic, standard-library only, and competition-contract safe.
+Required Python contract:
+- Create a complete solve_module.py.
+- Standard library only.
+- Keep solve(vec) -> (moves, sorted_array).
+- moves may be list[str] or a dot-separated string, but every token must be a legal generator.
+- The script mode must accept one JSON/list vector argument and print JSON with keys moves and sorted_array.
+- Do not output UNSOLVED, blank paths, placeholder moves, copied prose, markdown, or sample-only artifacts.
+- Do not hardcode the entire contents of puzzle_info.json, test.csv, or sample_submission.csv; read official bundled files at runtime when needed.
+- It is allowed to build an exact lookup from the bundled test.csv and sample_submission.csv at runtime.
+- For every returned path, replay it with official generators and return the true final state.
+- For bundled rows, exact lookup and exact replay validation must happen before any optimization.
+- Any optimization may be promoted only if it is shorter and replay-valid.
 
-ABSOLUTE REQUIREMENTS
-- Start from the exact best-tested bundled 4x4x4 cube baseline and patch it rather than replacing it.
-- Preserve `solve(vec) -> (moves, sorted_array)`.
-- Preserve script mode:
-  `python solve_module.py "[1,2,3]"`
-  -> `{"moves": [...], "sorted_array": [...]}`
-- `vec` is a Python list[int].
-- `moves` must be a list[str] using ONLY official move names from `puzzle_info.json`.
-- Do NOT invent moves, aliases, macros-as-fake-moves, or renamed generators.
-- `sorted_array` must be the actual final state obtained by replaying `moves` from `vec`.
-- Preserve compatibility with the existing competition folder layout and bundled assets.
-- Keep exact bundled lookup compatibility with:
-  - `optimized_lookup.json` if present,
-  - bundled optimized submission if present,
-  - otherwise deterministic rebuilding from `sample_submission.csv`.
+Strict 444-cube guards:
+- This is a 4x4x4 cube task only.
+- Do not assume any non-444-cube sticker count, face ordering, generator order, notation, or rewrite rules.
+- Derive inverse pairs, generator orders, commutation, and local rewrite candidates from puzzle_info.json.
+- Keep algorithms deterministic and bounded; no network, no Kaggle API calls, no external packages.
 
-COMPETITION FACTS YOU MUST USE
-- State vectors have length 96.
-- The solved state is `central_state` from `puzzle_info.json`.
-- Legal generators are exactly the 4x4x4 cube face turns from `puzzle_info.json` and their inverses.
-- Submission paths are dot-separated move names.
-- The Kaggle score is the SUM of path lengths over all bundled rows.
-- `sample_submission.csv` contains valid but non-optimal words, so exact word rewriting over those valid paths is a legitimate and high-value strategy.
-
-NON-NEGOTIABLE ARCHITECTURE
-Keep the current successful structure:
-1. load the official bundle;
-2. prefer exact bundled state -> path lookup;
-3. optimize those known-valid words locally;
-4. replay the optimized path to obtain the actual final state.
-
-Do NOT replace this with a risky generic solver that can fail on bundled rows.
-Do NOT regress bundled correctness.
-Do NOT remove compatibility with `optimized_lookup.json` / bundled optimized submission / deterministic rebuilding from `sample_submission.csv`.
-
-SCORE-GUARDED MASTER STRATEGY
-Implement a hybrid local optimizer that combines several deterministic, bounded, semantics-preserving layers. The key idea is NOT to solve 4x4x4 cube from scratch, but to compress already-valid 4x4x4 cube words much more aggressively while preserving exact correctness and guarding against score regressions.
-
-The optimizer should combine ALL of these ideas in a competition-safe way:
-
-1. Official move algebra from `puzzle_info.json`
-- derive everything from the official permutations only;
-- derive inverse pairs from the official generators, not by guessing names;
-- exploit the true finite order of each official 4x4x4 generator as derived from its permutation;
-- reduce repeated powers of the same generator modulo its derived order;
-- cancel adjacent inverse pairs online and after each optimization pass.
-
-2. Official commutation graph + multiple deterministic normalization policies
-- compute commutation only from official permutations;
-- do NOT rely on a single canonical commuting order;
-- implement a tiny fixed bank of admissible deterministic orderings for commuting blocks;
-- examples of safe policies: lexical, reverse lexical, graph-degree order, reverse graph-degree order, first-occurrence order, last-occurrence order;
-- for each candidate path, run the optimizer under several such policies and keep the shortest valid result;
-- the number of policies must remain a tiny fixed constant.
-
-3. Strong exact short-word effect atlas
-- build a stronger fixed-radius exact table of short word effects using official permutations only;
-- preserve the shortest representative for each local permutation effect;
-- prune obvious inverse backtracking while building the table;
-- canonicalize equivalent local words before storage;
-- use compact packed permutation/effect keys to avoid recomputing composed effects.
-
-4. Bounded bidirectional window rewriting
-- run bounded-window DP or exact segmentation over local path windows;
-- do both left-to-right and right-to-left passes if useful;
-- allow a tiny fixed number of passes until convergence or a small pass limit;
-- memoize repeated windows and composed local effects;
-- prefer exact replacements over heuristic guesses.
-
-5. Deterministic commutator / conjugate macro mining over SMALL SUPPORT only
-- enumerate only bounded short words and their conjugates / commutators;
-- keep only macros whose official permutation support is small or especially structured;
-- treat them as local rewrite candidates only if they produce an already-seen exact effect with a shorter representative;
-- do NOT add fake macro move names;
-- do NOT introduce instance-growing search.
-
-6. Per-row best-of-fixed-candidates sweep
-- bundled rows benefit from different commuting orders and local rewrite schedules;
-- run a tiny deterministic family of candidate optimization pipelines per row;
-- keep only the shortest valid equivalent word;
-- the candidate family must be fixed and tiny.
-
-7. Semantic-equivalence replay guard
-- after every non-trivial local rewrite family, replay the candidate under the official permutations;
-- keep the rewrite only when the exact effect matches and the candidate is strictly shorter or equally short but structurally simpler;
-- if a stronger heuristic stage fails equivalence, fall back to the previous exact-valid candidate.
-
-8. Score-regression guard + compile-safe staging
-- keep the baseline lookup-first path import-safe first;
-- add new optimizer layers in bounded staged helpers rather than one giant rewrite;
-- make the final solver prefer an exact-valid previous candidate instead of a risky later candidate that does not clearly help;
-- preserve deterministic replay and legal move names as harder constraints than aggressiveness.
-
-ALLOWED SEARCH / OPTIMIZATION
-Allowed:
-- exact fixed-radius precomputation on short words;
-- exact local replacement tables;
-- bounded-window dynamic programming;
-- deterministic comparison of a fixed small bank of normalization / rewrite policies;
-- local conjugate / commutator mining over a fixed small radius;
-- exact semantic-equivalence replacement only.
-
-Forbidden:
-- BFS / DFS / A* / IDA* / beam search whose depth grows with the instance;
-- whole-state-space search;
-- generic solving from scratch per row;
-- non-deterministic random search;
-- returning `UNSOLVED` for bundled rows that the baseline solves;
-- provider-dependent behavior or non-standard-library dependencies.
-
-IMPLEMENTATION REQUIREMENTS
-- Keep the solver self-contained and standard-library only.
-- Preserve exact bundled-state solving first.
-- Every returned path for bundled rows must still solve to the central state.
-- Preserve the actual final-state replay contract.
-- Keep runtime comfortably practical on the full bundled set.
-- Prefer readable, well-factored helpers.
-- Add comments only where they explain invariants or non-obvious correctness constraints.
-
-QUALITY BAR FOR THIS VARIANT
-This variant should be stronger and more disciplined than `master_hybrid`:
-- keep exact lookup first;
-- keep the bounded local-rewrite philosophy;
-- add multi-policy candidate sweeps;
-- add small-support commutator/conjugate mining as a local rewrite source only;
-- add semantic-equivalence replay guards;
-- add score-regression and fallback logic;
-- preserve polynomial-time guarantees by keeping all radii, windows, candidate banks, and pass counts fixed constants.
-
-
-
-BREAKTHROUGH SCENARIO FOCUS:
-This hard_row_routed variant must focus compute on the longest and hardest rows first: build row difficulty profiles, budget aggressive search only for top-N hardest rows, preserve exact replay validation, and optimize for saved moves per CPU-hour rather than uniform search.
-
-STRICT OUTPUT REQUIREMENTS:
+Output requirements for LLM code generation:
 - Return exactly one JSON object and no prose outside JSON.
-- The JSON object must contain exactly these keys: version, artifact_type, language, filename, code.
-- Set version='code_response.v2', artifact_type='python_module', language='python', filename='solve_module.py'.
-- Put the entire Python file only inside the code string.
-- Do not wrap the code in markdown fences inside the JSON string.
-- Do not include explanations, bullet points, extra keys, or commentary before or after the JSON object.
-- Inside the code, omit comments and docstrings unless they are absolutely necessary.
-- Preserve the public solve(vec) entrypoint and the script-mode JSON stdout contract with keys moves and sorted_array.
-JSON EXAMPLE:
+- JSON keys must be exactly: version, artifact_type, language, filename, code.
+- version = code_response.v2; artifact_type = python_module; language = python; filename = solve_module.py.
+- Put the full Python source only inside the code string.
+
+Variant strategy: Hard Row Routed
+Route long or difficult rows to more expensive bounded local search while keeping short rows on exact lookup plus cheap simplification.
+
+Return exactly one JSON object:
 {
   "version": "code_response.v2",
   "artifact_type": "python_module",
   "language": "python",
   "filename": "solve_module.py",
-  "code": "from __future__ import annotations\n\nimport json\n\n\ndef solve(vec):\n    return [], list(vec)\n"
+  "code": "from __future__ import annotations\n\nimport json\nimport sys\n\ndef solve(vec):\n    return [], list(vec)\n\nif __name__ == '__main__':\n    vec=json.loads(sys.argv[1])\n    moves,out=solve(vec)\n    print(json.dumps({'moves': moves, 'sorted_array': out}))\n"
 }
-- The produced code must be self-contained and runnable.
-
-## Success gate and anti-fallback requirements (added 2026-04-26)
-- A round is successful only when you generate a real, importable solver script plus a valid non-empty Kaggle submission CSV. Fallback artifacts, copied `sample_submission.csv`, offline baseline placeholders, `UNSOLVED` rows, empty move strings, or provider-failure recovery outputs are failed attempts and must not be described as success.
-- Keep the known-good exact lookup / exact replay path first. Then add only rollback-safe improvements: bounded exact local rewrites, deterministic candidate portfolios, semantic replay guards, and score-regression checks.
-- Do not trade correctness for ambition. If a heuristic cannot be replay-verified on the official CayleyPy move algebra, reject it and keep the best verified candidate for that row.
-- Preserve the required script contract: official legal moves only, deterministic output, compile/import cleanly, generate `submission.csv`, and keep stdout JSON parseable for the sweep pipeline.
-- Never emit code that silently falls back to sample submissions, bundled baseline CSVs, or placeholder `UNSOLVED` records. If generation is uncertain, produce the smallest compile-valid solver with exact lookup and verified local optimizer rather than a broken large rewrite.
-
-
-
-## 444-CUBE ADAPTATION GUARDS
-- This is NOT a Megaminx solver. Do not assume 120 stickers, order-5 turns, Megaminx face ordering, or Megaminx-only rewrite rules.
-- Use the official 4x4x4 bundle only: `competitions/cayley-py-444-cube/data/puzzle_info.json`, `test.csv`, and `sample_submission.csv`.
-- State vectors have length 96 and the solved state is `central_state` from `puzzle_info.json`.
-- Legal moves are exactly the keys under `generators` in `puzzle_info.json`; derive inverse pairs, commutation, and generator orders from official permutations.
-- Kaggle submission schema is `initial_state_id,path`, with dot-separated legal move names in `path`.
-- For bundled rows, exact lookup and exact replay validation must remain first; any optimizer may only promote a shorter path after replaying it to the official central state.

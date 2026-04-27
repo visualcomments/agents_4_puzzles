@@ -193,7 +193,7 @@ PipelineSpec(
             "custom_prompts_template.json",
         ),
         state_columns=["initial_state", "state", "permutation", "vector"],
-        smoke_vector=[0, 1, 2, 3],
+        smoke_vector=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
     ),
     PipelineSpec(
         key="cayley-py-professor-tetraminx-solve-optimally",

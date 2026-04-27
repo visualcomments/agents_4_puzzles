@@ -415,6 +415,56 @@ def csv_submission_stats(path: Optional[Path]) -> Dict[str, Any]:
     return stats
 
 
+def validate_cube444_submission_replay(repo_dir: Path, submission_csv: Path, log_path: Path) -> Dict[str, Any]:
+    """Replay-validate every generated 444-cube submission row against official data."""
+    validator = repo_dir / "competitions" / "cayley-py-444-cube" / "validate_submission_csv.py"
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "validator": str(validator),
+        "submission_csv": str(submission_csv),
+        "log": str(log_path),
+    }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not validator.exists():
+        payload["error"] = "missing_validate_submission_csv.py"
+        log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
+    timeout_s = int(float(os.getenv("CUBE444_SUBMISSION_VALIDATOR_TIMEOUT_S", "180")))
+    cmd = [sys.executable, str(validator), "--submission", str(submission_csv)]
+    try:
+        proc = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=timeout_s)
+        log_path.write_text(
+            "# cmd=" + " ".join(cmd) + "\n"
+            + "# returncode=" + str(proc.returncode) + "\n\n"
+            + (proc.stdout or "")
+            + ("\n" + proc.stderr if proc.stderr else ""),
+            encoding="utf-8",
+        )
+        payload["returncode"] = int(proc.returncode or 0)
+        payload["stdout"] = (proc.stdout or "")[-4000:]
+        payload["stderr"] = (proc.stderr or "")[-4000:]
+        payload["ok"] = proc.returncode == 0
+        if proc.returncode == 0:
+            try:
+                payload["stats"] = json.loads((proc.stdout or "{}").strip().splitlines()[-1])
+            except Exception:
+                payload["stats"] = {}
+        else:
+            payload["error"] = payload.get("stderr") or payload.get("stdout") or "replay_validation_failed"
+    except subprocess.TimeoutExpired as exc:
+        payload["error"] = f"timeout_after_{timeout_s}s"
+        log_path.write_text(
+            "# TIMEOUT\n"
+            + (exc.stdout or "")
+            + ("\n" + exc.stderr if exc.stderr else ""),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+        log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
 def copy_if_exists(src: Optional[Path], dst_dir: Path, prefix: str = "") -> Optional[Path]:
     if src is None or not src.exists():
         return None
@@ -1235,6 +1285,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 run_payload=run_payload,
                 stdout_log=stdout_log,
             )
+            attempt_replay_report: Dict[str, Any] = {"skipped": True}
+            if attempt_ok and args.competition == "cayley-py-444-cube" and output_csv.exists():
+                replay_log = logs_dir / f"{attempt_slug}.replay_validation.log"
+                attempt_replay_report = validate_cube444_submission_replay(repo_dir, output_csv, replay_log)
+                if not attempt_replay_report.get("ok"):
+                    attempt_ok = False
+                    attempt_failure_reasons.append("cube444_submission_replay_validation_failed")
             attempt = {
                 "attempt_index": model_idx,
                 "model": model_name,
@@ -1251,6 +1308,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "model_failure_markers": ";".join(model_failure_markers),
                 "attempt_failure_reasons": attempt_failure_reasons,
                 "attempt_submission_stats": attempt_submission_stats,
+                "replay_validation": attempt_replay_report,
                 "solver_path": str(solver_path) if solver_path else None,
             }
             model_attempts.append(attempt)

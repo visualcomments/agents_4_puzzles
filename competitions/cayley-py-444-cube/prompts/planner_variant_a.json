@@ -1,6 +1,0 @@
-{
-  "strategy_family": "stronger_exact_table",
-  "label": "Variant A / stronger exact short-word table",
-  "goal": "Keep exact lookup first and improve constant-depth exact replacements for short move words.",
-  "edit_targets": ["_short_word_data", "_reduce_commuting_word", "_optimize_word"]
-}
