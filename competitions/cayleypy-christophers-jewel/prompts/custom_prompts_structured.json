@@ -1,6 +1,6 @@
 {
   "competition": "cayleypy-christophers-jewel",
-  "prompt_variant": "regular",
+  "prompt_variant": "structured",
   "objective": "minimize total dot-separated generator tokens while preserving full replay validity",
   "required_files": [
     "competitions/cayleypy-christophers-jewel/data/puzzle_info.json",
@@ -19,7 +19,7 @@
   "permutation_convention": "new[i] = old[perm[i]]",
   "baseline_score_total_moves": 500500,
   "baseline_required_for_improvement": false,
-  "variant_focus": "Produce a clean, valid baseline-compatible solver first; prioritize correctness over score.",
+  "variant_focus": "Use a structured research-plan-implement-validate loop with explicit replay checks.",
   "guardrails": [
     "Never return UNSOLVED for a generated success.",
     "Never use moves not present in puzzle_info.json.",

@@ -162,7 +162,7 @@ PipelineSpec(
         key="cayleypy-christophers-jewel",
         competition="cayleypy-christophers-jewel",
         format_slug="cayleypy-christophers-jewel",
-        baseline_solver=_p("competitions", "cayleypy-christophers-jewel", "solve_module.py"),
+        baseline_solver=_p("competitions", "cayleypy-christophers-jewel", "baselines", "jewel_baseline_solver.py"),
         validator=_p("competitions", "cayleypy-christophers-jewel", "validate_solve_output.py"),
         prompt_file=_p(
             "competitions",
@@ -177,13 +177,13 @@ PipelineSpec(
             "custom_prompts_template.json",
         ),
         state_columns=["initial_state", "permutation", "vector"],
-        smoke_vector=[0, 1, 2, 3],
+        smoke_vector=[0, 1, 2, 3, 4, 5, 6, 7, 17, 16, 10, 11, 12, 13, 21, 20, 15, 14, 18, 19, 9, 8, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38, 39, 36, 40, 41, 42, 43, 44, 45, 46, 47],
     ),
     PipelineSpec(
         key="cayley-py-444-cube",
         competition="cayley-py-444-cube",
         format_slug="cayley-py-444-cube",
-        baseline_solver=_p("competitions", "cayley-py-444-cube", "solve_module.py"),
+        baseline_solver=_p("competitions", "cayley-py-444-cube", "baselines", "cube444_baseline_solver.py"),
         validator=_p("competitions", "cayley-py-444-cube", "validate_solve_output.py"),
         prompt_file=_p("competitions", "cayley-py-444-cube", "prompts", "user_prompt.txt"),
         custom_prompts_file=_p(

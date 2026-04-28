@@ -36,4 +36,4 @@ Strategy guidance:
 - At the end, write a complete `submission.csv` with exactly 1000 rows.
 
 ## Variant focus
-Produce a clean, valid baseline-compatible solver first; prioritize correctness over score.
+Add heuristic search, inverse-distance estimates, cancellation, and local rewrite improvements over the baseline.
