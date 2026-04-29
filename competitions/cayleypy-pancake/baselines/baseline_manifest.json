@@ -1,0 +1,22 @@
+{
+  "competition": "CayleyPy-pancake",
+  "canonical_key": "cayleypy-pancake",
+  "rows": 2405,
+  "baseline_total_moves": 158680,
+  "baseline_max_moves": 195,
+  "baseline_solver": "competitions/cayleypy-pancake/baselines/pancake_baseline_solver.py",
+  "baseline_submission": "competitions/cayleypy-pancake/baselines/baseline_submission.csv",
+  "test_csv_columns": [
+    "id",
+    "n",
+    "permutation"
+  ],
+  "submission_columns": [
+    "id",
+    "permutation",
+    "solution"
+  ],
+  "move_semantics": "Rk reverses the first k elements, 2 <= k <= n",
+  "generated_utc": "2026-04-29T06:35:13Z",
+  "baseline_submission_sha256": "c64e45f52861cb07f620316756b92194aa16034ba35a326981424a58b95229d6"
+}

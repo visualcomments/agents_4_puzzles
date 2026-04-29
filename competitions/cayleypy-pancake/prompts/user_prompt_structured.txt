@@ -25,7 +25,7 @@ The baseline solves every row with legal dot-separated Rk prefix reversals and n
 Any improvement must preserve full replay validity and reduce total move count.
 
 
-Variant focus: Produce a robust, simple, valid solver.
+Variant focus: Write clean modular code: parser, move application, solver, validator, and optional optimizer.
 
 Implementation requirements:
 - Provide solve(vec) -> (moves, sorted_array).

@@ -1,0 +1,14 @@
+{
+  "system": "You are an expert algorithm engineer for Cayley graph puzzle competitions.",
+  "developer": "Baseline artifacts available for improvement:\n- competitions/cayleypy-pancake/baselines/pancake_baseline_solver.py\n- competitions/cayleypy-pancake/baselines/baseline_submission.csv\n\nUse this working baseline as a reference/fallback when the prompt asks for baseline improvement.\nThe baseline solves every row with legal dot-separated Rk prefix reversals and no UNSOLVED rows.\nAny improvement must preserve full replay validity and reduce total move count.\n\nAlways validate every Rk move by replay before emitting a solution. Never submit UNSOLVED.",
+  "user": "You are generating a Python solver for the Kaggle competition CayleyPy-pancake.\n\nTask:\nGiven a permutation in test.csv, output a sequence of pancake prefix reversals that sorts it.\nData columns:\n- test.csv: id,n,permutation\n- submission.csv: id,permutation,solution\n\nMove semantics:\n- Legal move names are Rk where 2 <= k <= n.\n- Rk reverses the first k elements of the current permutation.\n- solution is a dot-separated path such as R4.R2.R5.\n- Apply moves left-to-right.\n- Target state is numeric ascending order of the permutation.\n\nScoring:\nMinimize the total number of moves over all rows. Blank paths and UNSOLVED are not acceptable for a working solver.\n\nBaseline artifacts available for improvement:\n- competitions/cayleypy-pancake/baselines/pancake_baseline_solver.py\n- competitions/cayleypy-pancake/baselines/baseline_submission.csv\n\nUse this working baseline as a reference/fallback when the prompt asks for baseline improvement.\nThe baseline solves every row with legal dot-separated Rk prefix reversals and no UNSOLVED rows.\nAny improvement must preserve full replay validity and reduce total move count.\n\n\nVariant focus: Route long baseline rows to more aggressive improvement passes and keep easy rows safe.\n\nImplementation requirements:\n- Provide solve(vec) -> (moves, sorted_array).\n- moves must be list[str]; sorted_array must equal sorted(vec).\n- Do not rely on internet access.\n- Keep dependencies standard-library only.\n- Include internal replay checks for candidate move sequences.\n- If using the baseline, improve it by local rewrite/search rules only when they are proven by replay validation.\n",
+  "metadata": {
+    "competition": "CayleyPy-pancake",
+    "canonical_key": "cayleypy-pancake",
+    "baseline_solver": "competitions/cayleypy-pancake/baselines/pancake_baseline_solver.py",
+    "baseline_submission": "competitions/cayleypy-pancake/baselines/baseline_submission.csv",
+    "move_format": "dot-separated Rk prefix reversals",
+    "score_direction": "min",
+    "variant": "hard_row_routed"
+  }
+}

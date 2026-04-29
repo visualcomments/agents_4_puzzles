@@ -1,39 +1,40 @@
-You are solving Kaggle `cayleypy-christophers-jewel` (Christopher's Jewel Solve Optimally).
+We are solving the Kaggle competition "CayleyPy Christopher's Jewel Solve Optimally".
+Reference: https://www.kaggle.com/competitions/cayleypy-christophers-jewel
 
-Competition contract:
-- Read `competitions/cayleypy-christophers-jewel/data/puzzle_info.json`, `test.csv`, and `sample_submission.csv`.
-- `puzzle_info.json` contains `central_state` and a dict of 12 legal generators.
-- Each state is a permutation/vector of length 48.
-- `test.csv` columns: `initial_state_id,initial_state`.
-- Submission columns must be exactly `initial_state_id,path`.
-- `path` is a dot-separated sequence of generator names such as `DBLBBBR.-UBBBLL.ULFR`.
-- Apply moves left-to-right with the convention `new[i] = old[perm[i]]`.
-- A row is valid only if applying the full path to the row's `initial_state` reaches `central_state`.
-- Lower score is better: minimize total number of move tokens across all rows.
-- Never output `UNSOLVED`, blank paths, unknown moves, comma-separated moves, JSON, or extra columns.
+PROBLEM SUMMARY
+- State: a permutation vector of length 48.
+- Goal: transform the input state into the central solved state from competitions/cayleypy-christophers-jewel/data/puzzle_info.json.
+- Legal generators are the keys of puzzle_info.json.
+- Official rules describe moves such as DBRRF, UBBBLL, DFLBL, URBRBB, DBLBBBR, ULFR and their inverses.
+- Kaggle submissions use dot-separated move names.
 
-Required solver interface for this repository:
-- Create a Python module exposing `solve(vec) -> (moves, sorted_array)`.
-- `moves` may be `list[str]` or a dot-separated string.
-- `sorted_array` must equal the final state after applying `moves`; for valid rows it must equal `central_state`.
-- The generated module must run without third-party dependencies unless explicitly installed.
+INPUT / OUTPUT CONTRACT
+- Implement solve(vec) -> (moves, sorted_array)
+- moves must be either list[str] of legal generator names or the string "UNSOLVED"
+- sorted_array must be the final state after applying the moves
+- Script mode must print JSON: {"moves": ..., "sorted_array": ...}
 
+ALGORITHM REQUIREMENTS
+- Polynomial time only.
+- No BFS / DFS / A* / IDA* / whole-state search.
+- Constant-depth lookahead over the fixed generator set is allowed.
+- Never invent moves; only use keys from puzzle_info.json.
 
-## Approved baseline artifacts for improvement
+RECOMMENDED IMPLEMENTATION ORDER
+1. If bundled test.csv + sample_submission.csv are present, build an exact lookup baseline:
+       initial_state string -> valid path
+   Return that path for exact matches.
+2. For unseen states, use puzzle_info.json and a bounded-lookahead greedy fallback:
+   - apply_perm(state, perm)
+   - apply_moves(state, moves)
+   - score by matched positions / total mismatches / simple local improvements
+   - evaluate all legal 1-move candidates and optionally 2-move macros
+   - choose the best improving candidate at each step
+3. If progress stalls for a bounded number of polynomial steps, return "UNSOLVED".
 
-Use these repository artifacts as the mandatory validity floor whenever you improve, patch, ensemble, score-guard, route hard rows, or generate candidate populations:
-
-- `competitions/cayleypy-christophers-jewel/baselines/jewel_baseline_solver.py`
-
-- `competitions/cayleypy-christophers-jewel/baselines/baseline_submission.csv`
-
-The baseline is known-valid by full replay validation against official `test.csv`, `puzzle_info.json`, and `central_state`. It has 1000 rows and baseline score 500500 total move tokens. Any generated improvement must preserve validity for every row and should only replace a baseline path when the new path is legal, replays to `central_state`, and is shorter.
-
-Strategy guidance:
-- Start from the official sample baseline, then try safe local improvements.
-- Build inverse maps, cancellation rules, commutation-aware simplification, meet-in-the-middle patches, bounded bidirectional search for short deltas, and per-row replacement guarded by replay validation.
-- Keep every candidate path only if it validates and is shorter than the baseline path for the same `initial_state_id`.
-- At the end, write a complete `submission.csv` with exactly 1000 rows.
-
-## Variant focus
-Produce a clean, valid baseline-compatible solver first; prioritize correctness over score.
+IMPLEMENTATION DETAILS
+- Standard library only.
+- Work on a copy of vec.
+- Verify that sorted_array equals the state obtained by the returned moves.
+- Return exactly one complete Python file inside one ```python``` block.
+- Do not add explanations outside the code block.
