@@ -243,6 +243,44 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
     priority=110,
 ),
 
+
+"failure_autopsy_repair_loop": Directive(
+    key="failure_autopsy_repair_loop",
+    title="Failure-autopsy repair loop",
+    instruction=(
+        "When the previous generated solver failed compile/import/validator/submission checks, inspect that failed candidate as a supervised negative example: classify the failure, preserve any promising algorithmic delta, then produce a minimal repair that passes the same gate before adding any new optimization layer."
+    ),
+    rationale="A failed candidate still contains useful search signal; the next prompt should learn from the exact failure instead of resetting to another broad rewrite.",
+    priority=118,
+),
+"compile_validation_ladder": Directive(
+    key="compile_validation_ladder",
+    title="Compile-validation ladder",
+    instruction=(
+        "Stage the next candidate through a strict ladder: first py_compile/import safety, then solve(vec) contract and JSON stdout, then official move-name legality, then exact replay validation, and only then score/novelty improvement."
+    ),
+    rationale="Most failed code rounds waste tokens on optimizer ambition before restoring basic executable correctness; a ladder turns failures into progressively stronger working code.",
+    priority=117,
+),
+"delta_preserving_repair": Directive(
+    key="delta_preserving_repair",
+    title="Delta-preserving repair",
+    instruction=(
+        "Do not discard a failed candidate wholesale if it introduced a useful exact-rewrite, portfolio, or replay-guard idea; isolate the unsafe fragment, keep the safe delta, and repair the smallest broken surface."
+    ),
+    rationale="The best improvement path often comes from rescuing a partially correct algorithmic delta rather than generating an unrelated fresh solver every time.",
+    priority=116,
+),
+"minimal_working_then_improve": Directive(
+    key="minimal_working_then_improve",
+    title="Minimal working solver, then improvement",
+    instruction=(
+        "If the previous code failed validation, first return to a minimal exact-valid lookup-first solver shell with the new delta behind a rollback-safe guard; after that, add one bounded measurable improvement rather than a large unvalidated rewrite."
+    ),
+    rationale="This forces monotonic movement toward working code while still requiring a real improvement beyond fallback or copied baseline behavior.",
+    priority=115,
+),
+
 }
 
 
@@ -357,6 +395,130 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
     return signals
 
 
+def _safe_excerpt(text: str, *, max_chars: int = 6000) -> str:
+    raw = str(text or "")
+    if len(raw) <= max_chars:
+        return raw
+    head = max_chars // 2
+    tail = max_chars - head
+    return raw[:head].rstrip() + "\n\n...[truncated failed candidate code]...\n\n" + raw[-tail:].lstrip()
+
+
+def _entry_rejection_text(entry: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    if entry.get("error"):
+        parts.append(str(entry.get("error")))
+    for key in ("failure_kind", "rejection_reasons"):
+        value = entry.get(key)
+        if isinstance(value, list):
+            parts.extend(str(x) for x in value if x)
+        elif value:
+            parts.append(str(value))
+    if isinstance(entry.get("novelty_report"), dict):
+        report = entry["novelty_report"]
+        if report.get("identical_solver"):
+            parts.append("identical_solver")
+        if report.get("identical_submission"):
+            parts.append("identical_submission")
+        delta = report.get("per_row_delta") if isinstance(report.get("per_row_delta"), dict) else {}
+        if delta:
+            parts.append(
+                "per_row_delta "
+                f"improved={delta.get('improved_rows')} regressed={delta.get('regressed_rows')} "
+                f"net_delta_moves={delta.get('net_delta_moves')}"
+            )
+    return "; ".join(parts)
+
+
+def _last_failed_entry(history: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for entry in reversed(list(history or [])):
+        if entry.get("accepted") is True:
+            continue
+        if entry.get("error") or entry.get("failure_kind") or entry.get("rejection_reasons"):
+            return entry
+    return None
+
+
+def _read_failed_candidate_code(entry: Dict[str, Any]) -> tuple[str, Optional[Path]]:
+    path_text = str(entry.get("path") or "").strip()
+    if not path_text:
+        return "", None
+    path = Path(path_text)
+    code = _safe_read_text(path)
+    return code, path
+
+
+def _inspect_failed_candidate_code(code: str) -> Dict[str, Any]:
+    low = (code or "").lower()
+    return {
+        "fingerprint": _solver_fingerprint(code),
+        "has_solve_entrypoint": "def solve(" in low,
+        "has_script_entrypoint": "__main__" in low and "json" in low,
+        "has_official_move_guard": any(token in low for token in ("puzzle_info", "allowed_moves", "legal_moves", "official")),
+        "has_replay_guard": any(token in low for token in ("replay", "apply_move", "final_state", "central_state")),
+        "has_rollback_guard": any(token in low for token in ("rollback", "fallback", "keep previous", "best_candidate", "candidate")),
+        "has_optimizer_delta": any(token in low for token in ("window", "rewrite", "commutator", "conjugate", "policy", "portfolio", "atlas", "candidate_bank")),
+        "line_count": len((code or "").splitlines()),
+    }
+
+
+def _failure_repair_report(history: Sequence[Dict[str, Any]], baseline_code: str) -> Dict[str, Any]:
+    entry = _last_failed_entry(history)
+    if entry is None:
+        return {"available": False}
+    code, path = _read_failed_candidate_code(entry)
+    bucket = _error_bucket(entry) or str(entry.get("failure_kind") or "rejected")
+    rejection_text = _entry_rejection_text(entry)
+    features = _inspect_failed_candidate_code(code) if code else {}
+    baseline_fp = _solver_fingerprint(baseline_code)
+    candidate_fp = features.get("fingerprint")
+    return {
+        "available": True,
+        "round": entry.get("round"),
+        "path": str(path) if path is not None else None,
+        "bucket": bucket,
+        "error": rejection_text,
+        "candidate_code_available": bool(code),
+        "baseline_fingerprint": baseline_fp,
+        "candidate_fingerprint": candidate_fp,
+        "changed_from_baseline": bool(candidate_fp and candidate_fp != baseline_fp),
+        "features": features,
+        "code_excerpt": _safe_excerpt(code) if code else "",
+    }
+
+
+def _failure_repair_block(history: Sequence[Dict[str, Any]], baseline_code: str) -> str:
+    report = _failure_repair_report(history, baseline_code)
+    if not report.get("available"):
+        return "Failure-aware repair memory:\n- no failed generated candidate has been observed yet"
+    features = report.get("features") if isinstance(report.get("features"), dict) else {}
+    lines = [
+        "Failure-aware repair memory:",
+        f"- failed_round: {report.get('round')}",
+        f"- failure_bucket: {report.get('bucket')}",
+        f"- failure_error_or_rejection: {report.get('error') or 'not recorded'}",
+        f"- failed_candidate_path: {report.get('path') or 'not recorded'}",
+        f"- baseline_fingerprint: {report.get('baseline_fingerprint')}",
+        f"- failed_candidate_fingerprint: {report.get('candidate_fingerprint') or 'unavailable'}",
+        f"- changed_from_baseline: {'yes' if report.get('changed_from_baseline') else 'no'}",
+        "- failed_candidate_features: "
+        + ", ".join(f"{k}={v}" for k, v in features.items() if k != "fingerprint"),
+        "Repair policy for the next solver:",
+        "1. Treat the failed candidate as a negative training example, not as a reason to abandon improvement.",
+        "2. First repair executable correctness in this order: py_compile/import, solve(vec) contract, JSON stdout, official move legality, exact replay validation.",
+        "3. Preserve any safe optimizer delta from the failed code only behind a rollback-safe exact replay guard.",
+        "4. After the candidate passes validation, add or keep exactly one measurable bounded improvement so the solver is not just a fallback copy.",
+        "5. If the failed code changed nothing substantial, force a small fresh delta with row-wise no-regression acceptance.",
+    ]
+    excerpt = str(report.get("code_excerpt") or "").strip()
+    if excerpt:
+        lines.extend([
+            "Failed candidate code excerpt for targeted repair:",
+            excerpt,
+        ])
+    return "\n".join(lines)
+
+
 def select_directives(
     *,
     feature_snapshot: Dict[str, Any],
@@ -406,10 +568,17 @@ def select_directives(
         add("portfolio_orchestration")
         add("exact_metric_acceptance")
     if history_signals.get("validation_failures") or history_signals.get("runtime_failures"):
+        add("failure_autopsy_repair_loop")
+        add("compile_validation_ladder")
+        add("delta_preserving_repair")
+        add("minimal_working_then_improve")
         add("compile_first_then_optimize")
         add("validator_triad_recheck")
         add("exact_evaluator_shard")
     if history_signals.get("json_contract_failures"):
+        add("failure_autopsy_repair_loop")
+        add("compile_validation_ladder")
+        add("minimal_working_then_improve")
         add("validator_triad_recheck")
         add("compile_first_then_optimize")
     if history_signals.get("score_regressions"):
@@ -428,6 +597,10 @@ def select_directives(
     for key in ("multi_policy_sweep", "bidirectional_window_rewrite", "small_support_macro_mining"):
         if key in candidates:
             core_required.append(key)
+    if history_signals.get("recent_failures"):
+        for key in ("failure_autopsy_repair_loop", "compile_validation_ladder", "minimal_working_then_improve"):
+            if key in candidates:
+                core_required.append(key)
     if history_signals.get("score_regressions") or history_signals.get("plateau"):
         core_required.append("score_regression_guard")
         if "semantic_equivalence_replay" in candidates:
@@ -600,6 +773,7 @@ def synthesize_round_prompt_text(
             _feature_block(feature_snapshot),
             _history_block(score_history),
             _history_signal_block(score_history),
+            _failure_repair_block(score_history, baseline_code),
             _algorithm_search_block(round_idx),
             _directive_block(directives),
             "Acceptance intent for this round: keep exact lookup first, preserve legal official move names only, preserve deterministic replay, add an explicit anti-regression fallback, maintain candidate lineage, and materially revise the local optimization core so that the resulting solver has a real chance to beat the previous answer rather than paraphrase it.",
@@ -639,16 +813,19 @@ def synthesize_round_custom_prompts(
         "planner": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver with fingerprint {feature_snapshot.get('fingerprint')}. "
             f"Return a materially stronger plan rather than a paraphrase. Force the plan to rethink the optimization core around: {directive_summary}. "
-            f"Current best metric: {best_metric_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story."
+            f"Current best metric: {best_metric_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story. "
+            "If the previous candidate failed, start with a failure autopsy and a compile-validation repair ladder before proposing new optimizer ambition."
         ),
         "coder": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver. "
             f"Do not produce a superficial patch. Make the optimization core materially stronger around: {directive_summary}. "
-            "Preserve lookup-first semantics, legal move names only, deterministic replay, explicit rollback-safe score guarding, competition-safe bounded search, and a bounded patch-vs-fresh candidate split backed by exact replay-based acceptance."
+            "Preserve lookup-first semantics, legal move names only, deterministic replay, explicit rollback-safe score guarding, competition-safe bounded search, and a bounded patch-vs-fresh candidate split backed by exact replay-based acceptance. "
+            "After a failed round, first make the solver compile/import and pass the validator, then keep or add one bounded exact-valid improvement."
         ),
         "fixer": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: when repairing the candidate, preserve the newly requested architecture deltas ({directive_summary}) instead of collapsing back to the previous answer. "
-            "Fix only what is necessary for correctness and validation, and preserve any replay-equivalence, evaluator-shard, lineage, or score-guard logic that was added on purpose."
+            "Fix only what is necessary for correctness and validation, and preserve any replay-equivalence, evaluator-shard, lineage, or score-guard logic that was added on purpose. "
+            "Use the failed code as a negative example: identify the exact broken contract, repair it minimally, and keep the candidate moving toward a working improved solver."
         ),
     }
     for role, addition in per_role_additions.items():
@@ -710,6 +887,7 @@ def build_round_prompt_bundle(
         "custom_prompts_file": str(custom_file) if custom_file is not None else None,
         "history_summary": summarize_history(score_history),
         "history_signals": analyze_history_signals(score_history),
+        "failure_repair_report": _failure_repair_report(score_history, baseline_code),
     }
     meta_path = output_dir / f"round_{round_idx:04d}_meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
