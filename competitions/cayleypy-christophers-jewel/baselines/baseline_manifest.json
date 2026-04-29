@@ -1,0 +1,19 @@
+{
+  "competition": "cayleypy-christophers-jewel",
+  "baseline_solver": "competitions/cayleypy-christophers-jewel/baselines/jewel_baseline_solver.py",
+  "baseline_submission": "competitions/cayleypy-christophers-jewel/baselines/baseline_submission.csv",
+  "baseline_submission_sha256": "42bbceefd8ad32a7746fad6789f1a1af2f72b8d751e76065db422c332ebf764e",
+  "row_count": 1000,
+  "state_length": 48,
+  "generator_count": 12,
+  "baseline_score_total_moves": 500500,
+  "max_path_moves": 1000,
+  "mean_path_moves": 500.5,
+  "permutation_convention": "new[i] = old[perm[i]]",
+  "submission_columns": [
+    "initial_state_id",
+    "path"
+  ],
+  "move_separator": ".",
+  "validated_by_replay": true
+}

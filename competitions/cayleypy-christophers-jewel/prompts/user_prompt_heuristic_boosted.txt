@@ -1,0 +1,39 @@
+You are solving Kaggle `cayleypy-christophers-jewel` (Christopher's Jewel Solve Optimally).
+
+Competition contract:
+- Read `competitions/cayleypy-christophers-jewel/data/puzzle_info.json`, `test.csv`, and `sample_submission.csv`.
+- `puzzle_info.json` contains `central_state` and a dict of 12 legal generators.
+- Each state is a permutation/vector of length 48.
+- `test.csv` columns: `initial_state_id,initial_state`.
+- Submission columns must be exactly `initial_state_id,path`.
+- `path` is a dot-separated sequence of generator names such as `DBLBBBR.-UBBBLL.ULFR`.
+- Apply moves left-to-right with the convention `new[i] = old[perm[i]]`.
+- A row is valid only if applying the full path to the row's `initial_state` reaches `central_state`.
+- Lower score is better: minimize total number of move tokens across all rows.
+- Never output `UNSOLVED`, blank paths, unknown moves, comma-separated moves, JSON, or extra columns.
+
+Required solver interface for this repository:
+- Create a Python module exposing `solve(vec) -> (moves, sorted_array)`.
+- `moves` may be `list[str]` or a dot-separated string.
+- `sorted_array` must equal the final state after applying `moves`; for valid rows it must equal `central_state`.
+- The generated module must run without third-party dependencies unless explicitly installed.
+
+
+## Approved baseline artifacts for improvement
+
+Use these repository artifacts as the mandatory validity floor whenever you improve, patch, ensemble, score-guard, route hard rows, or generate candidate populations:
+
+- `competitions/cayleypy-christophers-jewel/baselines/jewel_baseline_solver.py`
+
+- `competitions/cayleypy-christophers-jewel/baselines/baseline_submission.csv`
+
+The baseline is known-valid by full replay validation against official `test.csv`, `puzzle_info.json`, and `central_state`. It has 1000 rows and baseline score 500500 total move tokens. Any generated improvement must preserve validity for every row and should only replace a baseline path when the new path is legal, replays to `central_state`, and is shorter.
+
+Strategy guidance:
+- Start from the official sample baseline, then try safe local improvements.
+- Build inverse maps, cancellation rules, commutation-aware simplification, meet-in-the-middle patches, bounded bidirectional search for short deltas, and per-row replacement guarded by replay validation.
+- Keep every candidate path only if it validates and is shorter than the baseline path for the same `initial_state_id`.
+- At the end, write a complete `submission.csv` with exactly 1000 rows.
+
+## Variant focus
+Add heuristic search, inverse-distance estimates, cancellation, and local rewrite improvements over the baseline.

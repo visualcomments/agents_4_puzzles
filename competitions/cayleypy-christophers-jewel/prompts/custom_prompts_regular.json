@@ -1,0 +1,29 @@
+{
+  "competition": "cayleypy-christophers-jewel",
+  "prompt_variant": "regular",
+  "objective": "minimize total dot-separated generator tokens while preserving full replay validity",
+  "required_files": [
+    "competitions/cayleypy-christophers-jewel/data/puzzle_info.json",
+    "competitions/cayleypy-christophers-jewel/data/test.csv",
+    "competitions/cayleypy-christophers-jewel/data/sample_submission.csv",
+    "competitions/cayleypy-christophers-jewel/baselines/jewel_baseline_solver.py",
+    "competitions/cayleypy-christophers-jewel/baselines/baseline_submission.csv"
+  ],
+  "state_length": 48,
+  "generator_count": 12,
+  "submission_columns": [
+    "initial_state_id",
+    "path"
+  ],
+  "move_separator": ".",
+  "permutation_convention": "new[i] = old[perm[i]]",
+  "baseline_score_total_moves": 500500,
+  "baseline_required_for_improvement": false,
+  "variant_focus": "Produce a clean, valid baseline-compatible solver first; prioritize correctness over score.",
+  "guardrails": [
+    "Never return UNSOLVED for a generated success.",
+    "Never use moves not present in puzzle_info.json.",
+    "Every candidate replacement must replay to central_state.",
+    "Keep the baseline path when the candidate is invalid or longer/equal."
+  ]
+}
