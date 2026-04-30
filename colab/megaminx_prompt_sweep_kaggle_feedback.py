@@ -43,6 +43,7 @@ PROMPT_VARIANTS: List[str] = [
     "portfolio_orchestrated",
     "hard_row_routed",
     "exact_score_population",
+    "failure_aware_self_improvement",
 ]
 
 BREAKTHROUGH_VARIANTS: List[str] = [
@@ -52,6 +53,7 @@ BREAKTHROUGH_VARIANTS: List[str] = [
     "algorithmic_population",
     "master_hybrid",
     "score_guarded",
+    "failure_aware_self_improvement",
 ]
 
 SAFE_VARIANTS: List[str] = [

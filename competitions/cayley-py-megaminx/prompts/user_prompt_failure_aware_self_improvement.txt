@@ -208,3 +208,17 @@ Preferred next algorithmic deltas:
 - candidate-bank ablation where each lane reports which rows it improves.
 
 Return only a complete Python solver module. No markdown fences.
+
+FAILURE-BUCKET REPAIR CONTRACT
+The dynamic self-improvement memory may classify the previous candidate into one of these buckets: json_contract, compile_or_import, runtime, illegal_move, replay_mismatch, no_novelty, no_per_row_improvement, score_regression, provider_or_fallback, validation, or other.
+
+Bucket-specific rules:
+- json_contract: repair only the strict JSON/code envelope before changing solver logic.
+- compile_or_import/runtime: restore py_compile/import safety and a minimal solve(vec) contract before optimizer changes.
+- illegal_move: constrain every emitted token to the official move set and rollback any lane that emits an unknown token.
+- replay_mismatch/validation: treat shorter paths as invalid unless exact replay reaches the required target state.
+- no_novelty/no_per_row_improvement: do not copy the incumbent; add exactly one fresh isolated lane that must improve at least one row and regress zero rows before it can fire.
+- score_regression: use per-row Pareto acceptance; disable lanes that create global score loss even if they improve a few rows.
+- provider_or_fallback: do not promote sample_submission, credential recovery, or provider fallback artifacts as solver improvements.
+
+Every new lane should expose trace metadata when feasible: selected_lane, baseline_len, candidate_len, valid, and rollback_reason. The submission must remain lookup-first and exact-replay guarded.

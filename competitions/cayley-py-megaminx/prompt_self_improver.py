@@ -314,20 +314,88 @@ def _recent_directives(prompt_history: Sequence[Dict[str, Any]], *, limit: int =
     return used
 
 
+def _entry_failure_text(entry: Dict[str, Any]) -> str:
+    """Return a normalized failure signal from all fields a runner may emit.
+
+    Older logic only inspected ``error``. Megaminx prompt sweeps often reject a
+    candidate without a traceback: identical solver, no per-row improvement,
+    score regression, or provider fallback. Those are still failures for prompt
+    evolution and must select repair directives.
+    """
+    parts: List[str] = []
+    for key in (
+        "error",
+        "failure_kind",
+        "rejection_reason",
+        "status",
+        "provider_status",
+        "fallback_reason",
+    ):
+        value = entry.get(key)
+        if value:
+            parts.append(str(value))
+
+    reasons = entry.get("rejection_reasons")
+    if isinstance(reasons, list):
+        parts.extend(str(item) for item in reasons if item)
+    elif reasons:
+        parts.append(str(reasons))
+
+    metric = entry.get("metric") if isinstance(entry.get("metric"), dict) else {}
+    if metric:
+        for key in ("source", "name", "status", "reason"):
+            if metric.get(key):
+                parts.append(str(metric.get(key)))
+
+    report = entry.get("novelty_report")
+    if isinstance(report, dict):
+        if report.get("identical_solver"):
+            parts.append("identical_solver")
+        if report.get("identical_submission"):
+            parts.append("identical_submission")
+        if report.get("copied_baseline"):
+            parts.append("copied_baseline")
+        delta = report.get("per_row_delta") if isinstance(report.get("per_row_delta"), dict) else {}
+        if delta:
+            improved = delta.get("improved_rows")
+            regressed = delta.get("regressed_rows")
+            net_delta = delta.get("net_delta_moves")
+            parts.append(f"per_row_delta improved={improved} regressed={regressed} net_delta_moves={net_delta}")
+            if improved in (0, "0"):
+                parts.append("zero improved rows")
+            try:
+                if net_delta is not None and float(net_delta) >= 0:
+                    parts.append("non_negative_net_delta_moves")
+            except Exception:
+                pass
+
+    return " ; ".join(parts).lower()
+
+
 def _error_bucket(entry: Dict[str, Any]) -> str | None:
-    text = str(entry.get("error") or "").lower()
+    text = _entry_failure_text(entry)
     if not text:
         return None
-    if any(token in text for token in ("json", "decode", "strict output", "fence")):
+    if any(token in text for token in ("json", "decode", "strict output", "fence", "envelope")):
         return "json_contract"
-    if any(token in text for token in ("validator", "illegal move", "unsolved", "final state", "replay")):
-        return "validation"
-    if any(token in text for token in ("syntax", "import", "traceback", "exception", "compile", "typeerror", "nameerror")):
+    if any(token in text for token in ("illegal move", "unknown move", "invalid move", "fake_move", "move-name")):
+        return "illegal_move"
+    if any(token in text for token in ("replay mismatch", "final state", "unsolved", "central_state", "target mismatch", "exact replay")):
+        return "replay_mismatch"
+    if any(token in text for token in ("syntax", "compile", "py_compile", "importerror", "modulenotfounderror", "nameerror")):
+        return "compile_or_import"
+    if any(token in text for token in ("traceback", "exception", "typeerror", "valueerror", "runtime")):
         return "runtime"
-    if any(token in text for token in ("no_novelty", "identical", "same submission", "zero improved rows", "no_per_row_improvement")):
+    if any(token in text for token in ("no_per_row_improvement", "zero improved rows", "per_row_delta improved=0")):
+        return "no_per_row_improvement"
+    if any(token in text for token in ("no_novelty", "identical_solver", "identical_submission", "copied_baseline", "same submission")):
         return "no_novelty"
-    if any(token in text for token in ("credentials required", "provider", "timeout", "offline fallback", "sample_submission fallback")):
+    if any(token in text for token in ("score regression", "regressed rows", "non_negative_net_delta_moves", "worse score", "score_delta")):
+        return "score_regression"
+    if any(token in text for token in ("credentials required", "provider", "timeout", "offline fallback", "sample_submission fallback", "fallback artifact")):
         return "provider_or_fallback"
+    if any(token in text for token in ("validator", "validation", "invalid", "failed gate")):
+        return "validation"
     return "other"
 
 
@@ -339,9 +407,13 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
         "recent_failures": 0,
         "json_contract_failures": 0,
         "validation_failures": 0,
+        "illegal_move_failures": 0,
+        "replay_mismatch_failures": 0,
+        "compile_or_import_failures": 0,
         "runtime_failures": 0,
         "other_failures": 0,
         "no_novelty_failures": 0,
+        "no_per_row_improvement_failures": 0,
         "provider_or_fallback_failures": 0,
         "validated_not_selected": 0,
         "plateau": False,
@@ -369,12 +441,22 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
             labels.append(bucket)
             if bucket == "json_contract":
                 signals["json_contract_failures"] += 1
-            elif bucket == "validation":
+            elif bucket in ("validation", "illegal_move", "replay_mismatch"):
                 signals["validation_failures"] += 1
-            elif bucket == "runtime":
+                if bucket == "illegal_move":
+                    signals["illegal_move_failures"] += 1
+                if bucket == "replay_mismatch":
+                    signals["replay_mismatch_failures"] += 1
+            elif bucket in ("compile_or_import", "runtime"):
                 signals["runtime_failures"] += 1
-            elif bucket == "no_novelty":
+                if bucket == "compile_or_import":
+                    signals["compile_or_import_failures"] += 1
+            elif bucket in ("no_novelty", "no_per_row_improvement"):
                 signals["no_novelty_failures"] += 1
+                if bucket == "no_per_row_improvement":
+                    signals["no_per_row_improvement_failures"] += 1
+            elif bucket == "score_regression":
+                signals["score_regressions"] += 1
             elif bucket == "provider_or_fallback":
                 signals["provider_or_fallback_failures"] += 1
             else:
@@ -408,25 +490,36 @@ def _entry_rejection_text(entry: Dict[str, Any]) -> str:
     parts: List[str] = []
     if entry.get("error"):
         parts.append(str(entry.get("error")))
-    for key in ("failure_kind", "rejection_reasons"):
+    for key in ("failure_kind", "rejection_reason", "rejection_reasons", "fallback_reason"):
         value = entry.get(key)
         if isinstance(value, list):
             parts.extend(str(x) for x in value if x)
         elif value:
             parts.append(str(value))
-    if isinstance(entry.get("novelty_report"), dict):
-        report = entry["novelty_report"]
-        if report.get("identical_solver"):
-            parts.append("identical_solver")
-        if report.get("identical_submission"):
-            parts.append("identical_submission")
-        delta = report.get("per_row_delta") if isinstance(report.get("per_row_delta"), dict) else {}
-        if delta:
-            parts.append(
-                "per_row_delta "
-                f"improved={delta.get('improved_rows')} regressed={delta.get('regressed_rows')} "
-                f"net_delta_moves={delta.get('net_delta_moves')}"
-            )
+    novelty = _entry_novelty_summary(entry)
+    if novelty:
+        parts.append(novelty)
+    return "; ".join(parts)
+
+
+def _entry_novelty_summary(entry: Dict[str, Any]) -> str:
+    report = entry.get("novelty_report")
+    if not isinstance(report, dict):
+        return ""
+    parts: List[str] = []
+    for key in ("identical_solver", "identical_submission", "copied_baseline"):
+        if report.get(key):
+            parts.append(key)
+    delta = report.get("per_row_delta") if isinstance(report.get("per_row_delta"), dict) else {}
+    if delta:
+        parts.append(
+            "per_row_delta "
+            f"improved={delta.get('improved_rows')} regressed={delta.get('regressed_rows')} "
+            f"net_delta_moves={delta.get('net_delta_moves')}"
+        )
+    for key in ("rows_improved", "rows_regressed", "total_saved_moves", "score_delta"):
+        if key in report:
+            parts.append(f"{key}={report.get(key)}")
     return "; ".join(parts)
 
 
@@ -434,18 +527,23 @@ def _last_failed_entry(history: Sequence[Dict[str, Any]]) -> Optional[Dict[str, 
     for entry in reversed(list(history or [])):
         if entry.get("accepted") is True:
             continue
-        if entry.get("error") or entry.get("failure_kind") or entry.get("rejection_reasons"):
+        if _error_bucket(entry) is not None:
+            return entry
+        if entry.get("metric") or entry.get("novelty_report"):
             return entry
     return None
 
 
 def _read_failed_candidate_code(entry: Dict[str, Any]) -> tuple[str, Optional[Path]]:
-    path_text = str(entry.get("path") or "").strip()
-    if not path_text:
-        return "", None
-    path = Path(path_text)
-    code = _safe_read_text(path)
-    return code, path
+    for key in ("path", "solver_path", "candidate_path", "generated_solver_path", "file"):
+        path_text = str(entry.get(key) or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        code = _safe_read_text(path)
+        if code:
+            return code, path
+    return "", None
 
 
 def _inspect_failed_candidate_code(code: str) -> Dict[str, Any]:
@@ -458,8 +556,59 @@ def _inspect_failed_candidate_code(code: str) -> Dict[str, Any]:
         "has_replay_guard": any(token in low for token in ("replay", "apply_move", "final_state", "central_state")),
         "has_rollback_guard": any(token in low for token in ("rollback", "fallback", "keep previous", "best_candidate", "candidate")),
         "has_optimizer_delta": any(token in low for token in ("window", "rewrite", "commutator", "conjugate", "policy", "portfolio", "atlas", "candidate_bank")),
+        "has_lane_trace": any(token in low for token in ("solve_with_trace", "selected_lane", "lane", "baseline_len", "candidate_len")),
         "line_count": len((code or "").splitlines()),
     }
+
+
+def _repair_strategy_for_bucket(bucket: str, changed_from_baseline: bool) -> List[str]:
+    bucket = str(bucket or "other")
+    common = [
+        "Keep a lookup-first rollback path and promote only exact-replay-valid row-level deltas.",
+        "Add trace metadata for selected_lane, baseline_len, candidate_len, validity, and rollback_reason.",
+    ]
+    if bucket == "json_contract":
+        return [
+            "Repair only the JSON/code-envelope contract first; do not rewrite solver logic while the envelope is broken.",
+            "Return exactly the expected strict output and keep imports / entrypoints minimal.",
+        ] + common
+    if bucket in ("compile_or_import", "runtime"):
+        return [
+            "Run a compile/import mental pass before adding optimizer ambition.",
+            "Preserve only safe deltas from the failed candidate; otherwise fall back to a minimal working shell plus one guarded lane.",
+        ] + common
+    if bucket == "illegal_move":
+        return [
+            "Constrain every emitted token to the official move set; never invent move names.",
+            "Add a move-legality gate before score counting and rollback any lane that emits an unknown token.",
+        ] + common
+    if bucket in ("replay_mismatch", "validation"):
+        return [
+            "Treat shorter paths as worthless unless exact replay reaches the required target state for that row.",
+            "Validate every new rewrite family on deterministic shadow rows before it can replace lookup output.",
+        ] + common
+    if bucket in ("no_novelty", "no_per_row_improvement"):
+        prefix = [
+            "Previous candidate produced no useful row-level novelty; do not copy or paraphrase the incumbent.",
+            "Create exactly one fresh isolated lane that must improve at least one row and regress zero rows before it can fire.",
+            "Prefer tiny row-local replacement tables or bounded window rewrites over broad architecture rewrites.",
+        ]
+        if not changed_from_baseline:
+            prefix.append("Suppress baseline-sized failed-code reuse: use the failure only as a no-novelty diagnosis, not as code to imitate.")
+        return prefix + common
+    if bucket == "score_regression":
+        return [
+            "A candidate may improve some rows but still lose globally; require per-row Pareto acceptance and row-level rollback.",
+            "Log top regressed rows and disable the responsible lane unless it has positive net saved moves with no invalid rows.",
+        ] + common
+    if bucket == "provider_or_fallback":
+        return [
+            "Do not promote provider fallback, sample_submission fallback, or credential-recovery artifacts as solver improvements.",
+            "Add provider preflight reporting and fail closed when no real generated solver is available.",
+        ] + common
+    return [
+        "Classify the failure before changing code; choose the smallest repair that restores executable correctness and novelty.",
+    ] + common
 
 
 def _failure_repair_report(history: Sequence[Dict[str, Any]], baseline_code: str) -> Dict[str, Any]:
@@ -472,44 +621,49 @@ def _failure_repair_report(history: Sequence[Dict[str, Any]], baseline_code: str
     features = _inspect_failed_candidate_code(code) if code else {}
     baseline_fp = _solver_fingerprint(baseline_code)
     candidate_fp = features.get("fingerprint")
+    novelty_summary = _entry_novelty_summary(entry)
+    changed_from_baseline = bool(candidate_fp and candidate_fp != baseline_fp)
+    suppress_code_excerpt = bucket in ("no_novelty", "no_per_row_improvement") and not changed_from_baseline
     return {
         "available": True,
         "round": entry.get("round"),
         "path": str(path) if path is not None else None,
         "bucket": bucket,
         "error": rejection_text,
+        "novelty_summary": novelty_summary,
         "candidate_code_available": bool(code),
         "baseline_fingerprint": baseline_fp,
         "candidate_fingerprint": candidate_fp,
-        "changed_from_baseline": bool(candidate_fp and candidate_fp != baseline_fp),
+        "changed_from_baseline": changed_from_baseline,
+        "suppress_code_excerpt": suppress_code_excerpt,
         "features": features,
-        "code_excerpt": _safe_excerpt(code) if code else "",
+        "repair_strategy": _repair_strategy_for_bucket(bucket, changed_from_baseline),
+        "code_excerpt": "" if suppress_code_excerpt else (_safe_excerpt(code) if code else ""),
     }
 
 
-def _failure_repair_block(history: Sequence[Dict[str, Any]], baseline_code: str) -> str:
-    report = _failure_repair_report(history, baseline_code)
+def _failure_repair_block_from_report(report: Dict[str, Any]) -> str:
     if not report.get("available"):
         return "Failure-aware repair memory:\n- no failed generated candidate has been observed yet"
     features = report.get("features") if isinstance(report.get("features"), dict) else {}
+    repair_strategy = report.get("repair_strategy") if isinstance(report.get("repair_strategy"), list) else []
     lines = [
         "Failure-aware repair memory:",
         f"- failed_round: {report.get('round')}",
         f"- failure_bucket: {report.get('bucket')}",
         f"- failure_error_or_rejection: {report.get('error') or 'not recorded'}",
+        f"- novelty_summary: {report.get('novelty_summary') or 'not recorded'}",
         f"- failed_candidate_path: {report.get('path') or 'not recorded'}",
         f"- baseline_fingerprint: {report.get('baseline_fingerprint')}",
         f"- failed_candidate_fingerprint: {report.get('candidate_fingerprint') or 'unavailable'}",
         f"- changed_from_baseline: {'yes' if report.get('changed_from_baseline') else 'no'}",
+        f"- suppress_code_excerpt: {'yes' if report.get('suppress_code_excerpt') else 'no'}",
         "- failed_candidate_features: "
-        + ", ".join(f"{k}={v}" for k, v in features.items() if k != "fingerprint"),
+        + (", ".join(f"{k}={v}" for k, v in features.items() if k != "fingerprint") or "unavailable"),
         "Repair policy for the next solver:",
-        "1. Treat the failed candidate as a negative training example, not as a reason to abandon improvement.",
-        "2. First repair executable correctness in this order: py_compile/import, solve(vec) contract, JSON stdout, official move legality, exact replay validation.",
-        "3. Preserve any safe optimizer delta from the failed code only behind a rollback-safe exact replay guard.",
-        "4. After the candidate passes validation, add or keep exactly one measurable bounded improvement so the solver is not just a fallback copy.",
-        "5. If the failed code changed nothing substantial, force a small fresh delta with row-wise no-regression acceptance.",
     ]
+    for idx, item in enumerate(repair_strategy, start=1):
+        lines.append(f"{idx}. {item}")
     excerpt = str(report.get("code_excerpt") or "").strip()
     if excerpt:
         lines.extend([
@@ -517,6 +671,23 @@ def _failure_repair_block(history: Sequence[Dict[str, Any]], baseline_code: str)
             excerpt,
         ])
     return "\n".join(lines)
+
+
+def _failure_repair_block(history: Sequence[Dict[str, Any]], baseline_code: str) -> str:
+    return _failure_repair_block_from_report(_failure_repair_report(history, baseline_code))
+
+
+def _compact_failure_context(report: Dict[str, Any]) -> str:
+    if not isinstance(report, dict) or not report.get("available"):
+        return "no failed generated candidate has been observed yet"
+    strategy = report.get("repair_strategy") if isinstance(report.get("repair_strategy"), list) else []
+    strategy_text = " | ".join(str(item) for item in strategy[:3])
+    return (
+        f"failure_bucket={report.get('bucket')}; "
+        f"changed_from_baseline={'yes' if report.get('changed_from_baseline') else 'no'}; "
+        f"novelty={report.get('novelty_summary') or 'not recorded'}; "
+        f"repair={strategy_text or 'classify and repair minimally'}"
+    )
 
 
 def select_directives(
@@ -575,6 +746,19 @@ def select_directives(
         add("compile_first_then_optimize")
         add("validator_triad_recheck")
         add("exact_evaluator_shard")
+    if history_signals.get("no_novelty_failures") or history_signals.get("no_per_row_improvement_failures"):
+        add("failure_autopsy_repair_loop")
+        add("minimal_working_then_improve")
+        add("patch_fresh_lane_split")
+        add("no_novelty_rejection")
+        add("per_row_delta_acceptance")
+        add("pareto_candidate_selection")
+        add("exact_metric_acceptance")
+        add("score_regression_guard")
+    if history_signals.get("provider_or_fallback_failures"):
+        add("provider_preflight_no_fallback")
+        add("failure_autopsy_repair_loop")
+        add("compile_validation_ladder")
     if history_signals.get("json_contract_failures"):
         add("failure_autopsy_repair_loop")
         add("compile_validation_ladder")
@@ -599,6 +783,10 @@ def select_directives(
             core_required.append(key)
     if history_signals.get("recent_failures"):
         for key in ("failure_autopsy_repair_loop", "compile_validation_ladder", "minimal_working_then_improve"):
+            if key in candidates:
+                core_required.append(key)
+    if history_signals.get("no_novelty_failures") or history_signals.get("no_per_row_improvement_failures"):
+        for key in ("no_novelty_rejection", "per_row_delta_acceptance", "patch_fresh_lane_split"):
             if key in candidates:
                 core_required.append(key)
     if history_signals.get("score_regressions") or history_signals.get("plateau"):
@@ -724,7 +912,7 @@ def _history_signal_block(history: Sequence[Dict[str, Any]]) -> str:
         [
             "Recent failure / plateau signals:",
             f"- recent_accepts: {signals.get('recent_accepts')}",
-            f"- recent_failures: {signals.get('recent_failures')} (json={signals.get('json_contract_failures')}, validation={signals.get('validation_failures')}, runtime={signals.get('runtime_failures')})",
+            f"- recent_failures: {signals.get('recent_failures')} (json={signals.get('json_contract_failures')}, validation={signals.get('validation_failures')}, illegal_move={signals.get('illegal_move_failures')}, replay={signals.get('replay_mismatch_failures')}, compile_import={signals.get('compile_or_import_failures')}, runtime={signals.get('runtime_failures')}, no_novelty={signals.get('no_novelty_failures')}, no_per_row={signals.get('no_per_row_improvement_failures')}, provider_fallback={signals.get('provider_or_fallback_failures')})",
             f"- validated_not_selected: {signals.get('validated_not_selected')}",
             f"- plateau_detected: {'yes' if signals.get('plateau') else 'no'}",
             f"- accepted_metric_plateau: {'yes' if signals.get('accepted_metric_plateau') else 'no'}",
@@ -796,6 +984,7 @@ def synthesize_round_custom_prompts(
     feature_snapshot: Dict[str, Any],
     selected_directives: Sequence[str],
     best_metric: Optional[Dict[str, Any]],
+    failure_repair_report: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     if not str(base_custom_prompts_text or "").strip():
         return None
@@ -809,23 +998,24 @@ def synthesize_round_custom_prompts(
     titles = [DIRECTIVE_LIBRARY[key].title for key in selected_directives if key in DIRECTIVE_LIBRARY]
     directive_summary = "; ".join(titles)
     best_metric_text = _best_metric_text(best_metric)
+    failure_context_text = _compact_failure_context(failure_repair_report or {})
     per_role_additions = {
         "planner": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver with fingerprint {feature_snapshot.get('fingerprint')}. "
             f"Return a materially stronger plan rather than a paraphrase. Force the plan to rethink the optimization core around: {directive_summary}. "
-            f"Current best metric: {best_metric_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story. "
+            f"Current best metric: {best_metric_text}. Failure context: {failure_context_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story. "
             "If the previous candidate failed, start with a failure autopsy and a compile-validation repair ladder before proposing new optimizer ambition."
         ),
         "coder": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver. "
             f"Do not produce a superficial patch. Make the optimization core materially stronger around: {directive_summary}. "
             "Preserve lookup-first semantics, legal move names only, deterministic replay, explicit rollback-safe score guarding, competition-safe bounded search, and a bounded patch-vs-fresh candidate split backed by exact replay-based acceptance. "
-            "After a failed round, first make the solver compile/import and pass the validator, then keep or add one bounded exact-valid improvement."
+            f"Failure context: {failure_context_text}. After a failed round, first make the solver compile/import and pass the validator, then keep or add one bounded exact-valid improvement."
         ),
         "fixer": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: when repairing the candidate, preserve the newly requested architecture deltas ({directive_summary}) instead of collapsing back to the previous answer. "
             "Fix only what is necessary for correctness and validation, and preserve any replay-equivalence, evaluator-shard, lineage, or score-guard logic that was added on purpose. "
-            "Use the failed code as a negative example: identify the exact broken contract, repair it minimally, and keep the candidate moving toward a working improved solver."
+            f"Failure context: {failure_context_text}. Use the failed code as a negative example: identify the exact broken contract, repair it minimally, and keep the candidate moving toward a working improved solver."
         ),
     }
     for role, addition in per_role_additions.items():
@@ -859,12 +1049,14 @@ def build_round_prompt_bundle(
         best_metric=best_metric,
         prompt_history=prompt_history,
     )
+    failure_report = _failure_repair_report(score_history, baseline_code)
     custom_prompts_text = synthesize_round_custom_prompts(
         base_custom_prompts_text=base_custom_prompts_text,
         round_idx=round_idx,
         feature_snapshot=prompt_result["feature_snapshot"],
         selected_directives=prompt_result["selected_directives"],
         best_metric=best_metric,
+        failure_repair_report=failure_report,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -887,7 +1079,7 @@ def build_round_prompt_bundle(
         "custom_prompts_file": str(custom_file) if custom_file is not None else None,
         "history_summary": summarize_history(score_history),
         "history_signals": analyze_history_signals(score_history),
-        "failure_repair_report": _failure_repair_report(score_history, baseline_code),
+        "failure_repair_report": failure_report,
     }
     meta_path = output_dir / f"round_{round_idx:04d}_meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -33,3 +33,28 @@ The next round should move monotonically through these gates:
 7. code with at least one bounded measurable improvement.
 
 This keeps the self-improvement loop from repeatedly producing ambitious but invalid rewrites, while still forcing the solver to move beyond baseline-only fallback behavior.
+
+## 2026-04-30 hardening patch
+
+This patch makes failure-aware self-improvement treat non-traceback rejections as first-class failures. In particular, `failure_kind`, `rejection_reasons`, `novelty_report.identical_solver`, `novelty_report.identical_submission`, and `novelty_report.per_row_delta` now feed the failure bucket classifier instead of being counted as generic `validated_not_selected` history.
+
+New or split buckets:
+
+- `illegal_move`
+- `replay_mismatch`
+- `compile_or_import`
+- `no_per_row_improvement`
+- `score_regression`
+- `provider_or_fallback`
+
+The no-novelty path now suppresses failed-code excerpts when the candidate is identical to the incumbent. This prevents the next LLM call from being anchored on the same baseline code and instead asks for one fresh isolated lane with row-wise no-regression acceptance.
+
+The round-specific custom planner/coder/fixer prompts now receive a compact failure context derived from the same repair report, so multi-role AgentLab runs do not lose the failure diagnosis after the user prompt is generated.
+
+Additional regression tests cover:
+
+- illegal move bucket selection;
+- no-per-row-improvement being counted as a failure, not as `validated_not_selected`;
+- no-novelty excerpt suppression;
+- `solver_path` fallback for failed candidate code;
+- custom prompt failure-context injection.
