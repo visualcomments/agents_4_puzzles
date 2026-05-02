@@ -3,9 +3,25 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
+
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+try:
+    from failure_aware_self_improvement.capability_audit import inspect_solver_code_ast_aware
+    from failure_aware_self_improvement.directive_evidence import build_evidence_checks, evidence_prompt_block
+    from failure_aware_self_improvement.row_profile_memory import load_row_profile_summary, row_profile_prompt_block
+except Exception:
+    inspect_solver_code_ast_aware = None
+    build_evidence_checks = None
+    evidence_prompt_block = None
+    load_row_profile_summary = None
+    row_profile_prompt_block = None
 
 
 def _safe_read_text(path: Optional[Path]) -> str:
@@ -285,6 +301,8 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
 
 
 def inspect_solver_code(code: str) -> Dict[str, Any]:
+    if inspect_solver_code_ast_aware is not None:
+        return inspect_solver_code_ast_aware(code)
     low = (code or "").lower()
     constants = {
         "short_table_depth": _parse_small_int(code, "_SHORT_TABLE_DEPTH"),
@@ -292,13 +310,15 @@ def inspect_solver_code(code: str) -> Dict[str, Any]:
         "optimization_passes": _parse_small_int(code, "_OPTIMIZATION_PASSES"),
     }
     return {
-        "uses_lookup_first": "optimized_lookup" in low or "lookup.get(state_key)" in low,
+        "inspection_mode": "token_fallback",
+        "uses_lookup_first": "optimized_lookup" in low or "lookup.get(state_key)" in low or "_best_lookup" in low or "_lookup_cache" in low,
         "has_exact_short_atlas": "_short_word_data" in low or "short_table_depth" in low,
         "has_local_window_dp": "_optimize_local_windows" in low or ("dp =" in low and "nxt =" in low),
         "has_multi_policy_sweep": any(token in low for token in ("policy", "policies", "candidate optimizers", "candidate bank", "best-of-fixed-candidates", "first-occurrence", "last-occurrence")),
         "has_bidirectional_rewrite": any(token in low for token in ("right-to-left", "right_first", "reverse pass", "reversed(", "left-first", "right-first")),
         "has_macro_mining": any(token in low for token in ("commutator", "conjugate", "macro atlas", "small_support", "small-support")),
         "has_candidate_bank_scoring": any(token in low for token in ("candidate optimizers", "local score proxy", "best_candidate", "candidate_metric", "score proxy")),
+        "runtime_probe": {},
         "fingerprint": _solver_fingerprint(code),
         "constants": constants,
     }
@@ -422,6 +442,15 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
         "accepted_rounds": 0,
         "accepted_metric_values": [],
         "accepted_metric_plateau": False,
+        "solver_hash_novelty_count": 0,
+        "submission_hash_novelty_count": 0,
+        "identical_solver_rejections": 0,
+        "identical_submission_rejections": 0,
+        "recent_improved_rows": 0,
+        "recent_regressed_rows": 0,
+        "recent_net_delta_moves": 0.0,
+        "multiaxis_plateau": False,
+        "stagnation_axes": [],
     }
     if not window:
         return signals
@@ -466,6 +495,49 @@ def analyze_history_signals(history: Sequence[Dict[str, Any]], *, limit: int = 6
         metric = entry.get("metric") if isinstance(entry.get("metric"), dict) else {}
         if metric.get("source") == "local_score" and metric.get("value") is not None:
             signals["score_regressions"] += 1
+
+    seen_solver_digests: set[str] = set()
+    seen_submission_digests: set[str] = set()
+    for entry in window:
+        report = entry.get("novelty_report") if isinstance(entry.get("novelty_report"), dict) else {}
+        solver_digest = report.get("candidate_solver_sha") or report.get("candidate_solver_digest") or entry.get("candidate_solver_sha")
+        submission_digest = report.get("candidate_submission_digest") or report.get("candidate_submission_sha") or entry.get("candidate_submission_digest")
+        if solver_digest:
+            seen_solver_digests.add(str(solver_digest))
+        if submission_digest:
+            seen_submission_digests.add(str(submission_digest))
+        if report.get("identical_solver"):
+            signals["identical_solver_rejections"] += 1
+        if report.get("identical_submission"):
+            signals["identical_submission_rejections"] += 1
+        delta = report.get("per_row_delta") if isinstance(report.get("per_row_delta"), dict) else {}
+        try:
+            signals["recent_improved_rows"] += int(delta.get("improved_rows") or 0)
+        except Exception:
+            pass
+        try:
+            signals["recent_regressed_rows"] += int(delta.get("regressed_rows") or 0)
+        except Exception:
+            pass
+        try:
+            signals["recent_net_delta_moves"] += float(delta.get("net_delta_moves") or 0.0)
+        except Exception:
+            pass
+    signals["solver_hash_novelty_count"] = len(seen_solver_digests)
+    signals["submission_hash_novelty_count"] = len(seen_submission_digests)
+    stagnation_axes: List[str] = []
+    if signals.get("recent_failures") and signals.get("recent_improved_rows") == 0:
+        stagnation_axes.append("zero_improved_rows")
+    if signals.get("identical_solver_rejections"):
+        stagnation_axes.append("identical_solver")
+    if signals.get("identical_submission_rejections"):
+        stagnation_axes.append("identical_submission")
+    if signals.get("provider_or_fallback_failures"):
+        stagnation_axes.append("provider_or_fallback")
+    if signals.get("recent_regressed_rows"):
+        stagnation_axes.append("row_regressions")
+    signals["stagnation_axes"] = stagnation_axes
+    signals["multiaxis_plateau"] = bool(len(stagnation_axes) >= 2 or (signals.get("recent_failures", 0) >= 2 and signals.get("recent_improved_rows") == 0))
 
     tail = window[-3:]
     if tail and all(entry.get("accepted") is False for entry in tail):
@@ -884,6 +956,8 @@ def _feature_block(feature_snapshot: Dict[str, Any]) -> str:
     lines = [
         "Current baseline diagnosis:",
         f"- fingerprint: {feature_snapshot.get('fingerprint')}",
+        f"- inspection mode: {feature_snapshot.get('inspection_mode') or 'legacy'}",
+        f"- ast parse ok: {'yes' if feature_snapshot.get('ast_parse_ok') else 'unknown/no'}",
         f"- exact lookup first: {'yes' if feature_snapshot.get('uses_lookup_first') else 'no'}",
         f"- exact short-effect atlas: {'yes' if feature_snapshot.get('has_exact_short_atlas') else 'no'}",
         f"- bounded local DP: {'yes' if feature_snapshot.get('has_local_window_dp') else 'no'}",
@@ -892,6 +966,9 @@ def _feature_block(feature_snapshot: Dict[str, Any]) -> str:
         f"- macro mining: {'yes' if feature_snapshot.get('has_macro_mining') else 'no'}",
         f"- candidate-bank scoring: {'yes' if feature_snapshot.get('has_candidate_bank_scoring') else 'no'}",
     ]
+    probe = feature_snapshot.get("runtime_probe") if isinstance(feature_snapshot.get("runtime_probe"), dict) else {}
+    if probe:
+        lines.append("- trace/evidence probes: " + ", ".join(f"{k}={v}" for k, v in sorted(probe.items())))
     rendered = ", ".join(f"{k}={v}" for k, v in constants.items() if v is not None)
     if rendered:
         lines.append(f"- extracted constants: {rendered}")
@@ -918,6 +995,10 @@ def _history_signal_block(history: Sequence[Dict[str, Any]]) -> str:
             f"- accepted_metric_plateau: {'yes' if signals.get('accepted_metric_plateau') else 'no'}",
             f"- score_regressions: {signals.get('score_regressions')}",
             f"- recent_failure_labels: {labels}",
+            f"- multi_axis_plateau: {'yes' if signals.get('multiaxis_plateau') else 'no'}",
+            f"- stagnation_axes: {', '.join(signals.get('stagnation_axes') or []) or 'none'}",
+            f"- row_delta_window: improved={signals.get('recent_improved_rows')} regressed={signals.get('recent_regressed_rows')} net_delta_moves={signals.get('recent_net_delta_moves')}",
+            f"- novelty_window: solver_hashes={signals.get('solver_hash_novelty_count')} submission_hashes={signals.get('submission_hash_novelty_count')} identical_solver={signals.get('identical_solver_rejections')} identical_submission={signals.get('identical_submission_rejections')}",
         ]
     )
 
@@ -933,6 +1014,7 @@ def _algorithm_search_block(round_idx: int) -> str:
             "- preserve lineage: baseline fingerprint, candidate type, acceptance metric, and rollback reason",
             "- optimize for a simple Pareto frontier over exact validity, score delta, runtime risk, and novelty\n- evaluate risky changes on deterministic shadow splits so prompt evolution is driven by exact dev-score rather than prose confidence",
             "- never use Kaggle leaderboard probing as an inner-loop reward; rely on bundled deterministic evaluation only",
+            "- after a no-novelty/no-per-row-improvement round, switch from broad solver refactoring to a hard-row micro-target: improve one listed hard row with exact replay and zero regressions",
         ]
     )
 
@@ -945,6 +1027,7 @@ def synthesize_round_prompt_text(
     score_history: Sequence[Dict[str, Any]],
     best_metric: Optional[Dict[str, Any]],
     prompt_history: Sequence[Dict[str, Any]],
+    row_profile_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     feature_snapshot = inspect_solver_code(baseline_code)
     directives = select_directives(
@@ -953,6 +1036,9 @@ def synthesize_round_prompt_text(
         prompt_history=prompt_history,
         score_history=score_history,
     )
+    directive_evidence_checks = build_evidence_checks([directive.key for directive in directives], feature_snapshot) if build_evidence_checks is not None else []
+    row_memory_block = row_profile_prompt_block(row_profile_summary or {}) if row_profile_prompt_block is not None else "Row-level exact-search memory:\n- unavailable"
+    evidence_block = evidence_prompt_block(directive_evidence_checks) if evidence_prompt_block is not None else "Executable evidence requirements:\n- unavailable"
     evolution_block = "\n\n".join(
         [
             f"SELF-IMPROVEMENT ROUND {round_idx}",
@@ -961,11 +1047,14 @@ def synthesize_round_prompt_text(
             _feature_block(feature_snapshot),
             _history_block(score_history),
             _history_signal_block(score_history),
+            row_memory_block,
+            evidence_block,
             _failure_repair_block(score_history, baseline_code),
             _algorithm_search_block(round_idx),
             _directive_block(directives),
-            "Acceptance intent for this round: keep exact lookup first, preserve legal official move names only, preserve deterministic replay, add an explicit anti-regression fallback, maintain candidate lineage, and materially revise the local optimization core so that the resulting solver has a real chance to beat the previous answer rather than paraphrase it.",
+            "Acceptance intent for this round: keep exact lookup first, preserve legal official move names only, preserve deterministic replay, add an explicit anti-regression fallback, maintain candidate lineage, and materially revise the local optimization core so at least one listed hard row can be shortened by exact replay with zero regressions.",
             "Planner quality bar for this round: prefer compile-safe staged patches, require exact semantic-equivalence replay for every new local rewrite family, design a tiny prompt/candidate population instead of a single chain, and build a deterministic policy bank instead of trusting one heuristic ordering.",
+            "No-op prohibition: if the candidate would produce an identical submission digest or zero improved rows, it must explicitly report no_candidate instead of wrapping/copying the incumbent optimized_submission.",
         ]
     )
     text = _insert_before_strict_contract(base_prompt_text, evolution_block)
@@ -974,6 +1063,8 @@ def synthesize_round_prompt_text(
         "feature_snapshot": feature_snapshot,
         "selected_directives": [directive.key for directive in directives],
         "selected_titles": [directive.title for directive in directives],
+        "directive_evidence_checks": directive_evidence_checks,
+        "row_profile_summary": row_profile_summary or {},
     }
 
 
@@ -985,6 +1076,8 @@ def synthesize_round_custom_prompts(
     selected_directives: Sequence[str],
     best_metric: Optional[Dict[str, Any]],
     failure_repair_report: Optional[Dict[str, Any]] = None,
+    row_profile_summary: Optional[Dict[str, Any]] = None,
+    directive_evidence_checks: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     if not str(base_custom_prompts_text or "").strip():
         return None
@@ -999,23 +1092,25 @@ def synthesize_round_custom_prompts(
     directive_summary = "; ".join(titles)
     best_metric_text = _best_metric_text(best_metric)
     failure_context_text = _compact_failure_context(failure_repair_report or {})
+    row_context_text = row_profile_prompt_block(row_profile_summary or {}) if row_profile_prompt_block is not None else "Row-level memory unavailable"
+    evidence_context_text = evidence_prompt_block(directive_evidence_checks or []) if evidence_prompt_block is not None else "Evidence checks unavailable"
     per_role_additions = {
         "planner": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver with fingerprint {feature_snapshot.get('fingerprint')}. "
             f"Return a materially stronger plan rather than a paraphrase. Force the plan to rethink the optimization core around: {directive_summary}. "
-            f"Current best metric: {best_metric_text}. Failure context: {failure_context_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story. "
+            f"Current best metric: {best_metric_text}. Failure context: {failure_context_text}. Row context: {row_context_text}. Evidence requirements: {evidence_context_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story. "
             "If the previous candidate failed, start with a failure autopsy and a compile-validation repair ladder before proposing new optimizer ambition."
         ),
         "coder": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver. "
             f"Do not produce a superficial patch. Make the optimization core materially stronger around: {directive_summary}. "
             "Preserve lookup-first semantics, legal move names only, deterministic replay, explicit rollback-safe score guarding, competition-safe bounded search, and a bounded patch-vs-fresh candidate split backed by exact replay-based acceptance. "
-            f"Failure context: {failure_context_text}. After a failed round, first make the solver compile/import and pass the validator, then keep or add one bounded exact-valid improvement."
+            f"Failure context: {failure_context_text}. Row context: {row_context_text}. Evidence requirements: {evidence_context_text}. After a failed round, first make the solver compile/import and pass the validator, then keep or add one bounded exact-valid improvement on at least one listed hard row."
         ),
         "fixer": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: when repairing the candidate, preserve the newly requested architecture deltas ({directive_summary}) instead of collapsing back to the previous answer. "
             "Fix only what is necessary for correctness and validation, and preserve any replay-equivalence, evaluator-shard, lineage, or score-guard logic that was added on purpose. "
-            f"Failure context: {failure_context_text}. Use the failed code as a negative example: identify the exact broken contract, repair it minimally, and keep the candidate moving toward a working improved solver."
+            f"Failure context: {failure_context_text}. Row context: {row_context_text}. Evidence requirements: {evidence_context_text}. Use the failed code as a negative example: identify the exact broken contract, repair it minimally, and keep the candidate moving toward a working improved solver."
         ),
     }
     for role, addition in per_role_additions.items():
@@ -1040,6 +1135,7 @@ def build_round_prompt_bundle(
     base_prompt_text = _safe_read_text(base_prompt_file)
     base_custom_prompts_text = _safe_read_text(base_custom_prompts)
     baseline_code = _safe_read_text(baseline_solver)
+    row_profile_summary = load_row_profile_summary(output_dir=output_dir, baseline_solver_path=baseline_solver) if load_row_profile_summary is not None else {"available": False}
 
     prompt_result = synthesize_round_prompt_text(
         base_prompt_text=base_prompt_text,
@@ -1048,6 +1144,7 @@ def build_round_prompt_bundle(
         score_history=score_history,
         best_metric=best_metric,
         prompt_history=prompt_history,
+        row_profile_summary=row_profile_summary,
     )
     failure_report = _failure_repair_report(score_history, baseline_code)
     custom_prompts_text = synthesize_round_custom_prompts(
@@ -1057,6 +1154,8 @@ def build_round_prompt_bundle(
         selected_directives=prompt_result["selected_directives"],
         best_metric=best_metric,
         failure_repair_report=failure_report,
+        row_profile_summary=row_profile_summary,
+        directive_evidence_checks=prompt_result.get("directive_evidence_checks"),
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1080,6 +1179,8 @@ def build_round_prompt_bundle(
         "history_summary": summarize_history(score_history),
         "history_signals": analyze_history_signals(score_history),
         "failure_repair_report": failure_report,
+        "row_profile_summary": row_profile_summary,
+        "directive_evidence_checks": prompt_result.get("directive_evidence_checks"),
     }
     meta_path = output_dir / f"round_{round_idx:04d}_meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
