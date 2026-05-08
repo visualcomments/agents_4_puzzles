@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import json
 import re
@@ -1003,6 +1001,45 @@ def _history_signal_block(history: Sequence[Dict[str, Any]]) -> str:
     )
 
 
+def _diff_first_contract_block() -> str:
+    return "\n".join(
+        [
+            "Diff-first / patch discipline:",
+            "- Prefer a small unified-diff-style patch plan over a full rewrite when the incumbent already validates.",
+            "- If returning a full Python file is required by the outer contract, still make the code changes traceable to a compact patch lane.",
+            "- Do not change only comments, names, formatting, lookup paths, or wrapper plumbing; modify the optimizer/search core or return no_candidate.",
+            "- Preserve solve(vec), JSON stdout, official move names, lookup-first safety, and deterministic replay.",
+        ]
+    )
+
+
+def _candidate_manifest_contract_block() -> str:
+    return "\n".join(
+        [
+            "Candidate manifest contract:",
+            "- The solver must expose a machine-readable CANDIDATE_MANIFEST dict or JSON-like constant.",
+            "- Required fields: lane_id, changed_mechanism, target_rows, expected_improved_rows, fallback_policy, novelty_claim.",
+            "- Valid lane_id values: lane_patch, lane_fresh, lane_params, lane_hard_row_micro, lane_portfolio.",
+            "- changed_mechanism must describe a real algorithmic/search-core change, not a wrapper or baseline replay.",
+            "- fallback_policy must guarantee per-row rollback when candidate_len >= baseline_len or exact replay fails.",
+        ]
+    )
+
+
+def _breakthrough_lane_block() -> str:
+    return "\n".join(
+        [
+            "Advanced evaluator-driven lane policy:",
+            "- lane_patch: minimal diff over the incumbent with exact replay and no-regression rollback.",
+            "- lane_fresh: fresh implementation only if it preserves the same public contract and can replay/legal-check every row.",
+            "- lane_params: deterministic parameter/policy sweep; no LLM-dependent runtime behavior.",
+            "- lane_hard_row_micro: target 1-3 listed hard rows and accept only if at least one row is shorter by exact replay.",
+            "- lane_portfolio: per-row router chooses among exact-valid strategies, never among invalid or unknown paths.",
+            "- Every lane must emit enough lineage to explain why it survived or rolled back.",
+        ]
+    )
+
+
 def _algorithm_search_block(round_idx: int) -> str:
     return "\n".join(
         [
@@ -1050,6 +1087,9 @@ def synthesize_round_prompt_text(
             row_memory_block,
             evidence_block,
             _failure_repair_block(score_history, baseline_code),
+            _diff_first_contract_block(),
+            _candidate_manifest_contract_block(),
+            _breakthrough_lane_block(),
             _algorithm_search_block(round_idx),
             _directive_block(directives),
             "Acceptance intent for this round: keep exact lookup first, preserve legal official move names only, preserve deterministic replay, add an explicit anti-regression fallback, maintain candidate lineage, and materially revise the local optimization core so at least one listed hard row can be shortened by exact replay with zero regressions.",
@@ -1099,6 +1139,7 @@ def synthesize_round_custom_prompts(
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver with fingerprint {feature_snapshot.get('fingerprint')}. "
             f"Return a materially stronger plan rather than a paraphrase. Force the plan to rethink the optimization core around: {directive_summary}. "
             f"Current best metric: {best_metric_text}. Failure context: {failure_context_text}. Row context: {row_context_text}. Evidence requirements: {evidence_context_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story. "
+            "Require a CANDIDATE_MANIFEST with lane_id/changed_mechanism/target_rows/expected_improved_rows/fallback_policy/novelty_claim, and prefer a diff-first lane plan. "
             "If the previous candidate failed, start with a failure autopsy and a compile-validation repair ladder before proposing new optimizer ambition."
         ),
         "coder": (

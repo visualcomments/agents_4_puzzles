@@ -17,9 +17,48 @@ def safe_read_json(path: Optional[Path]) -> Any:
         return None
 
 
-def _score_path(path: Any) -> int:
+def _split_path(path: Any) -> list[str]:
     text = str(path or "").strip()
-    return 0 if not text else len([p for p in text.split(".") if p])
+    if not text or text.upper() == "UNSOLVED":
+        return []
+    if "." in text:
+        return [p for p in text.split(".") if p]
+    return [p for p in text.split() if p]
+
+
+def _score_path(path: Any) -> int:
+    return len(_split_path(path))
+
+
+def _path_motifs(path: Any, *, n: int = 2, limit: int = 6) -> list[dict[str, Any]]:
+    toks = _split_path(path)
+    counts: dict[tuple[str, ...], int] = {}
+    if n <= 0:
+        return []
+    for idx in range(0, max(0, len(toks) - n + 1)):
+        key = tuple(toks[idx:idx + n])
+        counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    return [{"motif": ".".join(key), "count": count} for key, count in ranked if count > 1]
+
+
+def _rewrite_windows(path: Any, *, window: int = 8, limit: int = 4) -> list[dict[str, Any]]:
+    toks = _split_path(path)
+    out: list[dict[str, Any]] = []
+    if not toks:
+        return out
+    starts = [0, max(0, len(toks)//3 - window//2), max(0, 2*len(toks)//3 - window//2), max(0, len(toks) - window)]
+    seen: set[int] = set()
+    for start in starts:
+        if start in seen:
+            continue
+        seen.add(start)
+        chunk = toks[start:start + window]
+        if chunk:
+            out.append({"start": start, "end": start + len(chunk), "moves": ".".join(chunk)})
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _read_submission_rows(path: Optional[Path]) -> list[dict[str, Any]]:
@@ -33,6 +72,8 @@ def _read_submission_rows(path: Optional[Path]) -> list[dict[str, Any]]:
                     "row_id": row.get("initial_state_id") or idx,
                     "current_best_len": _score_path(row.get("path")),
                     "path": row.get("path") or "",
+                    "path_motifs": _path_motifs(row.get("path")),
+                    "rewrite_windows": _rewrite_windows(row.get("path")),
                 })
             return out
     except Exception:
@@ -125,6 +166,7 @@ def summarize_row_profiles(raw: Any, *, top_n: int = 12, fallback_submission_row
         saved_moves = _num(row, "saved_moves", "preopt_saved", "improvement", default=max(0.0, baseline_len - current_best_len))
         delta_moves = _num(row, "delta_moves", "net_delta_moves", "score_delta", default=0.0)
         runtime_s = _num(row, "runtime_s", "seconds", "elapsed_s", default=0.0)
+        path_value = row.get("path") or row.get("moves") or row.get("solution") or ""
         rows.append({
             "row_id": _row_id(row, idx),
             "current_best_len": int(current_best_len),
@@ -134,6 +176,9 @@ def summarize_row_profiles(raw: Any, *, top_n: int = 12, fallback_submission_row
             "runtime_s": runtime_s,
             "saved_moves_per_second": saved_moves / max(runtime_s, 1e-9),
             "regressed": bool(row.get("regressed") or delta_moves > 0),
+            "path": path_value,
+            "path_motifs": row.get("path_motifs") or _path_motifs(path_value),
+            "rewrite_windows": row.get("rewrite_windows") or _rewrite_windows(path_value),
         })
     if not rows and fallback_submission_rows:
         rows = [dict(row) for row in fallback_submission_rows]
@@ -172,6 +217,16 @@ def summarize_row_profiles(raw: Any, *, top_n: int = 12, fallback_submission_row
         "saved_moves": int(r.get("saved_moves") or 0),
         "saved_moves_per_second": round(float(r.get("saved_moves_per_second") or 0.0), 4),
     } for r in top_hard_rows]
+    hard_row_micro_pack = [{
+        "row_id": r.get("row_id"),
+        "baseline_len": int(r.get("current_best_len") or 0),
+        "target_len": max(0, int(r.get("current_best_len") or 0) - 1),
+        "path_prefix": ".".join(_split_path(r.get("path"))[:24]),
+        "path_suffix": ".".join(_split_path(r.get("path"))[-24:]),
+        "repeated_motifs": r.get("path_motifs") or [],
+        "rewrite_windows": r.get("rewrite_windows") or [],
+        "contract": "shorten this row by >=1 move under exact replay or return no_candidate for this lane",
+    } for r in top_hard_rows[:min(8, top_n)]]
     return {
         "available": True,
         "rows": len(rows),
@@ -180,6 +235,7 @@ def summarize_row_profiles(raw: Any, *, top_n: int = 12, fallback_submission_row
         "top_regressed_rows": top_regressed_rows,
         "path_length_buckets": buckets,
         "hardest_tail": hardest_tail,
+        "hard_row_micro_pack": hard_row_micro_pack,
         "hard_row_ids": hard_row_ids,
         "routing_hint": "focus generated code on hard-tail row ids first; improve >=1 listed row with zero regressions, otherwise fail explicitly",
     }
@@ -204,6 +260,7 @@ def row_profile_prompt_block(summary: Dict[str, Any]) -> str:
     regressed = summary.get("top_regressed_rows", [])[:6]
     buckets = summary.get("path_length_buckets", {})
     hard_ids = summary.get("hard_row_ids", [])[:10]
+    micro_pack = summary.get("hard_row_micro_pack", [])[:6]
     return "\n".join([
         "Row-level exact-search memory and hard-row target contract:",
         f"- source_path: {summary.get('source_path')}",
@@ -212,6 +269,7 @@ def row_profile_prompt_block(summary: Dict[str, Any]) -> str:
         f"- path_length_buckets: {buckets}",
         f"- target_hard_row_ids: {hard_ids}",
         f"- hardest_tail: {hard}",
+        f"- hard_row_micro_pack: {micro_pack}",
         f"- top_improved_rows_from_profile: {improved}",
         f"- top_regressed_rows_from_profile: {regressed}",
         "- mandatory next-candidate goal: improve at least one target_hard_row_id by exact replay, regress zero rows, and expose selected_lane/baseline_len/candidate_len/rollback_reason.",

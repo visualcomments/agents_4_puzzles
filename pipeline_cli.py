@@ -2281,8 +2281,15 @@ def _run_agent_laboratory(
     max_response_chars: int | None = None,
     g4f_request_timeout: float | None = None,
     g4f_stop_at_python_fence: Optional[bool] = None,
+    strict_codegen: bool = False,
+    attempt_archive_dir: Optional[Path] = None,
 ) -> None:
-    """Run AgentLaboratory perm_pipeline to generate/repair a solver."""
+    """Run AgentLaboratory perm_pipeline to generate/repair a solver.
+
+    strict_codegen is intentionally separate from allow_baseline: during
+    self-improvement a provider/backend failure must be treated as a failed
+    candidate, not as a valid baseline-sized improvement attempt.
+    """
 
     pipeline_script = ROOT / "AgentLaboratory" / "perm_pipeline" / "run_perm_pipeline.py"
     if not pipeline_script.exists():
@@ -2318,11 +2325,18 @@ def _run_agent_laboratory(
         )
     )
 
-    # run_perm_pipeline.py already falls back to baseline unless --strict is used.
+    # Basic self-improvement scenario: fail loud on codegen/provider failure.
+    # Without --strict, run_perm_pipeline.py writes the baseline solver and exits 0,
+    # which makes the outer loop spend many rounds scoring identical candidates.
+    if strict_codegen:
+        cmd.append("--strict")
     if no_llm:
         cmd.append("--no-llm")
     if custom_prompts:
         cmd.extend(["--custom-prompts", str(custom_prompts)])
+    if attempt_archive_dir is not None:
+        attempt_archive_dir.mkdir(parents=True, exist_ok=True)
+        cmd.extend(["--attempt-archive-dir", str(attempt_archive_dir)])
 
     env = os.environ.copy()
     effective_codegen_env = _memory_env_for_codegen(llm)
@@ -2598,6 +2612,49 @@ def _score_solver_with_submission_artifact(
     return _submission_path_score(temp_csv), temp_csv
 
 
+def _score_solver_with_optional_artifact(
+    *,
+    spec: PipelineSpec,
+    solver_path: Path,
+    puzzles_csv: Path,
+    competition_format_slug: str,
+    vector_col_override: Optional[str] = None,
+    max_rows: Optional[int] = None,
+) -> tuple[int, Optional[Path]]:
+    """Score a solver and return the submission artifact when available.
+
+    Normal production runs use the artifact-producing scorer. Some older unit tests
+    monkeypatch only _score_solver_with_submission, so this compatibility wrapper
+    falls back to that function when artifact generation is unavailable.
+    """
+    artifact_error: Optional[Exception] = None
+    try:
+        return _score_solver_with_submission_artifact(
+            spec=spec,
+            solver_path=solver_path,
+            puzzles_csv=puzzles_csv,
+            competition_format_slug=competition_format_slug,
+            vector_col_override=vector_col_override,
+            max_rows=max_rows,
+        )
+    except Exception as exc:
+        artifact_error = exc
+    try:
+        score = _score_solver_with_submission(
+            spec=spec,
+            solver_path=solver_path,
+            puzzles_csv=puzzles_csv,
+            competition_format_slug=competition_format_slug,
+            vector_col_override=vector_col_override,
+            max_rows=max_rows,
+        )
+        return score, None
+    except Exception:
+        if artifact_error is not None:
+            raise artifact_error
+        raise
+
+
 def _generate_solver_with_optional_improvement(
     *,
     spec: PipelineSpec,
@@ -2617,7 +2674,7 @@ def _generate_solver_with_optional_improvement(
     max_iters: int,
     allow_baseline: bool,
     g4f_recovery_rounds: int | None,
-    baseline_patch_max_iters: int | None,
+    baseline_patch_max_iters: int | None = None,
     g4f_recovery_max_iters: int | None,
     g4f_recovery_sleep: float | None,
     worker_no_kill_process_group: bool,
@@ -2651,10 +2708,16 @@ def _generate_solver_with_optional_improvement(
     best_solver_digest: Optional[str] = _file_sha256(baseline_origin)
     best_submission_digest: Optional[str] = None
     score_history: list[dict[str, Any]] = []
+    generation_failure_streak = 0
+    live_candidate_seen = False
+    try:
+        max_codegen_failures_before_live_candidate = int(os.getenv('SELF_IMPROVE_MAX_CODEGEN_FAILURES_BEFORE_LIVE', '3') or '3')
+    except Exception:
+        max_codegen_failures_before_live_candidate = 3
 
     if scoring_enabled:
         try:
-            best_score, best_submission_csv = _score_solver_with_submission_artifact(
+            best_score, best_submission_csv = _score_solver_with_optional_artifact(
                 spec=spec,
                 solver_path=baseline_origin,
                 puzzles_csv=puzzles_csv_for_score,
@@ -2682,6 +2745,7 @@ def _generate_solver_with_optional_improvement(
         try:
             prompt_file_for_round = prompt_file
             custom_prompts_for_round = custom_prompts
+            round_archive_dir = out_path.parent / f'{out_path.stem}_candidate_archive' / f'round_{round_idx:04d}'
             if self_improve_prompts:
                 prompt_bundle_dir = out_path.parent / f'{out_path.stem}_prompt_rounds'
                 prepared_prompt = _prepare_competition_self_improvement_prompt_bundle(
@@ -2731,7 +2795,34 @@ def _generate_solver_with_optional_improvement(
                 max_response_chars=max_response_chars,
                 g4f_request_timeout=g4f_request_timeout,
                 g4f_stop_at_python_fence=g4f_stop_at_python_fence,
+                strict_codegen=bool(keep_improving or self_improve_prompts),
+                attempt_archive_dir=round_archive_dir if keep_improving else None,
             )
+
+            candidate_solver_digest = _file_sha256(candidate_path)
+            if reject_identical_candidates and keep_improving and candidate_solver_digest and best_solver_digest and candidate_solver_digest == best_solver_digest:
+                generation_failure_streak += 1
+                rejection_reasons = ['no_novelty_identical_solver_pre_score']
+                score_history.append({
+                    'round': round_idx,
+                    'score': None,
+                    'metric': None,
+                    'accepted': False,
+                    'path': str(candidate_path),
+                    'candidate_solver_sha256': candidate_solver_digest,
+                    'baseline_solver_sha256': best_solver_digest,
+                    'rejection_reasons': rejection_reasons,
+                    'failure_kind': rejection_reasons[0],
+                    'candidate_archive_dir': str(round_archive_dir),
+                })
+                print(f'[improve] round {round_idx} rejected before scoring: candidate solver is byte-identical to current best.', flush=True)
+                if (not live_candidate_seen) and max_codegen_failures_before_live_candidate > 0 and generation_failure_streak >= max_codegen_failures_before_live_candidate:
+                    print(f'[improve] stopping early after {generation_failure_streak} consecutive codegen/no-novelty failures before any live candidate.', flush=True)
+                    break
+                continue
+
+            live_candidate_seen = True
+            generation_failure_streak = 0
             _validate_solver(candidate_path, spec.validator, smoke_vectors)
 
             round_hook_result: Optional[Dict[str, Any]] = None
@@ -2746,7 +2837,7 @@ def _generate_solver_with_optional_improvement(
             candidate_solver_digest = _file_sha256(candidate_path)
             per_row_delta_summary: Optional[dict[str, Any]] = None
             if scoring_enabled and puzzles_csv_for_score is not None:
-                candidate_score, candidate_submission_csv = _score_solver_with_submission_artifact(
+                candidate_score, candidate_submission_csv = _score_solver_with_optional_artifact(
                     spec=spec,
                     solver_path=candidate_path,
                     puzzles_csv=puzzles_csv_for_score,
@@ -2831,9 +2922,11 @@ def _generate_solver_with_optional_improvement(
                 'novelty_report': novelty_report,
                 'rejection_reasons': rejection_reasons,
                 'failure_kind': rejection_reasons[0] if rejection_reasons else (None if accepted else 'score_not_improved'),
+                'candidate_archive_dir': str(round_archive_dir),
             })
 
             if accepted:
+                generation_failure_streak = 0
                 if candidate_path != out_path:
                     shutil.copyfile(candidate_path, out_path)
                 baseline_for_round = out_path
@@ -2872,14 +2965,20 @@ def _generate_solver_with_optional_improvement(
         except Exception as e:
             if not keep_improving:
                 raise
+            generation_failure_streak += 1
             score_history.append({
                 'round': round_idx,
                 'score': None,
                 'accepted': False,
                 'path': str(candidate_path),
                 'error': f'{type(e).__name__}: {e}',
+                'failure_kind': 'generation_or_validation_exception',
+                'candidate_archive_dir': str(round_archive_dir),
             })
             print(f'[improve] round {round_idx} failed; continuing from best known solver: {type(e).__name__}: {e}', flush=True)
+            if (not live_candidate_seen) and max_codegen_failures_before_live_candidate > 0 and generation_failure_streak >= max_codegen_failures_before_live_candidate:
+                print(f'[improve] stopping early after {generation_failure_streak} consecutive failures before any live candidate.', flush=True)
+                break
             continue
 
     if best_candidate_path is None:
@@ -2904,6 +3003,8 @@ def _generate_solver_with_optional_improvement(
         'strict_guards': {
             'reject_identical_candidates': bool(reject_identical_candidates),
             'write_per_row_delta': bool(write_per_row_delta),
+            'strict_codegen': bool(keep_improving or self_improve_prompts),
+            'max_codegen_failures_before_live_candidate': int(max_codegen_failures_before_live_candidate),
         },
     }
 
@@ -3108,7 +3209,6 @@ def _normalize_explicit_baseline_path(spec: PipelineSpec, baseline_value: Option
         return None
 
     try:
-        _load_solve_fn(explicit_baseline)
         _validate_solver(explicit_baseline, spec.validator, _resolve_smoke_vectors(spec))
     except Exception as exc:
         print(

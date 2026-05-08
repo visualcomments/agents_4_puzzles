@@ -1554,6 +1554,45 @@ def _print_generation_preview(stage_label: str, model: str, text: str) -> None:
     log_status(f"[generation:{stage_label}] model={model}\n{body}")
 
 
+def _safe_slug(value: str, *, max_len: int = 96) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.+-]+", "_", str(value or "")).strip("_")
+    return (value or "item")[:max_len]
+
+
+def _attempt_archive_dir() -> Optional[Path]:
+    raw = os.getenv("AGENTLAB_ATTEMPT_ARCHIVE_DIR", "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    return path
+
+
+def _archive_text_artifact(stage_label: str, model: str, name: str, text: str) -> None:
+    archive_dir = _attempt_archive_dir()
+    if archive_dir is None:
+        return
+    path = archive_dir / f"{_safe_slug(stage_label)}__{_safe_slug(model)}__{_safe_slug(name)}.txt"
+    try:
+        path.write_text(text or "", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _archive_json_artifact(name: str, payload: Dict[str, Any]) -> None:
+    archive_dir = _attempt_archive_dir()
+    if archive_dir is None:
+        return
+    path = archive_dir / f"{_safe_slug(name)}.json"
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _is_colab_env() -> bool:
     return any(
         key in os.environ
@@ -2194,9 +2233,12 @@ def _query_code_block_with_rescue(
     stage_label: str,
 ) -> Tuple[Optional[str], Optional[str]]:
     try:
+        _archive_text_artifact(stage_label, model, 'prompt', prompt)
+        _archive_text_artifact(stage_label, model, 'system', system_prompt)
         resp = _query_model_stable(model, prompt, system_prompt)
         if isinstance(resp, str) and resp.strip():
             _print_generation_preview(stage_label, model, resp.strip())
+            _archive_text_artifact(stage_label, model, 'raw_response', resp.strip())
     except MissingLLMCredentials as e:
         return None, f"{model}: {stage_label} credentials required ({e})"
     except Exception as e:
@@ -2204,6 +2246,7 @@ def _query_code_block_with_rescue(
 
     code = _sanitize_candidate_python(extract_python(resp or ""))
     if code:
+        _archive_text_artifact(stage_label, model, 'extracted_candidate.py', code)
         return code, None
 
     rescue_prompt = code_contract.repair_code_response_prompt(
@@ -2211,9 +2254,11 @@ def _query_code_block_with_rescue(
         filename='solve_module.py',
     )
     try:
+        _archive_text_artifact(f"{stage_label}:format-rescue", model, 'prompt', rescue_prompt)
         resp = _query_model_stable(model, rescue_prompt, system_prompt, tries=1)
         if isinstance(resp, str) and resp.strip():
             _print_generation_preview(f"{stage_label}:format-rescue", model, resp.strip())
+            _archive_text_artifact(f"{stage_label}:format-rescue", model, 'raw_response', resp.strip())
     except MissingLLMCredentials as e:
         return None, f"{model}: {stage_label} format-rescue credentials required ({e})"
     except Exception as e:
@@ -2221,7 +2266,9 @@ def _query_code_block_with_rescue(
 
     code = _sanitize_candidate_python(extract_python(resp or ""))
     if code:
+        _archive_text_artifact(f"{stage_label}:format-rescue", model, 'extracted_candidate.py', code)
         return code, None
+    _archive_json_artifact('no_python_returned', {'stage': stage_label, 'model': model, 'reason': 'did not return a python file'})
     return None, f"{model}: {stage_label} did not return a python file"
 
 
@@ -2713,6 +2760,7 @@ def main() -> None:
     p.add_argument("--no-g4f-async", dest="g4f_async", action="store_false", help="Disable g4f AsyncClient and fall back to ChatCompletion.create.")
     p.add_argument("--max-response-chars", type=int, default=None, help="Optional hard cap on captured g4f response size. 0 disables clipping.")
     p.add_argument("--g4f-request-timeout", type=float, default=None, help="Optional timeout passed to g4f requests. Higher values help slower providers.")
+    p.add_argument("--attempt-archive-dir", default=None, help="Optional directory where raw prompts, generations, extracted code and strict failure reports are saved per attempt.")
     p.add_argument("--g4f-stop-at-python-fence", dest="g4f_stop_at_python_fence", action="store_true", help="Trim g4f output right after a complete ```python``` fence is received.")
     p.add_argument("--no-g4f-stop-at-python-fence", dest="g4f_stop_at_python_fence", action="store_false", help="Do not trim g4f output at the first python fence.")
     p.set_defaults(g4f_async=None, g4f_stop_at_python_fence=None)
@@ -2736,6 +2784,8 @@ def main() -> None:
         os.environ["AGENTLAB_MAX_RESPONSE_CHARS"] = str(int(args.max_response_chars))
     if args.g4f_request_timeout is not None:
         os.environ["AGENTLAB_G4F_REQUEST_TIMEOUT_S"] = str(max(0.0, float(args.g4f_request_timeout)))
+    if args.attempt_archive_dir:
+        os.environ["AGENTLAB_ATTEMPT_ARCHIVE_DIR"] = str(Path(args.attempt_archive_dir).resolve())
     if args.g4f_stop_at_python_fence is not None:
         os.environ["AGENTLAB_G4F_STOP_AT_PYTHON_FENCE"] = "1" if args.g4f_stop_at_python_fence else "0"
 
@@ -2819,6 +2869,13 @@ def main() -> None:
 
     def _fallback_to_baseline(reason: str) -> None:
         log_status(f"[!] {reason}", error=True)
+        _archive_json_artifact('strict_failure_report', {
+            'ok': False,
+            'reason': reason,
+            'strict': bool(args.strict),
+            'out_path': str(out_path),
+            'baseline_path': str(baseline_path),
+        })
         if args.strict:
             sys.exit(1)
         out_path.write_text(baseline_code, encoding="utf-8")
