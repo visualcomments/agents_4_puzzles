@@ -1026,6 +1026,20 @@ def _candidate_manifest_contract_block() -> str:
     )
 
 
+
+def _post_lookup_novelty_block() -> str:
+    return "\n".join(
+        [
+            "Post-lookup novelty requirement:",
+            "- Treat the incumbent optimized_submission lookup as a safety oracle, not as the improvement itself.",
+            "- A successful candidate must either run a guarded post-lookup optimizer or create an exact-valid row-level replacement for at least one hard row.",
+            "- Candidates that only load, copy, reformat, or return optimized_submission unchanged must return no_candidate.",
+            "- For each target row, compare candidate_len against the incumbent lookup length and roll back when candidate_len >= incumbent_len or replay fails.",
+            "- After two no-novelty/no-per-row-improvement signals, start with lane_hard_row_micro: choose one listed hard row, optimize a bounded segment, replay-check it exactly, then expose the trace and delta.",
+        ]
+    )
+
+
 def _breakthrough_lane_block() -> str:
     return "\n".join(
         [
@@ -1089,6 +1103,7 @@ def synthesize_round_prompt_text(
             _failure_repair_block(score_history, baseline_code),
             _diff_first_contract_block(),
             _candidate_manifest_contract_block(),
+            _post_lookup_novelty_block(),
             _breakthrough_lane_block(),
             _algorithm_search_block(round_idx),
             _directive_block(directives),
@@ -1140,17 +1155,20 @@ def synthesize_round_custom_prompts(
             f"Return a materially stronger plan rather than a paraphrase. Force the plan to rethink the optimization core around: {directive_summary}. "
             f"Current best metric: {best_metric_text}. Failure context: {failure_context_text}. Row context: {row_context_text}. Evidence requirements: {evidence_context_text}. Include an anti-regression story, an exact evaluator-shard story, and a small prompt-population / candidate-lineage story. "
             "Require a CANDIDATE_MANIFEST with lane_id/changed_mechanism/target_rows/expected_improved_rows/fallback_policy/novelty_claim, and prefer a diff-first lane plan. "
+            "Require a post-lookup improvement lane: baseline lookup replay is a fallback oracle, not an acceptable novelty claim. "
             "If the previous candidate failed, start with a failure autopsy and a compile-validation repair ladder before proposing new optimizer ambition."
         ),
         "coder": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: the injected baseline is the previous best validated solver. "
             f"Do not produce a superficial patch. Make the optimization core materially stronger around: {directive_summary}. "
             "Preserve lookup-first semantics, legal move names only, deterministic replay, explicit rollback-safe score guarding, competition-safe bounded search, and a bounded patch-vs-fresh candidate split backed by exact replay-based acceptance. "
+            "A solver that only returns the incumbent optimized_submission unchanged must explicitly emit no_candidate rather than masquerading as an improvement. "
             f"Failure context: {failure_context_text}. Row context: {row_context_text}. Evidence requirements: {evidence_context_text}. After a failed round, first make the solver compile/import and pass the validator, then keep or add one bounded exact-valid improvement on at least one listed hard row."
         ),
         "fixer": (
             f"SELF-IMPROVEMENT ROUND {round_idx}: when repairing the candidate, preserve the newly requested architecture deltas ({directive_summary}) instead of collapsing back to the previous answer. "
             "Fix only what is necessary for correctness and validation, and preserve any replay-equivalence, evaluator-shard, lineage, or score-guard logic that was added on purpose. "
+            "Do not repair by reverting to a pure optimized_submission wrapper unless the correct output is no_candidate. "
             f"Failure context: {failure_context_text}. Row context: {row_context_text}. Evidence requirements: {evidence_context_text}. Use the failed code as a negative example: identify the exact broken contract, repair it minimally, and keep the candidate moving toward a working improved solver."
         ),
     }

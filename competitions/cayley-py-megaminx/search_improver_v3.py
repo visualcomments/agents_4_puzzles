@@ -292,6 +292,7 @@ def improve_submission_rows(
             current_best_len=len(current_best),
             preopt_saved=len(baseline_moves) - len(current_best),
             row_rank=rank,
+            total_rows=top_k,
         )
         tier = classify_row(features, policy_cfg)
         row_profile['tier'] = tier

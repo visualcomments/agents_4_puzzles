@@ -248,22 +248,11 @@ def _discover_g4f_candidate_models(backend_api_url: Optional[str] = None) -> Lis
                     continue
                 names.append(item.strip())
 
-    preferred = {
-        "r1-1776": 0,
-        "gpt-4o": 1,
-        "gpt-4": 2,
-        "claude-3.5-sonnet": 3,
-        "command-r-plus": 4,
-        "deepseek-chat": 5,
-        "command-r": 6,
-        "aria": 7,
-        "command-a": 8,
-        "command-r7b": 9,
-        "gpt-4o-mini": 10,
-        "claude-3-haiku": 11,
-    }
-    deduped = _dedupe_keep_order(names)
-    return sorted(deduped, key=lambda s: (preferred.get(s, 9999), s.lower()))
+    # Preserve the registry/fallback order after de-duplication.  A hard-coded
+    # preference list can accidentally push conversational-but-not-code-capable
+    # models ahead of better candidates; the stricter code-envelope preflight is
+    # responsible for filtering by capability.
+    return _dedupe_keep_order(names)
 
 
 def _load_agentlab_inference_module():
@@ -312,7 +301,7 @@ def _probe_g4f_model_pipeline(
         txt = str(response or "").strip()
         if not txt:
             return False, "empty response", elapsed
-        return True, txt.replace("\n", " ")[:80], elapsed
+        return True, txt, elapsed
     except Exception as exc:
         elapsed = time.time() - started
         return False, str(exc), elapsed
@@ -484,6 +473,7 @@ def _probe_g4f_models_sync(
     system_prompt: str,
     provider_name: Optional[str] = None,
     on_result: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    full_detail: bool = False,
 ) -> List[Dict[str, Any]]:
     total = len(candidates)
     results: List[Dict[str, Any]] = []
@@ -495,10 +485,12 @@ def _probe_g4f_models_sync(
             system_prompt=system_prompt,
             provider_name=provider_name,
         )
+        preview = str(info or "").replace("\n", " ")[:120]
         result = {
             "model": model,
             "ok": ok,
-            "detail": info,
+            "detail": info if full_detail else preview,
+            "preview": preview,
             "elapsed_s": round(elapsed, 3),
         }
         results.append(result)
@@ -565,8 +557,7 @@ async def _probe_g4f_model_async(
             txt = str(response or "").strip()
         if not txt:
             return False, "empty response", elapsed
-        preview = txt.replace("\n", " ")[:80]
-        return True, preview, elapsed
+        return True, txt, elapsed
     except Exception as exc:
         elapsed = time.time() - started
         return False, str(exc), elapsed
@@ -581,6 +572,7 @@ async def _probe_g4f_models_async(
     provider_name: Optional[str] = None,
     concurrency: int = 5,
     on_result: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    full_detail: bool = False,
 ) -> List[Dict[str, Any]]:
     total = len(candidates)
     if total == 0:
@@ -597,10 +589,12 @@ async def _probe_g4f_models_async(
                 system_prompt=system_prompt,
                 provider_name=provider_name,
             )
+            preview = str(info or "").replace("\n", " ")[:120]
             result = {
                 "model": model,
                 "ok": ok,
-                "detail": info,
+                "detail": info if full_detail else preview,
+                "preview": preview,
                 "elapsed_s": round(elapsed, 3),
             }
             return index, result
@@ -668,7 +662,8 @@ def cmd_check_g4f_models(args: argparse.Namespace) -> None:
         if args.list_only:
             return
         status = "OK" if result.get("ok") else "FAIL"
-        print(f"[{idx}/{total}] {result['model']}: {status} ({result['elapsed_s']:.2f}s) {result['detail']}")
+        preview = result.get("preview") or result.get("detail") or ""
+        print(f"[{idx}/{total}] {result['model']}: {status} ({result['elapsed_s']:.2f}s) {preview}")
 
     if probe_mode == "async":
         results = asyncio.run(
@@ -680,6 +675,7 @@ def cmd_check_g4f_models(args: argparse.Namespace) -> None:
                 provider_name=provider_name or None,
                 concurrency=int(args.concurrency),
                 on_result=_on_result,
+                full_detail=bool(getattr(args, "full_detail", False) or getattr(args, "require_code_envelope", False)),
             )
         )
     else:
@@ -690,7 +686,21 @@ def cmd_check_g4f_models(args: argparse.Namespace) -> None:
             system_prompt=args.system_prompt,
             provider_name=provider_name or None,
             on_result=_on_result,
+            full_detail=bool(getattr(args, "full_detail", False) or getattr(args, "require_code_envelope", False)),
         )
+    if getattr(args, "require_code_envelope", False):
+        for result in results:
+            if not result.get("ok"):
+                result["code_envelope_ok"] = False
+                continue
+            raw_detail = str(result.get("detail") or "")
+            code = code_contract.extract_python_candidate(raw_detail, strip_comments_docstrings=False)
+            code_ok = bool(code and "def solve" in code and "sorted_array" in code)
+            result["code_envelope_ok"] = code_ok
+            if not code_ok:
+                result["ok"] = False
+                result["code_envelope_error"] = "response did not contain an extractable solve_module.py JSON/code envelope"
+
     working: List[str] = [str(r["model"]) for r in results if r.get("ok")]
     if "r1-1776" in working:
         working = ["r1-1776"] + [name for name in working if name != "r1-1776"]
@@ -4253,6 +4263,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     sp.add_argument("--probe-mode", choices=["pipeline", "async"], default="pipeline", help="How to probe candidates: pipeline-compatible worker path or AsyncClient")
     sp.add_argument("--concurrency", type=int, default=5, help="Maximum number of concurrent AsyncClient probes")
+    sp.add_argument("--require-code-envelope", action="store_true", help="Count a model as working only if the response contains an extractable solve_module.py code envelope")
+    sp.add_argument("--full-detail", action="store_true", help="Include full probe responses in JSON output instead of short previews")
     sp.set_defaults(func=cmd_check_g4f_models)
 
     sp = sub.add_parser("selftest", help="Offline smoke tests")

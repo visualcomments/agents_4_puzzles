@@ -1,0 +1,88 @@
+{
+  "baseline_pathwise_equal_all_run_submissions": true,
+  "items": [
+    {
+      "run": "20260509_143226",
+      "file": "basic_strict_self_improvement/basic_strict_self_improvement_submission.csv",
+      "sha256": "07ae02aea834898a407d878ede87c3be0de175feddb1f442e76a87c64f80c5e3",
+      "metrics": {
+        "rows": 1001,
+        "score": 414305,
+        "max_row_len": 839,
+        "mean_row_len": 413.891109
+      },
+      "pathwise_equal_baseline": true
+    },
+    {
+      "run": "20260509_143226",
+      "file": "advanced_failure_aware_self_improvement/advanced_failure_aware_self_improvement_submission.csv",
+      "sha256": "07ae02aea834898a407d878ede87c3be0de175feddb1f442e76a87c64f80c5e3",
+      "metrics": {
+        "rows": 1001,
+        "score": 414305,
+        "max_row_len": 839,
+        "mean_row_len": 413.891109
+      },
+      "pathwise_equal_baseline": true
+    },
+    {
+      "run": "20260509_143226",
+      "file": "baseline_for_submit/baseline_for_submit_submission.csv",
+      "sha256": "07ae02aea834898a407d878ede87c3be0de175feddb1f442e76a87c64f80c5e3",
+      "metrics": {
+        "rows": 1001,
+        "score": 414305,
+        "max_row_len": 839,
+        "mean_row_len": 413.891109
+      },
+      "pathwise_equal_baseline": true
+    },
+    {
+      "run": "20260509_230905",
+      "file": "basic_strict_self_improvement/basic_strict_self_improvement_submission.csv",
+      "sha256": "07ae02aea834898a407d878ede87c3be0de175feddb1f442e76a87c64f80c5e3",
+      "metrics": {
+        "rows": 1001,
+        "score": 414305,
+        "max_row_len": 839,
+        "mean_row_len": 413.891109
+      },
+      "pathwise_equal_baseline": true
+    },
+    {
+      "run": "20260509_230905",
+      "file": "advanced_failure_aware_self_improvement/advanced_failure_aware_self_improvement_submission.csv",
+      "sha256": "07ae02aea834898a407d878ede87c3be0de175feddb1f442e76a87c64f80c5e3",
+      "metrics": {
+        "rows": 1001,
+        "score": 414305,
+        "max_row_len": 839,
+        "mean_row_len": 413.891109
+      },
+      "pathwise_equal_baseline": true
+    },
+    {
+      "run": "20260509_230905",
+      "file": "baseline_for_submit/baseline_for_submit_submission.csv",
+      "sha256": "07ae02aea834898a407d878ede87c3be0de175feddb1f442e76a87c64f80c5e3",
+      "metrics": {
+        "rows": 1001,
+        "score": 414305,
+        "max_row_len": 839,
+        "mean_row_len": 413.891109
+      },
+      "pathwise_equal_baseline": true
+    },
+    {
+      "run": "repo_baseline",
+      "file": "competitions/cayley-py-megaminx/.score_megaminx_best_tested_solver.csv",
+      "sha256": "828b3ba37ee2b65ec28ea13767eef6cd976374ed20ecaeb1ad7e54ecb5fe1acc",
+      "metrics": {
+        "rows": 1001,
+        "score": 414305,
+        "max_row_len": 839,
+        "mean_row_len": 413.891109
+      }
+    }
+  ]
+}

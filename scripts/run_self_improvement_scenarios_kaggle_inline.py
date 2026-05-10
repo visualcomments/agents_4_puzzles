@@ -36,6 +36,14 @@ DEFAULT_REPO_URL = "https://github.com/visualcomments/agents_4_puzzles"
 DEFAULT_COMPETITION = "cayley-py-megaminx"
 BASIC_VARIANT = "strict_self_improvement"
 ADVANCED_VARIANT = "failure_aware_self_improvement"
+CODE_PROBE_PROMPT = (
+    "Return exactly one JSON object for solve_module.py. "
+    "The JSON keys must be version, artifact_type, language, filename, code. "
+    "Use version='code_response.v2', artifact_type='python_module', language='python', filename='solve_module.py'. "
+    "The code must define solve(vec) and script-mode JSON stdout with moves and sorted_array. "
+    "Use this minimal behavior: return [], list(vec)."
+)
+CODE_PROBE_SYSTEM_PROMPT = "You are a code-generation model. Return only the requested JSON code envelope."
 
 EXPECTED_IMPROVED_FILES = [
     "pipeline_cli.py",
@@ -103,6 +111,19 @@ def run_streaming(
     if check and rc != 0:
         raise subprocess.CalledProcessError(rc, list(cmd))
     return int(rc)
+
+
+def parse_json_payload_from_log(log_file: Path) -> Dict[str, Any]:
+    try:
+        text = log_file.read_text(encoding="utf-8", errors="replace")
+        first = text.find("{")
+        last = text.rfind("}")
+        if first >= 0 and last > first:
+            parsed = json.loads(text[first : last + 1])
+            return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+    return {}
 
 
 def clone_repo(repo_url: str, repo_dir: Path, branch: Optional[str], force_reclone: bool) -> None:
@@ -174,7 +195,16 @@ def validate_python_syntax(repo_dir: Path, log_dir: Path, *, skip_improved_file_
     return {"missing_expected_files": missing, "compiled_files": [str(p.relative_to(repo_dir)) for p in py_targets]}
 
 
-def maybe_probe_models(repo_dir: Path, models: str, log_dir: Path, skip: bool) -> Dict[str, Any]:
+def maybe_probe_models(
+    repo_dir: Path,
+    models: str,
+    log_dir: Path,
+    skip: bool,
+    *,
+    require_code: bool = True,
+    allow_non_code_models: bool = False,
+    code_probe_timeout: float = 40.0,
+) -> Dict[str, Any]:
     if skip:
         print("[preflight] model probe skipped", flush=True)
         return {"skipped": True}
@@ -193,17 +223,52 @@ def maybe_probe_models(repo_dir: Path, models: str, log_dir: Path, skip: bool) -
     ]
     rc = run_streaming(cmd, cwd=repo_dir, log_path=log_file, check=False)
     payload: Dict[str, Any] = {"skipped": False, "exit_code": rc, "log": str(log_file)}
+    parsed = parse_json_payload_from_log(log_file)
+    if parsed:
+        payload["json"] = parsed
+        (log_dir / "model_preflight.json").write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    try:
-        text = log_file.read_text(encoding="utf-8", errors="replace")
-        first = text.find("{")
-        last = text.rfind("}")
-        if first >= 0 and last > first:
-            parsed = json.loads(text[first : last + 1])
-            payload["json"] = parsed
-            (log_dir / "model_preflight.json").write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001
-        payload["parse_error"] = repr(exc)
+    if not require_code:
+        return payload
+
+    code_log_file = log_dir / "model_preflight_code.log"
+    code_cmd = [
+        sys.executable,
+        "pipeline_cli.py",
+        "check-g4f-models",
+        "--models",
+        models,
+        "--timeout",
+        str(float(code_probe_timeout)),
+        "--json",
+        "--require-code-envelope",
+        "--prompt",
+        CODE_PROBE_PROMPT,
+        "--system-prompt",
+        CODE_PROBE_SYSTEM_PROMPT,
+    ]
+    code_rc = run_streaming(code_cmd, cwd=repo_dir, log_path=code_log_file, check=False)
+    code_payload: Dict[str, Any] = {"exit_code": code_rc, "log": str(code_log_file)}
+    code_parsed = parse_json_payload_from_log(code_log_file)
+    if code_parsed:
+        code_payload["json"] = code_parsed
+        (log_dir / "model_preflight_code.json").write_text(json.dumps(code_parsed, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload["code_probe"] = code_payload
+
+    working_code_models = []
+    if isinstance(code_parsed, dict):
+        working_code_models = [str(x) for x in code_parsed.get("working_models", []) if str(x).strip()]
+    payload["code_working_models"] = working_code_models
+    if working_code_models:
+        payload["recommended_models"] = ",".join(working_code_models)
+        print(f"[preflight] code-capable models: {payload['recommended_models']}", flush=True)
+    elif not allow_non_code_models:
+        raise RuntimeError(
+            "No configured model returned an extractable solve_module.py code envelope during preflight. "
+            "Use a code-capable model, pass --skip-code-preflight for diagnostics only, or pass --allow-non-code-models to force the old behavior."
+        )
+    else:
+        print("[preflight] WARNING: no model passed the code-envelope probe; continuing because --allow-non-code-models was set", flush=True)
     return payload
 
 
@@ -525,6 +590,86 @@ def auto_submit_successful_solutions(
     return payload
 
 
+def _iter_run_log_entries(payload: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                yield item
+    elif isinstance(payload, dict):
+        yield payload
+
+
+def _safe_artifact_name(path: Path, prefix: str = "") -> str:
+    raw = f"{prefix}{path.name}" if prefix else path.name
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in raw)[:180] or "artifact"
+
+
+def _copy_artifact(src: Path, dest_root: Path, *, prefix: str = "") -> Optional[Dict[str, Any]]:
+    try:
+        if not src.exists():
+            return None
+        dest_root.mkdir(parents=True, exist_ok=True)
+        dest = dest_root / _safe_artifact_name(src, prefix=prefix)
+        if src.is_dir():
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+            kind = "dir"
+        else:
+            if dest.exists():
+                dest.unlink()
+            shutil.copy2(src, dest)
+            kind = "file"
+        return {"source": str(src), "copied_to": str(dest), "kind": kind}
+    except Exception as exc:  # noqa: BLE001
+        return {"source": str(src), "error": repr(exc)}
+
+
+def collect_scenario_artifacts(*, repo_dir: Path, out_dir: Path, run_log_payload: Any) -> List[Dict[str, Any]]:
+    """Copy prompt/candidate archives referenced from generated/ into the scenario output dir.
+
+    Previous run ZIPs only contained stdout/run_log/submission files.  The useful
+    prompt rounds, raw model responses, extracted candidates, and strict-failure
+    reports stayed in repo/generated and were lost when only run_root was zipped.
+    """
+    dest_root = out_dir / "artifacts"
+    copied: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(path_value: Any, *, prefix: str = "") -> None:
+        if not path_value:
+            return
+        path = Path(str(path_value))
+        if not path.is_absolute():
+            path = (repo_dir / path).resolve()
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        record = _copy_artifact(path, dest_root, prefix=prefix)
+        if record is not None:
+            copied.append(record)
+
+    for entry in _iter_run_log_entries(run_log_payload):
+        add(entry.get("solver"), prefix="solver_")
+        stages = entry.get("stages") if isinstance(entry.get("stages"), dict) else {}
+        generate = stages.get("generate_solver") if isinstance(stages.get("generate_solver"), dict) else {}
+        improvement = generate.get("improvement") if isinstance(generate.get("improvement"), dict) else {}
+        for key in ("best_submission_csv", "initial_baseline"):
+            add(improvement.get(key), prefix=f"{key}_")
+        for hist in improvement.get("history", []) or []:
+            if not isinstance(hist, dict):
+                continue
+            add(hist.get("candidate_archive_dir"), prefix=f"round_{hist.get('round', 'x')}_")
+            add(hist.get("path"), prefix=f"round_{hist.get('round', 'x')}_solver_")
+            path = Path(str(hist.get("path") or ""))
+            if path.name:
+                add(path.with_name(path.stem + "_prompt_evolution.json"), prefix=f"round_{hist.get('round', 'x')}_")
+                add(path.parent / f"{path.stem.rsplit('.round', 1)[0]}_prompt_rounds", prefix="prompt_rounds_")
+                add(path.parent / f"{path.stem.rsplit('.round', 1)[0]}_candidate_archive", prefix="candidate_archive_")
+    return copied
+
+
 def run_pipeline_scenario(
     *,
     repo_dir: Path,
@@ -599,6 +744,12 @@ def run_pipeline_scenario(
             result["run_log_json"] = json.loads(run_log.read_text(encoding="utf-8", errors="replace"))
         except Exception as exc:  # noqa: BLE001
             result["run_log_parse_error"] = repr(exc)
+    if "run_log_json" in result:
+        result["collected_artifacts"] = collect_scenario_artifacts(
+            repo_dir=repo_dir,
+            out_dir=out_dir,
+            run_log_payload=result.get("run_log_json"),
+        )
     return result
 
 
@@ -622,13 +773,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force-reclone", action="store_true")
     p.add_argument("--install-mode", choices=["none", "min", "llm", "local", "full"], default="llm")
     p.add_argument("--skip-model-preflight", action="store_true")
+    p.add_argument("--skip-code-preflight", action="store_true", help="Skip the stricter code-envelope model probe")
+    p.add_argument("--allow-non-code-models", action="store_true", help="Continue even when models only pass the ping probe and fail the code-envelope probe")
+    p.add_argument("--code-probe-timeout", type=float, default=40.0, help="Per-model timeout for the code-envelope preflight probe")
     p.add_argument("--skip-improved-file-check", action="store_true", help="Continue even if scenario marker files are missing")
     p.add_argument("--scenario", choices=["baseline", "basic", "advanced", "both", "all"], default="both")
     p.add_argument("--competition", default=DEFAULT_COMPETITION)
     p.add_argument("--models", default=os.environ.get("AGENTS_4_PUZZLES_MODELS", "gpt-4o-mini"))
     p.add_argument("--rounds-basic", type=int, default=3)
     p.add_argument("--rounds-advanced", type=int, default=6)
-    p.add_argument("--max-iters", type=int, default=100000)
+    p.add_argument("--max-iters", type=int, default=12, help="Fixer/codegen iterations per candidate. Keep bounded; very large values waste hours when a model does not emit Python.")
     p.add_argument("--max-rows", type=int, default=None, help="Use for smoke tests; omit for full dataset")
     p.add_argument("--extra-basic-arg", action="append", default=[], help="Extra argument for the basic run; repeat as needed")
     p.add_argument("--extra-advanced-arg", action="append", default=[], help="Extra argument for the advanced run; repeat as needed")
@@ -668,6 +822,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rounds_advanced": args.rounds_advanced,
         "max_iters": args.max_iters,
         "max_rows": args.max_rows,
+        "code_preflight_enabled": not bool(args.skip_code_preflight),
+        "allow_non_code_models": bool(args.allow_non_code_models),
         "started_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "patch_applied": False,
         "kaggle_auto_submit_enabled": bool(args.auto_submit_kaggle),
@@ -688,7 +844,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             log_dir,
             skip_improved_file_check=args.skip_improved_file_check,
         )
-        summary["model_preflight"] = maybe_probe_models(repo_dir, args.models, log_dir, args.skip_model_preflight)
+        summary["model_preflight"] = maybe_probe_models(
+            repo_dir,
+            args.models,
+            log_dir,
+            args.skip_model_preflight,
+            require_code=not bool(args.skip_code_preflight),
+            allow_non_code_models=bool(args.allow_non_code_models),
+            code_probe_timeout=float(args.code_probe_timeout),
+        )
+        recommended_models = summary.get("model_preflight", {}).get("recommended_models") if isinstance(summary.get("model_preflight"), dict) else None
+        effective_models = str(recommended_models or args.models)
+        summary["models_effective"] = effective_models
 
         results: List[Dict[str, Any]] = []
         if args.scenario in {"baseline", "all"}:
@@ -700,7 +867,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     competition=args.competition,
                     scenario_name="baseline",
                     prompt_variant=None,
-                    models=args.models,
+                    models=effective_models,
                     rounds=0,
                     max_iters=args.max_iters,
                     max_rows=args.max_rows,
@@ -718,7 +885,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     competition=args.competition,
                     scenario_name="basic_strict_self_improvement",
                     prompt_variant=BASIC_VARIANT,
-                    models=args.models,
+                    models=effective_models,
                     rounds=args.rounds_basic,
                     max_iters=args.max_iters,
                     max_rows=args.max_rows,
@@ -748,7 +915,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     competition=args.competition,
                     scenario_name="advanced_failure_aware_self_improvement",
                     prompt_variant=ADVANCED_VARIANT,
-                    models=args.models,
+                    models=effective_models,
                     rounds=args.rounds_advanced,
                     max_iters=args.max_iters,
                     max_rows=args.max_rows,
@@ -769,7 +936,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         competition=args.competition,
                         scenario_name="baseline_for_submit",
                         prompt_variant=None,
-                        models=args.models,
+                        models=effective_models,
                         rounds=0,
                         max_iters=args.max_iters,
                         max_rows=args.max_rows,
