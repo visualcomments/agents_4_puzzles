@@ -129,6 +129,7 @@ def inspect_solver_code_ast_aware(code: str) -> Dict[str, Any]:
         "has_bidirectional_rewrite": has_any_symbol(symbols, ["right_first", "bidirectional_rewrite", "reverse_pass"]) or any(token in low for token in ("right-to-left", "right_first", "reverse pass", "reversed(")),
         "has_macro_mining": has_any_symbol(symbols, ["mine_commutators", "mine_conjugates", "macro_atlas"]) or any(token in low for token in ("commutator", "conjugate", "macro atlas", "small_support", "small-support")),
         "has_candidate_bank_scoring": probe["has_row_candidate_trace"] or has_any_symbol(symbols, ["score_candidates", "candidate_bank", "best_candidate"]),
+        "has_notebook_process_baseline": any(token in low for token in ("notebook_process", "teacher/student", "q-shortlist", "short-effect atlas", "solve_with_trace")),
         "runtime_probe": probe,
         "ast_symbols": {
             "functions": symbols["functions"][:100],

@@ -22,11 +22,14 @@ _SHORT_WORD_CACHE: tuple[
 _SHORT_TABLE_DEPTH = 5
 _LOCAL_WINDOW = 12
 _OPTIMIZATION_PASSES = 2
+BASELINE_VERSION = 'notebook_process_depth5_local_dp_v1'
 
 
 def _candidate_data_dirs() -> list[Path]:
     candidates = [
         _HERE / 'data',
+        Path.cwd() / 'data',
+        Path.cwd() / 'competitions' / 'cayley-py-megaminx' / 'data',
         _HERE.parent / 'competitions' / 'cayley-py-megaminx' / 'data',
         _HERE.parent.parent / 'competitions' / 'cayley-py-megaminx' / 'data',
     ]
@@ -44,6 +47,8 @@ def _candidate_data_dirs() -> list[Path]:
 def _candidate_comp_dirs() -> list[Path]:
     candidates = [
         _HERE,
+        Path.cwd(),
+        Path.cwd() / 'competitions' / 'cayley-py-megaminx',
         _HERE.parent / 'competitions' / 'cayley-py-megaminx',
         _HERE.parent.parent / 'competitions' / 'cayley-py-megaminx',
     ]
@@ -387,21 +392,104 @@ def solution_payload(vec: Sequence[int], moves: Sequence[str], central: Sequence
 
 
 def solve(vec: Sequence[int]) -> Tuple[MoveOut, List[int]]:
+    result = solve_with_trace(vec)
+    return result['moves'], result['sorted_array']
+
+
+def solve_with_trace(vec: Sequence[int]) -> dict[str, Any]:
     central, generators, lookup = _load_bundle()
-    state = list(vec)
+    state = list(int(x) for x in vec)
     if state == central:
-        return [], list(state)
+        return {
+            'moves': [],
+            'path': '',
+            'sorted_array': list(state),
+            'solved': True,
+            'selected_lane': 'identity',
+            'candidate_len': 0,
+            'baseline_version': BASELINE_VERSION,
+        }
     state_key = state_to_key(state)
     path = lookup.get(state_key)
-    if path is not None:
-        moves = path_to_moves(path)
-        return moves, apply_moves(state, moves, generators)
-    return 'UNSOLVED', list(state)
+    if path is None:
+        return {
+            'moves': 'UNSOLVED',
+            'path': 'UNSOLVED',
+            'sorted_array': list(state),
+            'solved': False,
+            'selected_lane': 'missing_lookup',
+            'candidate_len': None,
+            'baseline_version': BASELINE_VERSION,
+        }
+    moves = path_to_moves(path)
+    final_state = apply_moves(state, moves, generators)
+    return {
+        'moves': moves,
+        'path': moves_to_path(moves),
+        'sorted_array': final_state,
+        'solved': final_state == list(central),
+        'selected_lane': 'optimized_lookup_depth5_atlas',
+        'candidate_len': len(moves),
+        'baseline_version': BASELINE_VERSION,
+    }
+
+
+def _parse_state_text(text: str) -> list[int]:
+    raw = str(text or '').strip()
+    if not raw:
+        return []
+    if raw.startswith('['):
+        obj = json.loads(raw)
+        if not isinstance(obj, list):
+            raise ValueError('JSON state must be a list')
+        return [int(x) for x in obj]
+    return [int(x) for x in raw.split(',') if x != '']
+
+
+def build_submission(out_csv: Union[str, Path], test_csv: Union[str, Path, None] = None) -> dict[str, Any]:
+    data_dir = _find_data_dir()
+    test_path = Path(test_csv) if test_csv is not None else data_dir / 'test.csv'
+    with test_path.open(newline='', encoding='utf-8') as f:
+        test_rows = list(csv.DictReader(f))
+    out_path = Path(out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, str]] = []
+    total_len = 0
+    solved_rows = 0
+    for idx, row in enumerate(test_rows):
+        state = _parse_state_text(str(row.get('initial_state') or ''))
+        trace = solve_with_trace(state)
+        moves = trace.get('moves')
+        if isinstance(moves, list):
+            path = moves_to_path(moves)
+            total_len += len(moves)
+        else:
+            path = str(moves or '')
+        solved_rows += int(bool(trace.get('solved')))
+        rows.append({'initial_state_id': str(row.get('initial_state_id') or idx), 'path': path})
+    with out_path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=['initial_state_id', 'path'])
+        writer.writeheader()
+        writer.writerows(rows)
+    return {
+        'rows': len(rows),
+        'solved_rows': solved_rows,
+        'score': total_len,
+        'out_csv': str(out_path),
+        'baseline_version': BASELINE_VERSION,
+    }
 
 
 def _main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] in {'--version', 'version'}:
+        print(json.dumps({'baseline_version': BASELINE_VERSION}))
+        return
+    if len(sys.argv) >= 3 and sys.argv[1] == '--build-submission':
+        payload = build_submission(sys.argv[2])
+        print(json.dumps(payload, ensure_ascii=False))
+        return
     if len(sys.argv) < 2:
-        print('Usage: python solve_module.py "[...]"', file=sys.stderr)
+        print('Usage: python solve_module.py "[...]" OR python solve_module.py --build-submission submission.csv', file=sys.stderr)
         raise SystemExit(2)
     vec = json.loads(sys.argv[1])
     if not isinstance(vec, list):

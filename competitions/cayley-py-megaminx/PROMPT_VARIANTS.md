@@ -24,3 +24,9 @@ Explicit `--prompt-file` and `--custom-prompts` still override the variant mecha
 - `portfolio_orchestrated`
 - `hard_row_routed`
 - `exact_score_population`
+
+## Notebook-process self-improvement
+
+```bash
+python pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_notebook_process.py --prompt-variant notebook_process_self_improvement --keep-improving --self-improve-prompts
+```

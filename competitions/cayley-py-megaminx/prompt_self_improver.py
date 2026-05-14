@@ -147,6 +147,15 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
         rationale="The solver itself should exploit a bounded candidate bank instead of committing to a single rewrite schedule.",
         priority=65,
     ),
+    "notebook_process_distillation": Directive(
+        key="notebook_process_distillation",
+        title="Notebook-process distillation",
+        instruction=(
+            "Improve code by translating the uploaded notebook workflow into dependency-free solver stages: artifact contract, exact short-effect atlas, bounded candidate lanes, exact replay verification, row-level aggregation, and no Torch/XLA/Kaggle/network runtime dependency."
+        ),
+        rationale="The Megaminx notebooks gain score through teacher/student shortlist, symmetry/candidate diversity, exact verification, and aggregation; self-improving prompts should preserve that process while emitting portable solve_module.py code.",
+        priority=114,
+    ),
     "prompt_population_search": Directive(
         key="prompt_population_search",
         title="Prompt-population search",
@@ -316,6 +325,7 @@ def inspect_solver_code(code: str) -> Dict[str, Any]:
         "has_bidirectional_rewrite": any(token in low for token in ("right-to-left", "right_first", "reverse pass", "reversed(", "left-first", "right-first")),
         "has_macro_mining": any(token in low for token in ("commutator", "conjugate", "macro atlas", "small_support", "small-support")),
         "has_candidate_bank_scoring": any(token in low for token in ("candidate optimizers", "local score proxy", "best_candidate", "candidate_metric", "score proxy")),
+        "has_notebook_process_baseline": any(token in low for token in ("notebook_process", "teacher/student", "q-shortlist", "short-effect atlas", "solve_with_trace")),
         "runtime_probe": {},
         "fingerprint": _solver_fingerprint(code),
         "constants": constants,
@@ -784,6 +794,8 @@ def select_directives(
         add("stronger_effect_atlas")
     if not feature_snapshot.get("has_candidate_bank_scoring"):
         add("candidate_bank_scoring")
+    if feature_snapshot.get("has_notebook_process_baseline"):
+        add("notebook_process_distillation")
 
     plateau = bool(history_signals.get("plateau") or history_signals.get("accepted_metric_plateau") or history_signals.get("validated_not_selected"))
     if plateau or round_idx >= 2:
@@ -963,6 +975,7 @@ def _feature_block(feature_snapshot: Dict[str, Any]) -> str:
         f"- bidirectional rewrite: {'yes' if feature_snapshot.get('has_bidirectional_rewrite') else 'no'}",
         f"- macro mining: {'yes' if feature_snapshot.get('has_macro_mining') else 'no'}",
         f"- candidate-bank scoring: {'yes' if feature_snapshot.get('has_candidate_bank_scoring') else 'no'}",
+        f"- notebook-process baseline: {'yes' if feature_snapshot.get('has_notebook_process_baseline') else 'no'}",
     ]
     probe = feature_snapshot.get("runtime_probe") if isinstance(feature_snapshot.get("runtime_probe"), dict) else {}
     if probe:

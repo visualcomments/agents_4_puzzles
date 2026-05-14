@@ -1,0 +1,27 @@
+{
+  "source_submission": "submissions/optimized_submission.pre_notebook_process.csv",
+  "sample_score": 500572,
+  "source_score": 414305,
+  "score_optimized": 414166,
+  "score_delta": 139,
+  "num_states": 1001,
+  "optimizer": {
+    "kind": "notebook-process-short-effect-atlas-local-dp",
+    "short_table_depth": 5,
+    "local_window": 12,
+    "passes": 3,
+    "candidate_lane": "depth5_exact_effect_atlas_after_existing_commuting_sweep",
+    "derived_from_notebook_process": [
+      "fixed artifact baseline",
+      "exact replay validation",
+      "shortlist/rerank distilled to exact local effect table",
+      "row-wise anti-regression acceptance"
+    ]
+  },
+  "validation": {
+    "rows": 1001,
+    "rows_improved_vs_source": 64,
+    "rows_regressed_vs_source": 0,
+    "total_saved_moves_vs_source": 139
+  }
+}

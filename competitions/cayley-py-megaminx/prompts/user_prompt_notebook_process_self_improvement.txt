@@ -1,0 +1,123 @@
+We are solving the Kaggle competition "CayleyPy Megaminx Solve Optimally":
+https://www.kaggle.com/competitions/cayley-py-megaminx
+
+I need a Python module `solve_module.py` that preserves the exact bundled-state Megaminx lookup baseline and improves it using a NOTEBOOK-PROCESS SELF-IMPROVEMENT strategy.
+
+This prompt variant is based on the code-improvement process observed in the Megaminx and CayleyPy notebooks, not on generic prompt polishing. Distill the notebook workflow into a safe standard-library solver:
+- fixed artifact inputs rather than hidden state;
+- teacher/student or shortlist/rerank ideas translated into deterministic candidate lanes;
+- symmetry / rotation diversity translated into exact-valid alternative local views when available;
+- row-wise partial results and aggregation translated into per-row winner-take-best portfolio selection;
+- exact replay validation translated into the non-negotiable acceptance gate;
+- no fallback artifact may be counted as a success.
+
+PRIMARY GOAL
+Produce a deterministic, importable, standard-library-only Megaminx solver with the best bundled-data move-count score you can achieve without breaking the public contract.
+
+ABSOLUTE REQUIREMENTS
+- Preserve `solve(vec) -> (moves, sorted_array)`.
+- Preserve script mode:
+  `python solve_module.py "[1,2,3]"`
+  -> `{"moves": [...], "sorted_array": [...]}`
+- `vec` is a Python list[int] of the puzzle state.
+- `moves` must be a list[str] using ONLY official move names from `puzzle_info.json`.
+- Do NOT invent moves, aliases, macro move names, or renamed generators.
+- `sorted_array` must be the actual final state obtained by replaying `moves` from `vec`.
+- Preserve compatibility with the existing competition folder layout and bundled assets.
+- Prefer exact bundled lookup compatibility with:
+  - `optimized_lookup.json` if present,
+  - bundled optimized submission if present,
+  - otherwise deterministic rebuilding from `sample_submission.csv`.
+
+COMPETITION FACTS YOU MUST USE
+- State vectors have length 120.
+- The solved state is `central_state` from `puzzle_info.json`.
+- Legal generators are exactly the Megaminx face turns from `puzzle_info.json` and their inverses.
+- Submission paths are dot-separated move names.
+- The local bundled score is the sum of path lengths over all bundled rows.
+- Existing `sample_submission.csv` / `optimized_submission.csv` paths are valid words; exact word rewriting over valid paths is a safe optimization target.
+
+NOTEBOOK-PROCESS SELF-IMPROVEMENT STRATEGY
+The notebooks improve code through a repeated empirical loop: define artifacts, generate/train or load a scorer, search with bounded beams, save partial per-row results, aggregate the best valid path per row, and validate. Convert that into a prompt-guided solver design:
+
+1. Artifact contract lane
+- discover `puzzle_info.json`, `test.csv`, `optimized_lookup.json`, and available submissions deterministically;
+- never depend on Kaggle credentials, network, GPUs, TPUs, torch, cayleypy, or notebook-only globals at runtime;
+- expose a clear `baseline_version` / lineage field if trace helpers are added.
+
+2. Distilled teacher/student lane
+- do not train neural networks inside `solve_module.py`;
+- instead, translate the teacher/student idea into a small deterministic candidate bank: conservative lookup replay, exact short-effect atlas, bounded-window dynamic programming, and multi-policy commuting normalization;
+- use exact local effect tables as the teacher and cheap shortlist policies as the student.
+
+3. Symmetry/diversity lane
+- if symmetry data is not bundled, do not require it;
+- when a symmetry or alternative view is available from official permutations, use it only as another exact-valid local candidate lane;
+- aggregate by exact replay and shortest path, not by heuristic confidence.
+
+4. Beam-search-to-local-rewrite lane
+- whole-state Megaminx beam search from scratch is forbidden for this solver;
+- distill beam-search improvements into fixed-depth short-word atlases and bounded local window replacement;
+- all radii, windows, passes, and candidate counts must be fixed constants.
+
+5. Partial-save / aggregation lane
+- mimic notebook partial JSON and final aggregation through deterministic row-level lineage helpers;
+- per row, keep baseline path first, try bounded candidates, replay exactly, and select the shortest exact-valid path;
+- a failed candidate must roll back row-locally, not break the full submission.
+
+6. Exact validation lane
+- every non-trivial rewrite must preserve the official permutation effect;
+- returned paths must replay from the given state to `central_state`;
+- if a candidate is shorter but invalid, discard it;
+- if a candidate is not strictly shorter, keep the incumbent.
+
+ALLOWED OPTIMIZATION
+Allowed:
+- exact fixed-depth short-effect atlases;
+- official commutation graph from permutations;
+- repeated-face order-5 reductions;
+- bounded local dynamic programming over windows;
+- deterministic candidate bank / portfolio selection;
+- row-wise exact replay acceptance;
+- trace and lineage metadata helpers.
+
+Forbidden:
+- training models inside `solve_module.py`;
+- requiring PyTorch, torch_xla, cayleypy, kagglehub, internet, Kaggle API, GPU, TPU, or notebooks at runtime;
+- BFS / DFS / A* / IDA* / beam search whose depth grows with the instance;
+- generic solving from scratch per row;
+- non-deterministic random search;
+- returning `UNSOLVED` for bundled rows that the baseline solves;
+- presenting copied sample/fallback/provider-recovery artifacts as success;
+- Kaggle leaderboard probing as an inner-loop reward.
+
+IMPLEMENTATION REQUIREMENTS
+- Keep the module self-contained and standard-library only.
+- Keep exact lookup first and bounded optimizer second.
+- Use official permutations only.
+- Preserve import safety and validator compatibility.
+- Keep runtime practical on the full bundled set.
+- Prefer small helpers with clear invariants: load bundle, parse path, apply moves, validate, exact local atlas, optimize candidate, solve, optional build_submission.
+- Make the code easy for future self-improving rounds to patch, compare, ablate, and score.
+
+SUCCESS GATE
+A generated answer is successful only if it is an importable solver and can produce a valid non-empty submission CSV with no `UNSOLVED` or blank rows for bundled rows. The local acceptance metric is exact bundled score, then zero regressions, then runtime safety, then novelty.
+
+STRICT OUTPUT REQUIREMENTS:
+- Return exactly one JSON object and no prose outside JSON.
+- The JSON object must contain exactly these keys: version, artifact_type, language, filename, code.
+- Set version='code_response.v2', artifact_type='python_module', language='python', filename='solve_module.py'.
+- Put the entire Python file only inside the code string.
+- Do not wrap the code in markdown fences inside the JSON string.
+- Do not include explanations, bullet points, extra keys, or commentary before or after the JSON object.
+- Inside the code, omit comments and docstrings unless they are absolutely necessary.
+- Preserve the public solve(vec) entrypoint and the script-mode JSON stdout contract with keys moves and sorted_array.
+JSON EXAMPLE:
+{
+  "version": "code_response.v2",
+  "artifact_type": "python_module",
+  "language": "python",
+  "filename": "solve_module.py",
+  "code": "from __future__ import annotations\n\nimport json\n\n\ndef solve(vec):\n    return [], list(vec)\n"
+}
+- The produced code must be self-contained and runnable.

@@ -16,6 +16,7 @@ Baseline-backed variants inject `competitions/cayley-py-megaminx/megaminx_best_t
 - `portfolio_orchestrated` — exact row-level portfolio fusion bundle focused on multi-lane orchestration and winner-take-best asset promotion.
 - `hard_row_routed` — bundle that pushes compute toward the hardest rows first and emphasizes saved moves per CPU-hour.
 - `exact_score_population` — bundle that turns prompt evolution into exact-score population search on deterministic dev/holdout shards.
+- `notebook_process_self_improvement` — notebook-process distillation bundle: converts the TPU/teacher-student beam-search workflow from the Kaggle notebooks into standard-library, exact-effect, submission-guarded code-improvement loops.
 
 Examples:
 
@@ -84,6 +85,15 @@ python pipeline_cli.py run \
   --competition cayley-py-megaminx \
   --output competitions/cayley-py-megaminx/submissions/submission.csv \
   --prompt-variant algorithmic_population \
+  --keep-improving \
+  --self-improve-prompts
+```
+
+```bash
+python pipeline_cli.py generate-solver \
+  --competition cayley-py-megaminx \
+  --out generated/solve_megaminx_notebook_process.py \
+  --prompt-variant notebook_process_self_improvement \
   --keep-improving \
   --self-improve-prompts
 ```
