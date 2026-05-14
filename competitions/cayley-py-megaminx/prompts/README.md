@@ -17,6 +17,7 @@ Baseline-backed variants inject `competitions/cayley-py-megaminx/megaminx_best_t
 - `hard_row_routed` — bundle that pushes compute toward the hardest rows first and emphasizes saved moves per CPU-hour.
 - `exact_score_population` — bundle that turns prompt evolution into exact-score population search on deterministic dev/holdout shards.
 - `notebook_process_self_improvement` — notebook-process distillation bundle: converts the TPU/teacher-student beam-search workflow from the Kaggle notebooks into standard-library, exact-effect, submission-guarded code-improvement loops.
+- `chat_breakthrough_self_improvement` — chat-export breakthrough bundle: turns TPU/NISS/rescue/history-beam CSV references from the chat into an optional exact-replay artifact lane with row-wise shorter-only min-merge.
 
 Examples:
 
@@ -94,6 +95,15 @@ python pipeline_cli.py generate-solver \
   --competition cayley-py-megaminx \
   --out generated/solve_megaminx_notebook_process.py \
   --prompt-variant notebook_process_self_improvement \
+  --keep-improving \
+  --self-improve-prompts
+```
+
+```bash
+python pipeline_cli.py generate-solver \
+  --competition cayley-py-megaminx \
+  --out generated/solve_megaminx_chat_breakthrough.py \
+  --prompt-variant chat_breakthrough_self_improvement \
   --keep-improving \
   --self-improve-prompts
 ```

@@ -1,0 +1,39 @@
+{
+  "module": "solve_module.py",
+  "baseline_version": "chat_breakthrough_artifact_lane_v1",
+  "chat_export": "/mnt/data/ChatExport_2026-05-14.zip",
+  "chat_signals_distilled": [
+    "TPU teacher/student Q-shortlist and symmetry ensemble outputs as optional external CSV artifacts",
+    "NISS plus rescue-top-row passes followed by row-wise min-merge",
+    "non-backtracking/history-beam outputs as candidate artifact lanes",
+    "superflip/coset/PDB/twsearch notes preserved as future heuristic prompt guidance",
+    "Pareto/consensus selection across multiple estimates, guarded by exact replay"
+  ],
+  "local_no_artifact_result": {
+    "rows": 1001,
+    "solved_rows": 1001,
+    "score": 414166,
+    "invalid_rows": 0,
+    "illegal_rows": 0,
+    "blank_rows": 0
+  },
+  "artifact_lane": {
+    "enabled": true,
+    "roots": [
+      "/mnt/data/work_repo/agents_4_puzzles-main/competitions/cayley-py-megaminx/data/chat_breakthrough_artifacts"
+    ],
+    "candidate_files": [],
+    "rows_seen": 0,
+    "rows_applicable": 0,
+    "accepted_updates": 0,
+    "moves_saved_vs_incumbent": 0,
+    "rejected_invalid": 0,
+    "rejected_illegal": 0,
+    "rejected_not_shorter": 0,
+    "errors": []
+  },
+  "notes": [
+    "No strong external TPU/NISS CSV was included in the chat export upload; only references and reported scores were present.",
+    "The local fallback score therefore remains 414166, while the module now safely consumes future artifact CSVs through exact replay and shorter-only acceptance."
+  ]
+}

@@ -1,0 +1,14 @@
+You are improving the CayleyPy Megaminx solver for the Kaggle competition. Start from the known-good notebook_process baseline and from the extra evidence mined from ChatExport_2026-05-14.
+
+Goal: create an exact-valid, standard-library `solve_module.py` that can exploit breakthrough chat scenarios without becoming dependent on TPU, GPU, Kaggle credentials, notebooks, network access, torch, torch_xla, cayleypy, or private files.
+
+Distill the chat evidence into a solver process, not into unchecked claims:
+
+1. Treat TPU teacher/student beam, symmetry ensembles, NISS, rescue top-rows, non-backtracking/history beams, and colleague CSVs as optional external artifacts. The portable module must be able to discover candidate CSV submissions and min-merge them row-wise only after exact replay validation.
+2. Preserve the bundled lookup-first baseline. If no better artifact exists, the score must remain exactly the previous valid bundled baseline and all rows must solve.
+3. Never trust a CSV by filename, leaderboard score, or provenance. Parse `initial_state_id` + `path`, reject illegal move names, replay every shorter candidate from the official test state to the central state, and accept only if it strictly shortens the incumbent row.
+4. Keep chat ideas about superflip centrality, cosets, PDBs, twsearch layers, and Pareto/frontier scoring as prompt-level guidance for future experiments; do not insert unverifiable shortcuts into `solve(vec)`.
+5. For generated code, expose traceability: `baseline_version`, selected lane, candidate length, and artifact-merge stats.
+6. For self-improvement rounds, optimize the artifact interface and exact acceptance process first: better CSV discovery, validation speed, per-row lineage, deterministic stats, and no regression.
+
+Expected output: a complete `solve_module.py` using only Python standard library, preserving `solve(vec)->(moves, sorted_array)` and script-mode JSON. The solver must build a valid `submission.csv` locally even when no chat artifacts are available.

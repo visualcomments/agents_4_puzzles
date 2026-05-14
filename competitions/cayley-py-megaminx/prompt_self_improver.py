@@ -156,6 +156,15 @@ DIRECTIVE_LIBRARY: Dict[str, Directive] = {
         rationale="The Megaminx notebooks gain score through teacher/student shortlist, symmetry/candidate diversity, exact verification, and aggregation; self-improving prompts should preserve that process while emitting portable solve_module.py code.",
         priority=114,
     ),
+    "chat_breakthrough_artifact_lane": Directive(
+        key="chat_breakthrough_artifact_lane",
+        title="Chat-breakthrough artifact lane",
+        instruction=(
+            "If chat-derived Megaminx evidence mentions TPU beams, NISS, rescue rows, history beams, or merged CSVs, convert it into an optional external-artifact lane: discover CSVs, replay every shorter candidate exactly, accept only valid row-wise improvements, and keep the bundled lookup as fallback."
+        ),
+        rationale="The chat export's most plausible breakthrough path depends on external generated submissions; a safe module should expose a validation/min-merge interface without trusting private artifacts or adding TPU/runtime ML dependencies.",
+        priority=118,
+    ),
     "prompt_population_search": Directive(
         key="prompt_population_search",
         title="Prompt-population search",
@@ -326,6 +335,7 @@ def inspect_solver_code(code: str) -> Dict[str, Any]:
         "has_macro_mining": any(token in low for token in ("commutator", "conjugate", "macro atlas", "small_support", "small-support")),
         "has_candidate_bank_scoring": any(token in low for token in ("candidate optimizers", "local score proxy", "best_candidate", "candidate_metric", "score proxy")),
         "has_notebook_process_baseline": any(token in low for token in ("notebook_process", "teacher/student", "q-shortlist", "short-effect atlas", "solve_with_trace")),
+        "has_chat_breakthrough_artifact_lane": any(token in low for token in ("chat_breakthrough", "MEGAMINX_CHAT_ARTIFACTS", "external_artifact", "artifact lane", "niss", "qshort")),
         "runtime_probe": {},
         "fingerprint": _solver_fingerprint(code),
         "constants": constants,
@@ -796,6 +806,8 @@ def select_directives(
         add("candidate_bank_scoring")
     if feature_snapshot.get("has_notebook_process_baseline"):
         add("notebook_process_distillation")
+    if feature_snapshot.get("has_notebook_process_baseline") and not feature_snapshot.get("has_chat_breakthrough_artifact_lane"):
+        add("chat_breakthrough_artifact_lane")
 
     plateau = bool(history_signals.get("plateau") or history_signals.get("accepted_metric_plateau") or history_signals.get("validated_not_selected"))
     if plateau or round_idx >= 2:

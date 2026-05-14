@@ -30,3 +30,12 @@ Explicit `--prompt-file` and `--custom-prompts` still override the variant mecha
 ```bash
 python pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_notebook_process.py --prompt-variant notebook_process_self_improvement --keep-improving --self-improve-prompts
 ```
+
+
+## Chat-breakthrough self-improvement
+
+This variant uses the chat export as a source of breakthrough scenarios, but converts them into a safe artifact contract instead of trusting private or TPU-only outputs. It preserves the local notebook-process baseline and adds exact replay, legal-move checks, row-wise shorter-only acceptance, and traceable min-merge of optional CSV artifacts.
+
+```bash
+python pipeline_cli.py generate-solver --competition cayley-py-megaminx --out generated/solve_megaminx_chat_breakthrough.py --prompt-variant chat_breakthrough_self_improvement --keep-improving --self-improve-prompts
+```

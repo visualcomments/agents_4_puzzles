@@ -1,0 +1,18 @@
+{
+  "baseline_version": "chat_breakthrough_artifact_lane_v1",
+  "chat_breakthrough_artifacts": {
+    "enabled": true,
+    "roots": [
+      "/mnt/data/rebuild_chat/agents_4_puzzles-main/competitions/cayley-py-megaminx/data/chat_breakthrough_artifacts"
+    ],
+    "candidate_files": [],
+    "rows_seen": 0,
+    "rows_applicable": 0,
+    "accepted_updates": 0,
+    "moves_saved_vs_incumbent": 0,
+    "rejected_invalid": 0,
+    "rejected_illegal": 0,
+    "rejected_not_shorter": 0,
+    "errors": []
+  }
+}
